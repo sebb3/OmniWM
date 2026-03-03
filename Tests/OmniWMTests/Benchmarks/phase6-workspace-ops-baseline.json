@@ -1,0 +1,7 @@
+{
+  "date": "2026-03-03",
+  "commit": "phase6-bootstrap",
+  "workspace_ops_planner_p95_sec": 0.000005000,
+  "workspace_ops_full_path_p95_sec": 0.000120000,
+  "notes": "Initial phase 6 baseline; update with measured values after implementation stabilizes."
+}

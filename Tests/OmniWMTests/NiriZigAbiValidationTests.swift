@@ -139,6 +139,46 @@ private func runMutationPlan(
     return (rc: rc, result: result)
 }
 
+private func runWorkspacePlan(
+    sourceColumns: [OmniNiriStateColumnInput],
+    sourceWindows: [OmniNiriStateWindowInput],
+    targetColumns: [OmniNiriStateColumnInput],
+    targetWindows: [OmniNiriStateWindowInput],
+    request: OmniNiriWorkspaceRequest
+) -> (rc: Int32, result: OmniNiriWorkspaceResult) {
+    var result = OmniNiriWorkspaceResult()
+    result.applied = 0
+    result.edit_count = 0
+
+    let rc: Int32 = sourceColumns.withUnsafeBufferPointer { sourceColumnBuf in
+        sourceWindows.withUnsafeBufferPointer { sourceWindowBuf in
+            targetColumns.withUnsafeBufferPointer { targetColumnBuf in
+                targetWindows.withUnsafeBufferPointer { targetWindowBuf in
+                    var mutableRequest = request
+                    return withUnsafePointer(to: &mutableRequest) { requestPtr in
+                        withUnsafeMutablePointer(to: &result) { resultPtr in
+                            omni_niri_workspace_plan(
+                                sourceColumnBuf.baseAddress,
+                                sourceColumnBuf.count,
+                                sourceWindowBuf.baseAddress,
+                                sourceWindowBuf.count,
+                                targetColumnBuf.baseAddress,
+                                targetColumnBuf.count,
+                                targetWindowBuf.baseAddress,
+                                targetWindowBuf.count,
+                                requestPtr,
+                                resultPtr
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return (rc: rc, result: result)
+}
+
 private func makeMutationRequest(
     op: UInt8,
     sourceWindowIndex: Int64 = -1,
@@ -160,6 +200,20 @@ private func makeMutationRequest(
         selected_node_kind: selectedNodeKind,
         selected_node_index: selectedNodeIndex,
         focused_window_index: -1
+    )
+}
+
+private func makeWorkspaceRequest(
+    op: UInt8,
+    sourceWindowIndex: Int64 = -1,
+    sourceColumnIndex: Int64 = -1,
+    maxVisibleColumns: Int64 = 3
+) -> OmniNiriWorkspaceRequest {
+    OmniNiriWorkspaceRequest(
+        op: op,
+        source_window_index: sourceWindowIndex,
+        source_column_index: sourceColumnIndex,
+        max_visible_columns: maxVisibleColumns
     )
 }
 
@@ -196,6 +250,141 @@ private func makeMutationRequest(
             Int32(NiriStateZigKernel.MutationEditKind.resetAllColumnCachedWidths.rawValue) ==
                 OMNI_NIRI_MUTATION_EDIT_RESET_ALL_COLUMN_CACHED_WIDTHS.rawValue
         )
+
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceOp.moveWindowToWorkspace.rawValue) ==
+                OMNI_NIRI_WORKSPACE_OP_MOVE_WINDOW_TO_WORKSPACE.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceOp.moveColumnToWorkspace.rawValue) ==
+                OMNI_NIRI_WORKSPACE_OP_MOVE_COLUMN_TO_WORKSPACE.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.setSourceSelectionWindow.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_SET_SOURCE_SELECTION_WINDOW.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.setSourceSelectionNone.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_SET_SOURCE_SELECTION_NONE.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.reuseTargetEmptyColumn.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_REUSE_TARGET_EMPTY_COLUMN.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.createTargetColumnAppend.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_CREATE_TARGET_COLUMN_APPEND.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.pruneTargetEmptyColumnsIfNoWindows.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_PRUNE_TARGET_EMPTY_COLUMNS_IF_NO_WINDOWS.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.removeSourceColumnIfEmpty.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_REMOVE_SOURCE_COLUMN_IF_EMPTY.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.ensureSourcePlaceholderIfNoColumns.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_ENSURE_SOURCE_PLACEHOLDER_IF_NO_COLUMNS.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.setTargetSelectionMovedWindow.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_SET_TARGET_SELECTION_MOVED_WINDOW.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.WorkspaceEditKind.setTargetSelectionMovedColumnFirstWindow.rawValue) ==
+                OMNI_NIRI_WORKSPACE_EDIT_SET_TARGET_SELECTION_MOVED_COLUMN_FIRST_WINDOW.rawValue
+        )
+        #expect(Int(OMNI_NIRI_WORKSPACE_MAX_EDITS) == 16)
+    }
+
+    @Test func workspacePlannerRejectsInvalidOpCode() {
+        let sourceColumnId = makeUUID(1)
+        let sourceColumns = [
+            OmniNiriStateColumnInput(
+                column_id: sourceColumnId,
+                window_start: 0,
+                window_count: 1,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            )
+        ]
+        let sourceWindows = [
+            OmniNiriStateWindowInput(
+                window_id: makeUUID(10),
+                column_id: sourceColumnId,
+                column_index: 0,
+                size_value: 1
+            )
+        ]
+        let targetColumns = [
+            OmniNiriStateColumnInput(
+                column_id: makeUUID(2),
+                window_start: 0,
+                window_count: 0,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            )
+        ]
+        let request = makeWorkspaceRequest(op: 0xFF)
+
+        let outcome = runWorkspacePlan(
+            sourceColumns: sourceColumns,
+            sourceWindows: sourceWindows,
+            targetColumns: targetColumns,
+            targetWindows: [],
+            request: request
+        )
+        #expect(outcome.rc == abiErrInvalidArgs)
+    }
+
+    @Test func workspacePlannerTreatsMissingSourceContextAsNoOp() {
+        let sourceColumnId = makeUUID(1)
+        let sourceColumns = [
+            OmniNiriStateColumnInput(
+                column_id: sourceColumnId,
+                window_start: 0,
+                window_count: 1,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            )
+        ]
+        let sourceWindows = [
+            OmniNiriStateWindowInput(
+                window_id: makeUUID(10),
+                column_id: sourceColumnId,
+                column_index: 0,
+                size_value: 1
+            )
+        ]
+        let targetColumns = [
+            OmniNiriStateColumnInput(
+                column_id: makeUUID(2),
+                window_start: 0,
+                window_count: 0,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            )
+        ]
+        let request = makeWorkspaceRequest(
+            op: UInt8(truncatingIfNeeded: OMNI_NIRI_WORKSPACE_OP_MOVE_WINDOW_TO_WORKSPACE.rawValue),
+            sourceWindowIndex: 10
+        )
+
+        let outcome = runWorkspacePlan(
+            sourceColumns: sourceColumns,
+            sourceWindows: sourceWindows,
+            targetColumns: targetColumns,
+            targetWindows: [],
+            request: request
+        )
+        #expect(outcome.rc == abiOK)
+        #expect(outcome.result.applied == 0)
+        #expect(outcome.result.edit_count == 0)
     }
 
     @Test func layoutPassRejectsOverflowProneColumnRange() {

@@ -89,4 +89,34 @@ private func makeWorkspaceManagerTestMonitor(
         #expect(manager.adjacentMonitor(from: right.id, direction: .right, wrapAround: true)?.id == left.id)
         #expect(manager.adjacentMonitor(from: left.id, direction: .left, wrapAround: true)?.id == right.id)
     }
+
+    @Test @MainActor func workspaceOrderNavigationHonorsWrapAndBounds() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let manager = WorkspaceManager(settings: settings)
+
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 10, name: "Only", x: 0, y: 0)
+        manager.updateMonitors([monitor])
+
+        guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true),
+              let ws3 = manager.workspaceId(for: "3", createIfMissing: true)
+        else {
+            Issue.record("Failed to create ordered workspaces")
+            return
+        }
+
+        manager.assignWorkspaceToMonitor(ws1, monitorId: monitor.id)
+        manager.assignWorkspaceToMonitor(ws2, monitorId: monitor.id)
+        manager.assignWorkspaceToMonitor(ws3, monitorId: monitor.id)
+        #expect(manager.setActiveWorkspace(ws1, on: monitor.id))
+
+        #expect(manager.nextWorkspaceInOrder(on: monitor.id, from: ws1, wrapAround: false)?.id == ws2)
+        #expect(manager.nextWorkspaceInOrder(on: monitor.id, from: ws3, wrapAround: false) == nil)
+        #expect(manager.nextWorkspaceInOrder(on: monitor.id, from: ws3, wrapAround: true)?.id == ws1)
+
+        #expect(manager.previousWorkspaceInOrder(on: monitor.id, from: ws3, wrapAround: false)?.id == ws2)
+        #expect(manager.previousWorkspaceInOrder(on: monitor.id, from: ws1, wrapAround: false) == nil)
+        #expect(manager.previousWorkspaceInOrder(on: monitor.id, from: ws1, wrapAround: true)?.id == ws3)
+    }
 }

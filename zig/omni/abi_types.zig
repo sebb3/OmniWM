@@ -224,6 +224,27 @@ pub const OmniNiriMutationResult = extern struct {
     edits: [OMNI_NIRI_MUTATION_MAX_EDITS]OmniNiriMutationEdit,
 };
 
+pub const OmniNiriWorkspaceRequest = extern struct {
+    op: u8,
+    source_window_index: i64,
+    source_column_index: i64,
+    max_visible_columns: i64,
+};
+
+pub const OmniNiriWorkspaceEdit = extern struct {
+    kind: u8,
+    subject_index: i64,
+    related_index: i64,
+    value_a: i64,
+    value_b: i64,
+};
+
+pub const OmniNiriWorkspaceResult = extern struct {
+    applied: u8,
+    edit_count: usize,
+    edits: [OMNI_NIRI_WORKSPACE_MAX_EDITS]OmniNiriWorkspaceEdit,
+};
+
 pub const MAX_WINDOWS: usize = 512;
 
 pub const OMNI_OK: i32 = 0;
@@ -316,3 +337,18 @@ pub const OMNI_NIRI_MUTATION_EDIT_REMOVE_WINDOW_BY_INDEX: u8 = 17;
 pub const OMNI_NIRI_MUTATION_EDIT_RESET_ALL_COLUMN_CACHED_WIDTHS: u8 = 18;
 
 pub const OMNI_NIRI_MUTATION_MAX_EDITS: usize = 32;
+
+pub const OMNI_NIRI_WORKSPACE_OP_MOVE_WINDOW_TO_WORKSPACE: u8 = 0;
+pub const OMNI_NIRI_WORKSPACE_OP_MOVE_COLUMN_TO_WORKSPACE: u8 = 1;
+
+pub const OMNI_NIRI_WORKSPACE_EDIT_SET_SOURCE_SELECTION_WINDOW: u8 = 0;
+pub const OMNI_NIRI_WORKSPACE_EDIT_SET_SOURCE_SELECTION_NONE: u8 = 1;
+pub const OMNI_NIRI_WORKSPACE_EDIT_REUSE_TARGET_EMPTY_COLUMN: u8 = 2;
+pub const OMNI_NIRI_WORKSPACE_EDIT_CREATE_TARGET_COLUMN_APPEND: u8 = 3;
+pub const OMNI_NIRI_WORKSPACE_EDIT_PRUNE_TARGET_EMPTY_COLUMNS_IF_NO_WINDOWS: u8 = 4;
+pub const OMNI_NIRI_WORKSPACE_EDIT_REMOVE_SOURCE_COLUMN_IF_EMPTY: u8 = 5;
+pub const OMNI_NIRI_WORKSPACE_EDIT_ENSURE_SOURCE_PLACEHOLDER_IF_NO_COLUMNS: u8 = 6;
+pub const OMNI_NIRI_WORKSPACE_EDIT_SET_TARGET_SELECTION_MOVED_WINDOW: u8 = 7;
+pub const OMNI_NIRI_WORKSPACE_EDIT_SET_TARGET_SELECTION_MOVED_COLUMN_FIRST_WINDOW: u8 = 8;
+
+pub const OMNI_NIRI_WORKSPACE_MAX_EDITS: usize = 16;

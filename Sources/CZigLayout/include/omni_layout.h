@@ -530,3 +530,59 @@ int32_t omni_niri_mutation_plan(
     size_t window_count,
     const OmniNiriMutationRequest *request,
     OmniNiriMutationResult *out_result);
+
+typedef enum {
+    OMNI_NIRI_WORKSPACE_OP_MOVE_WINDOW_TO_WORKSPACE = 0,
+    OMNI_NIRI_WORKSPACE_OP_MOVE_COLUMN_TO_WORKSPACE = 1
+} OmniNiriWorkspaceOp;
+
+typedef enum {
+    OMNI_NIRI_WORKSPACE_EDIT_SET_SOURCE_SELECTION_WINDOW = 0,
+    OMNI_NIRI_WORKSPACE_EDIT_SET_SOURCE_SELECTION_NONE = 1,
+    OMNI_NIRI_WORKSPACE_EDIT_REUSE_TARGET_EMPTY_COLUMN = 2,
+    OMNI_NIRI_WORKSPACE_EDIT_CREATE_TARGET_COLUMN_APPEND = 3,
+    OMNI_NIRI_WORKSPACE_EDIT_PRUNE_TARGET_EMPTY_COLUMNS_IF_NO_WINDOWS = 4,
+    OMNI_NIRI_WORKSPACE_EDIT_REMOVE_SOURCE_COLUMN_IF_EMPTY = 5,
+    OMNI_NIRI_WORKSPACE_EDIT_ENSURE_SOURCE_PLACEHOLDER_IF_NO_COLUMNS = 6,
+    OMNI_NIRI_WORKSPACE_EDIT_SET_TARGET_SELECTION_MOVED_WINDOW = 7,
+    OMNI_NIRI_WORKSPACE_EDIT_SET_TARGET_SELECTION_MOVED_COLUMN_FIRST_WINDOW = 8
+} OmniNiriWorkspaceEditKind;
+
+typedef struct {
+    uint8_t op;
+    int64_t source_window_index;
+    int64_t source_column_index;
+    int64_t max_visible_columns;
+} OmniNiriWorkspaceRequest;
+
+typedef struct {
+    uint8_t kind;
+    int64_t subject_index;
+    int64_t related_index;
+    int64_t value_a;
+    int64_t value_b;
+} OmniNiriWorkspaceEdit;
+
+enum {
+    OMNI_NIRI_WORKSPACE_MAX_EDITS = 16
+};
+
+typedef struct {
+    uint8_t applied;
+    size_t edit_count;
+    OmniNiriWorkspaceEdit edits[OMNI_NIRI_WORKSPACE_MAX_EDITS];
+} OmniNiriWorkspaceResult;
+
+/// Build workspace transfer edit plan for source/target snapshots.
+/// Returns 0 on success, -1 for invalid args, -2 for range/edit-limit errors.
+int32_t omni_niri_workspace_plan(
+    const OmniNiriStateColumnInput *source_columns,
+    size_t source_column_count,
+    const OmniNiriStateWindowInput *source_windows,
+    size_t source_window_count,
+    const OmniNiriStateColumnInput *target_columns,
+    size_t target_column_count,
+    const OmniNiriStateWindowInput *target_windows,
+    size_t target_window_count,
+    const OmniNiriWorkspaceRequest *request,
+    OmniNiriWorkspaceResult *out_result);

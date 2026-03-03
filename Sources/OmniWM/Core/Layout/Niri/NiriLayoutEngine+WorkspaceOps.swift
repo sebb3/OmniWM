@@ -19,39 +19,48 @@ extension NiriLayoutEngine {
     ) -> WorkspaceMoveResult? {
         guard sourceWorkspaceId != targetWorkspaceId else { return nil }
 
-        guard roots[sourceWorkspaceId] != nil,
-              let sourceColumn = findColumn(containing: window, in: sourceWorkspaceId)
+        guard let sourceRoot = roots[sourceWorkspaceId],
+              findColumn(containing: window, in: sourceWorkspaceId) != nil
         else {
             return nil
         }
 
         let targetRoot = ensureRoot(for: targetWorkspaceId)
-
-        let fallbackSelection = fallbackSelectionOnRemoval(removing: window.id, in: sourceWorkspaceId)
-
-        window.detach()
-
-        let targetColumn: NiriContainer
-        if let existingColumn = claimEmptyColumnIfWorkspaceEmpty(in: targetRoot) {
-            existingColumn.width = .proportion(1.0 / CGFloat(maxVisibleColumns))
-            targetColumn = existingColumn
-        } else {
-            let newColumn = NiriContainer()
-            newColumn.width = .proportion(1.0 / CGFloat(maxVisibleColumns))
-            targetRoot.appendChild(newColumn)
-            targetColumn = newColumn
+        let sourceSnapshot = NiriStateZigKernel.makeSnapshot(columns: sourceRoot.columns)
+        let targetSnapshot = NiriStateZigKernel.makeSnapshot(columns: targetRoot.columns)
+        guard let sourceWindowIndex = sourceSnapshot.windowIndexByNodeId[window.id] else {
+            return nil
         }
-        targetColumn.appendChild(window)
 
-        cleanupEmptyColumn(sourceColumn, in: sourceWorkspaceId, state: &sourceState)
+        let request = NiriStateZigKernel.WorkspaceRequest(
+            op: .moveWindowToWorkspace,
+            sourceWindowIndex: sourceWindowIndex,
+            maxVisibleColumns: maxVisibleColumns
+        )
+        let outcome = NiriStateZigKernel.resolveWorkspace(
+            sourceSnapshot: sourceSnapshot,
+            targetSnapshot: targetSnapshot,
+            request: request
+        )
+        guard outcome.rc == 0 else { return nil }
 
-        sourceState.selectedNodeId = fallbackSelection
+        let applyOutcome = NiriStateZigWorkspaceApplier.apply(
+            outcome: outcome,
+            request: request,
+            sourceSnapshot: sourceSnapshot,
+            targetSnapshot: targetSnapshot,
+            sourceRoot: sourceRoot,
+            targetRoot: targetRoot,
+            engine: self
+        )
+        guard applyOutcome.applied else { return nil }
 
-        targetState.selectedNodeId = window.id
+        sourceState.selectedNodeId = applyOutcome.newSourceFocusNodeId
+        targetState.selectedNodeId = applyOutcome.targetSelectionNodeId
 
         return WorkspaceMoveResult(
-            newFocusNodeId: fallbackSelection,
-            movedHandle: window.handle,
+            newFocusNodeId: applyOutcome.newSourceFocusNodeId,
+            movedHandle: applyOutcome.movedHandle,
             targetWorkspaceId: targetWorkspaceId
         )
     }
@@ -72,57 +81,41 @@ extension NiriLayoutEngine {
         }
 
         let targetRoot = ensureRoot(for: targetWorkspaceId)
-
-        removeEmptyColumnsIfWorkspaceEmpty(in: targetRoot)
-
-        let allCols = columns(in: sourceWorkspaceId)
-        var fallbackSelection: NodeId?
-        if let colIdx = columnIndex(of: column, in: sourceWorkspaceId) {
-            if colIdx > 0 {
-                fallbackSelection = allCols[colIdx - 1].firstChild()?.id
-            } else if allCols.count > 1 {
-                fallbackSelection = allCols[1].firstChild()?.id
-            }
+        let sourceSnapshot = NiriStateZigKernel.makeSnapshot(columns: sourceRoot.columns)
+        let targetSnapshot = NiriStateZigKernel.makeSnapshot(columns: targetRoot.columns)
+        guard let sourceColumnIndex = sourceSnapshot.columnIndexByNodeId[column.id] else {
+            return nil
         }
 
-        column.detach()
+        let request = NiriStateZigKernel.WorkspaceRequest(
+            op: .moveColumnToWorkspace,
+            sourceColumnIndex: sourceColumnIndex
+        )
+        let outcome = NiriStateZigKernel.resolveWorkspace(
+            sourceSnapshot: sourceSnapshot,
+            targetSnapshot: targetSnapshot,
+            request: request
+        )
+        guard outcome.rc == 0 else { return nil }
 
-        targetRoot.appendChild(column)
+        let applyOutcome = NiriStateZigWorkspaceApplier.apply(
+            outcome: outcome,
+            request: request,
+            sourceSnapshot: sourceSnapshot,
+            targetSnapshot: targetSnapshot,
+            sourceRoot: sourceRoot,
+            targetRoot: targetRoot,
+            engine: self
+        )
+        guard applyOutcome.applied else { return nil }
 
-        if sourceRoot.columns.isEmpty {
-            let emptyColumn = NiriContainer()
-            sourceRoot.appendChild(emptyColumn)
-        }
-
-        sourceState.selectedNodeId = fallbackSelection
-
-        targetState.selectedNodeId = column.firstChild()?.id
-
-        let firstWindowHandle = column.windowNodes.first?.handle
+        sourceState.selectedNodeId = applyOutcome.newSourceFocusNodeId
+        targetState.selectedNodeId = applyOutcome.targetSelectionNodeId
 
         return WorkspaceMoveResult(
-            newFocusNodeId: fallbackSelection,
-            movedHandle: firstWindowHandle,
+            newFocusNodeId: applyOutcome.newSourceFocusNodeId,
+            movedHandle: applyOutcome.movedHandle,
             targetWorkspaceId: targetWorkspaceId
         )
-    }
-
-    func adjacentWorkspace(
-        from workspaceId: WorkspaceDescriptor.ID,
-        direction: Direction,
-        workspaceIds: [WorkspaceDescriptor.ID]
-    ) -> WorkspaceDescriptor.ID? {
-        guard direction == .up || direction == .down else { return nil }
-
-        guard let currentIdx = workspaceIds.firstIndex(of: workspaceId) else { return nil }
-
-        let targetIdx: Int = if direction == .up {
-            currentIdx - 1
-        } else {
-            currentIdx + 1
-        }
-
-        guard workspaceIds.indices.contains(targetIdx) else { return nil }
-        return workspaceIds[targetIdx]
     }
 }

@@ -8,6 +8,7 @@
 /// - `state_validation.zig`: snapshot validation
 /// - `navigation.zig`: navigation resolver
 /// - `mutation.zig`: mutation planner
+/// - `workspace.zig`: workspace transfer planner
 /// - `layout_pass.zig`: tiled layout pass
 /// - `interaction.zig`: hit-testing/dropzone/resize math
 /// - `viewport.zig`: viewport offset/snap math
@@ -17,6 +18,7 @@ const axis_solver = @import("omni/axis_solver.zig");
 const state_validation = @import("omni/state_validation.zig");
 const navigation = @import("omni/navigation.zig");
 const mutation = @import("omni/mutation.zig");
+const workspace = @import("omni/workspace.zig");
 const layout_pass = @import("omni/layout_pass.zig");
 const interaction = @import("omni/interaction.zig");
 const viewport = @import("omni/viewport.zig");
@@ -121,6 +123,35 @@ export fn omni_niri_mutation_plan(
         column_count,
         windows,
         window_count,
+        request,
+        out_result,
+    );
+}
+
+/// Build workspace transfer edit plan between source and target snapshots.
+///
+/// Returns `OMNI_OK` when planning succeeds and fills `out_result`.
+export fn omni_niri_workspace_plan(
+    source_columns: [*c]const abi.OmniNiriStateColumnInput,
+    source_column_count: usize,
+    source_windows: [*c]const abi.OmniNiriStateWindowInput,
+    source_window_count: usize,
+    target_columns: [*c]const abi.OmniNiriStateColumnInput,
+    target_column_count: usize,
+    target_windows: [*c]const abi.OmniNiriStateWindowInput,
+    target_window_count: usize,
+    request: [*c]const abi.OmniNiriWorkspaceRequest,
+    out_result: [*c]abi.OmniNiriWorkspaceResult,
+) i32 {
+    return workspace.omni_niri_workspace_plan_impl(
+        source_columns,
+        source_column_count,
+        source_windows,
+        source_window_count,
+        target_columns,
+        target_column_count,
+        target_windows,
+        target_window_count,
         request,
         out_result,
     );

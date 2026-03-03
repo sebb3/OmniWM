@@ -67,6 +67,13 @@ enum BenchmarkBaselines {
         let lifecycle_ops_full_path_p95_sec: Double
     }
 
+    struct Phase6WorkspaceOps: Decodable {
+        let date: String
+        let commit: String
+        let workspace_ops_planner_p95_sec: Double
+        let workspace_ops_full_path_p95_sec: Double
+    }
+
     private static var benchmarksDirectory: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -87,6 +94,10 @@ enum BenchmarkBaselines {
 
     static func loadPhase5LifecycleOps() throws -> Phase5LifecycleOps {
         try loadJSON(named: "phase5-lifecycle-ops-baseline.json", as: Phase5LifecycleOps.self)
+    }
+
+    static func loadPhase6WorkspaceOps() throws -> Phase6WorkspaceOps {
+        try loadJSON(named: "phase6-workspace-ops-baseline.json", as: Phase6WorkspaceOps.self)
     }
 
     private static func loadJSON<T: Decodable>(named name: String, as type: T.Type) throws -> T {

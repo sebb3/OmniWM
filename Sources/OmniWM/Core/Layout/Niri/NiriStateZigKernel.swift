@@ -105,9 +105,45 @@ enum NiriStateZigKernel {
         case resetAllColumnCachedWidths = 18
     }
 
+    enum WorkspaceOp: UInt8 {
+        case moveWindowToWorkspace = 0
+        case moveColumnToWorkspace = 1
+    }
+
+    enum WorkspaceEditKind: UInt8 {
+        case setSourceSelectionWindow = 0
+        case setSourceSelectionNone = 1
+        case reuseTargetEmptyColumn = 2
+        case createTargetColumnAppend = 3
+        case pruneTargetEmptyColumnsIfNoWindows = 4
+        case removeSourceColumnIfEmpty = 5
+        case ensureSourcePlaceholderIfNoColumns = 6
+        case setTargetSelectionMovedWindow = 7
+        case setTargetSelectionMovedColumnFirstWindow = 8
+    }
+
     struct MutationNodeTarget {
         let kind: MutationNodeKind
         let index: Int
+    }
+
+    struct WorkspaceRequest {
+        let op: WorkspaceOp
+        let sourceWindowIndex: Int
+        let sourceColumnIndex: Int
+        let maxVisibleColumns: Int
+
+        init(
+            op: WorkspaceOp,
+            sourceWindowIndex: Int = -1,
+            sourceColumnIndex: Int = -1,
+            maxVisibleColumns: Int = -1
+        ) {
+            self.op = op
+            self.sourceWindowIndex = sourceWindowIndex
+            self.sourceColumnIndex = sourceColumnIndex
+            self.maxVisibleColumns = maxVisibleColumns
+        }
     }
 
     struct NavigationRequest {
@@ -265,6 +301,20 @@ enum NiriStateZigKernel {
         }
     }
 
+    struct WorkspaceEdit {
+        let kind: WorkspaceEditKind
+        let subjectIndex: Int
+        let relatedIndex: Int
+        let valueA: Int
+        let valueB: Int
+    }
+
+    struct WorkspaceOutcome {
+        let rc: Int32
+        let applied: Bool
+        let edits: [WorkspaceEdit]
+    }
+
     private static func omniUUID(from nodeId: NodeId) -> OmniUuid128 {
         omniUUID(from: nodeId.uuid)
     }
@@ -305,6 +355,10 @@ enum NiriStateZigKernel {
         case .focusWindowBottom:
             return 10
         }
+    }
+
+    private static func workspaceOpCode(_ op: WorkspaceOp) -> UInt8 {
+        op.rawValue
     }
 
     private static func mutationNodeKindCode(_ kind: MutationNodeKind) -> UInt8 {
@@ -763,6 +817,96 @@ enum NiriStateZigKernel {
             applied: rc == OMNI_OK && rawResult.applied != 0,
             targetWindowIndex: targetWindowIndex,
             targetNode: targetNode,
+            edits: edits
+        )
+    }
+
+    static func resolveWorkspace(
+        sourceSnapshot: Snapshot,
+        targetSnapshot: Snapshot,
+        request: WorkspaceRequest
+    ) -> WorkspaceOutcome {
+        var rawResult = OmniNiriWorkspaceResult()
+        rawResult.applied = 0
+        rawResult.edit_count = 0
+
+        let rawRequest = OmniNiriWorkspaceRequest(
+            op: workspaceOpCode(request.op),
+            source_window_index: Int64(request.sourceWindowIndex),
+            source_column_index: Int64(request.sourceColumnIndex),
+            max_visible_columns: Int64(request.maxVisibleColumns)
+        )
+
+        let rc: Int32 = sourceSnapshot.columns.withUnsafeBufferPointer { sourceColumnBuf in
+            sourceSnapshot.windows.withUnsafeBufferPointer { sourceWindowBuf in
+                targetSnapshot.columns.withUnsafeBufferPointer { targetColumnBuf in
+                    targetSnapshot.windows.withUnsafeBufferPointer { targetWindowBuf in
+                        var mutableRequest = rawRequest
+                        return withUnsafePointer(to: &mutableRequest) { requestPtr in
+                            withUnsafeMutablePointer(to: &rawResult) { resultPtr in
+                                omni_niri_workspace_plan(
+                                    sourceColumnBuf.baseAddress,
+                                    sourceColumnBuf.count,
+                                    sourceWindowBuf.baseAddress,
+                                    sourceWindowBuf.count,
+                                    targetColumnBuf.baseAddress,
+                                    targetColumnBuf.count,
+                                    targetWindowBuf.baseAddress,
+                                    targetWindowBuf.count,
+                                    requestPtr,
+                                    resultPtr
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let maxEdits = Int(OMNI_NIRI_WORKSPACE_MAX_EDITS)
+        let requestedCount = Int(rawResult.edit_count)
+        let editCount = max(0, min(maxEdits, requestedCount))
+        var edits: [WorkspaceEdit] = []
+        edits.reserveCapacity(editCount)
+
+        var decodeError = false
+        withUnsafePointer(to: &rawResult.edits) { tuplePtr in
+            let base = UnsafeRawPointer(tuplePtr).assumingMemoryBound(to: OmniNiriWorkspaceEdit.self)
+            for idx in 0 ..< editCount {
+                let rawEdit = base[idx]
+                guard let kind = WorkspaceEditKind(rawValue: rawEdit.kind),
+                      let subjectIndex = Int(exactly: rawEdit.subject_index),
+                      let relatedIndex = Int(exactly: rawEdit.related_index),
+                      let valueA = Int(exactly: rawEdit.value_a),
+                      let valueB = Int(exactly: rawEdit.value_b)
+                else {
+                    decodeError = true
+                    break
+                }
+
+                edits.append(
+                    WorkspaceEdit(
+                        kind: kind,
+                        subjectIndex: subjectIndex,
+                        relatedIndex: relatedIndex,
+                        valueA: valueA,
+                        valueB: valueB
+                    )
+                )
+            }
+        }
+
+        if decodeError {
+            return WorkspaceOutcome(
+                rc: Int32(OMNI_ERR_INVALID_ARGS),
+                applied: false,
+                edits: []
+            )
+        }
+
+        return WorkspaceOutcome(
+            rc: rc,
+            applied: rc == OMNI_OK && rawResult.applied != 0,
             edits: edits
         )
     }
