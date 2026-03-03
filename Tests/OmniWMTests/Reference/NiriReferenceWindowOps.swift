@@ -405,7 +405,11 @@ enum NiriReferenceWindowOps {
              .cleanupEmptyColumn,
              .normalizeColumnSizes,
              .normalizeWindowSizes,
-             .balanceSizes:
+             .balanceSizes,
+             .addWindow,
+             .removeWindow,
+             .validateSelection,
+             .fallbackSelectionOnRemoval:
             return outcome(rc: mutationErrInvalidArgs)
         }
     }

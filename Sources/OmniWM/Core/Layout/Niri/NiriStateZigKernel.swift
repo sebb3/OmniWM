@@ -54,23 +54,33 @@ enum NiriStateZigKernel {
         case focusWindowBottom
     }
 
-    enum MutationOp {
-        case moveWindowVertical
-        case swapWindowVertical
-        case moveWindowHorizontal
-        case swapWindowHorizontal
-        case swapWindowsByMove
-        case insertWindowByMove
-        case moveWindowToColumn
-        case createColumnAndMove
-        case insertWindowInNewColumn
-        case moveColumn
-        case consumeWindow
-        case expelWindow
-        case cleanupEmptyColumn
-        case normalizeColumnSizes
-        case normalizeWindowSizes
-        case balanceSizes
+    enum MutationOp: UInt8 {
+        case moveWindowVertical = 0
+        case swapWindowVertical = 1
+        case moveWindowHorizontal = 2
+        case swapWindowHorizontal = 3
+        case swapWindowsByMove = 4
+        case insertWindowByMove = 5
+        case moveWindowToColumn = 6
+        case createColumnAndMove = 7
+        case insertWindowInNewColumn = 8
+        case moveColumn = 9
+        case consumeWindow = 10
+        case expelWindow = 11
+        case cleanupEmptyColumn = 12
+        case normalizeColumnSizes = 13
+        case normalizeWindowSizes = 14
+        case balanceSizes = 15
+        case addWindow = 16
+        case removeWindow = 17
+        case validateSelection = 18
+        case fallbackSelectionOnRemoval = 19
+    }
+
+    enum MutationNodeKind: UInt8 {
+        case none = 0
+        case window = 1
+        case column = 2
     }
 
     enum MutationEditKind: UInt8 {
@@ -89,6 +99,15 @@ enum NiriStateZigKernel {
         case normalizeColumnsByFactor = 12
         case normalizeColumnWindowsByFactor = 13
         case balanceColumns = 14
+        case insertIncomingWindowIntoColumn = 15
+        case insertIncomingWindowInNewColumn = 16
+        case removeWindowByIndex = 17
+        case resetAllColumnCachedWidths = 18
+    }
+
+    struct MutationNodeTarget {
+        let kind: MutationNodeKind
+        let index: Int
     }
 
     struct NavigationRequest {
@@ -141,6 +160,9 @@ enum NiriStateZigKernel {
         let targetColumnIndex: Int
         let insertColumnIndex: Int
         let maxVisibleColumns: Int
+        let selectedNodeKind: MutationNodeKind
+        let selectedNodeIndex: Int
+        let focusedWindowIndex: Int
 
         init(
             op: MutationOp,
@@ -153,7 +175,10 @@ enum NiriStateZigKernel {
             sourceColumnIndex: Int = -1,
             targetColumnIndex: Int = -1,
             insertColumnIndex: Int = -1,
-            maxVisibleColumns: Int = -1
+            maxVisibleColumns: Int = -1,
+            selectedNodeKind: MutationNodeKind = .none,
+            selectedNodeIndex: Int = -1,
+            focusedWindowIndex: Int = -1
         ) {
             self.op = op
             self.sourceWindowIndex = sourceWindowIndex
@@ -166,6 +191,9 @@ enum NiriStateZigKernel {
             self.targetColumnIndex = targetColumnIndex
             self.insertColumnIndex = insertColumnIndex
             self.maxVisibleColumns = maxVisibleColumns
+            self.selectedNodeKind = selectedNodeKind
+            self.selectedNodeIndex = selectedNodeIndex
+            self.focusedWindowIndex = focusedWindowIndex
         }
     }
 
@@ -211,10 +239,29 @@ enum NiriStateZigKernel {
         let rc: Int32
         let applied: Bool
         let targetWindowIndex: Int?
+        let targetNode: MutationNodeTarget?
         let edits: [MutationEdit]
+
+        init(
+            rc: Int32,
+            applied: Bool,
+            targetWindowIndex: Int?,
+            targetNode: MutationNodeTarget? = nil,
+            edits: [MutationEdit]
+        ) {
+            self.rc = rc
+            self.applied = applied
+            self.targetWindowIndex = targetWindowIndex
+            self.targetNode = targetNode
+            self.edits = edits
+        }
 
         var hasTarget: Bool {
             rc == OMNI_OK && targetWindowIndex != nil
+        }
+
+        var hasTargetNode: Bool {
+            rc == OMNI_OK && targetNode != nil
         }
     }
 
@@ -260,40 +307,14 @@ enum NiriStateZigKernel {
         }
     }
 
-    private static func mutationOpCode(_ op: MutationOp) -> UInt8 {
-        switch op {
-        case .moveWindowVertical:
+    private static func mutationNodeKindCode(_ kind: MutationNodeKind) -> UInt8 {
+        switch kind {
+        case .none:
             return 0
-        case .swapWindowVertical:
+        case .window:
             return 1
-        case .moveWindowHorizontal:
+        case .column:
             return 2
-        case .swapWindowHorizontal:
-            return 3
-        case .swapWindowsByMove:
-            return 4
-        case .insertWindowByMove:
-            return 5
-        case .moveWindowToColumn:
-            return 6
-        case .createColumnAndMove:
-            return 7
-        case .insertWindowInNewColumn:
-            return 8
-        case .moveColumn:
-            return 9
-        case .consumeWindow:
-            return 10
-        case .expelWindow:
-            return 11
-        case .cleanupEmptyColumn:
-            return 12
-        case .normalizeColumnSizes:
-            return 13
-        case .normalizeWindowSizes:
-            return 14
-        case .balanceSizes:
-            return 15
         }
     }
 
@@ -462,6 +483,46 @@ enum NiriStateZigKernel {
         )
     }
 
+    static func mutationNodeTarget(
+        for nodeId: NodeId?,
+        snapshot: Snapshot
+    ) -> MutationNodeTarget {
+        guard let nodeId else {
+            return MutationNodeTarget(kind: .none, index: -1)
+        }
+
+        if let windowIndex = snapshot.windowIndexByNodeId[nodeId],
+           snapshot.windowEntries.indices.contains(windowIndex)
+        {
+            return MutationNodeTarget(kind: .window, index: windowIndex)
+        }
+
+        if let columnIndex = snapshot.columnIndexByNodeId[nodeId],
+           snapshot.columnEntries.indices.contains(columnIndex)
+        {
+            return MutationNodeTarget(kind: .column, index: columnIndex)
+        }
+
+        return MutationNodeTarget(kind: .none, index: -1)
+    }
+
+    static func nodeId(
+        from target: MutationNodeTarget?,
+        snapshot: Snapshot
+    ) -> NodeId? {
+        guard let target else { return nil }
+        switch target.kind {
+        case .window:
+            guard snapshot.windowEntries.indices.contains(target.index) else { return nil }
+            return snapshot.windowEntries[target.index].window.id
+        case .column:
+            guard snapshot.columnEntries.indices.contains(target.index) else { return nil }
+            return snapshot.columnEntries[target.index].column.id
+        case .none:
+            return nil
+        }
+    }
+
     static func validate(snapshot: Snapshot) -> ValidationOutcome {
         var rawResult = OmniNiriStateValidationResult(
             column_count: 0,
@@ -563,10 +624,13 @@ enum NiriStateZigKernel {
         rawResult.applied = 0
         rawResult.has_target_window = 0
         rawResult.target_window_index = -1
+        rawResult.has_target_node = 0
+        rawResult.target_node_kind = mutationNodeKindCode(.none)
+        rawResult.target_node_index = -1
         rawResult.edit_count = 0
 
         let rawRequest = OmniNiriMutationRequest(
-            op: mutationOpCode(request.op),
+            op: request.op.rawValue,
             direction: mutationDirectionCode(request.direction),
             infinite_loop: request.infiniteLoop ? 1 : 0,
             insert_position: insertPositionCode(request.insertPosition),
@@ -576,7 +640,10 @@ enum NiriStateZigKernel {
             source_column_index: Int64(request.sourceColumnIndex),
             target_column_index: Int64(request.targetColumnIndex),
             insert_column_index: Int64(request.insertColumnIndex),
-            max_visible_columns: Int64(request.maxVisibleColumns)
+            max_visible_columns: Int64(request.maxVisibleColumns),
+            selected_node_kind: mutationNodeKindCode(request.selectedNodeKind),
+            selected_node_index: Int64(request.selectedNodeIndex),
+            focused_window_index: Int64(request.focusedWindowIndex)
         )
 
         let rc: Int32 = snapshot.columns.withUnsafeBufferPointer { columnBuf in
@@ -606,6 +673,44 @@ enum NiriStateZigKernel {
             targetWindowIndex = idx
         } else {
             targetWindowIndex = nil
+        }
+
+        let targetNode: MutationNodeTarget?
+        if rc == OMNI_OK, rawResult.has_target_node != 0 {
+            guard let nodeKind = MutationNodeKind(rawValue: rawResult.target_node_kind),
+                  let nodeIndex = Int(exactly: rawResult.target_node_index)
+            else {
+                return MutationOutcome(
+                    rc: Int32(OMNI_ERR_INVALID_ARGS),
+                    applied: false,
+                    targetWindowIndex: nil,
+                    targetNode: nil,
+                    edits: []
+                )
+            }
+
+            let isValidTarget = switch nodeKind {
+            case .window:
+                snapshot.windowEntries.indices.contains(nodeIndex)
+            case .column:
+                snapshot.columnEntries.indices.contains(nodeIndex)
+            case .none:
+                false
+            }
+
+            if !isValidTarget {
+                return MutationOutcome(
+                    rc: Int32(OMNI_ERR_INVALID_ARGS),
+                    applied: false,
+                    targetWindowIndex: nil,
+                    targetNode: nil,
+                    edits: []
+                )
+            }
+
+            targetNode = MutationNodeTarget(kind: nodeKind, index: nodeIndex)
+        } else {
+            targetNode = nil
         }
 
         let maxEdits = Int(OMNI_NIRI_MUTATION_MAX_EDITS)
@@ -648,6 +753,7 @@ enum NiriStateZigKernel {
                 rc: Int32(OMNI_ERR_INVALID_ARGS),
                 applied: false,
                 targetWindowIndex: nil,
+                targetNode: nil,
                 edits: []
             )
         }
@@ -656,6 +762,7 @@ enum NiriStateZigKernel {
             rc: rc,
             applied: rc == OMNI_OK && rawResult.applied != 0,
             targetWindowIndex: targetWindowIndex,
+            targetNode: targetNode,
             edits: edits
         )
     }

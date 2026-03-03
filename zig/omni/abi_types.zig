@@ -198,6 +198,9 @@ pub const OmniNiriMutationRequest = extern struct {
     target_column_index: i64,
     insert_column_index: i64,
     max_visible_columns: i64,
+    selected_node_kind: u8,
+    selected_node_index: i64,
+    focused_window_index: i64,
 };
 
 pub const OmniNiriMutationEdit = extern struct {
@@ -214,6 +217,9 @@ pub const OmniNiriMutationResult = extern struct {
     applied: u8,
     has_target_window: u8,
     target_window_index: i64,
+    has_target_node: u8,
+    target_node_kind: u8,
+    target_node_index: i64,
     edit_count: usize,
     edits: [OMNI_NIRI_MUTATION_MAX_EDITS]OmniNiriMutationEdit,
 };
@@ -280,6 +286,14 @@ pub const OMNI_NIRI_MUTATION_OP_CLEANUP_EMPTY_COLUMN: u8 = 12;
 pub const OMNI_NIRI_MUTATION_OP_NORMALIZE_COLUMN_SIZES: u8 = 13;
 pub const OMNI_NIRI_MUTATION_OP_NORMALIZE_WINDOW_SIZES: u8 = 14;
 pub const OMNI_NIRI_MUTATION_OP_BALANCE_SIZES: u8 = 15;
+pub const OMNI_NIRI_MUTATION_OP_ADD_WINDOW: u8 = 16;
+pub const OMNI_NIRI_MUTATION_OP_REMOVE_WINDOW: u8 = 17;
+pub const OMNI_NIRI_MUTATION_OP_VALIDATE_SELECTION: u8 = 18;
+pub const OMNI_NIRI_MUTATION_OP_FALLBACK_SELECTION_ON_REMOVAL: u8 = 19;
+
+pub const OMNI_NIRI_MUTATION_NODE_NONE: u8 = 0;
+pub const OMNI_NIRI_MUTATION_NODE_WINDOW: u8 = 1;
+pub const OMNI_NIRI_MUTATION_NODE_COLUMN: u8 = 2;
 
 pub const OMNI_NIRI_MUTATION_EDIT_SET_ACTIVE_TILE: u8 = 0;
 pub const OMNI_NIRI_MUTATION_EDIT_SWAP_WINDOWS: u8 = 1;
@@ -296,5 +310,9 @@ pub const OMNI_NIRI_MUTATION_EDIT_SWAP_COLUMNS: u8 = 11;
 pub const OMNI_NIRI_MUTATION_EDIT_NORMALIZE_COLUMNS_BY_FACTOR: u8 = 12;
 pub const OMNI_NIRI_MUTATION_EDIT_NORMALIZE_COLUMN_WINDOWS_BY_FACTOR: u8 = 13;
 pub const OMNI_NIRI_MUTATION_EDIT_BALANCE_COLUMNS: u8 = 14;
+pub const OMNI_NIRI_MUTATION_EDIT_INSERT_INCOMING_WINDOW_INTO_COLUMN: u8 = 15;
+pub const OMNI_NIRI_MUTATION_EDIT_INSERT_INCOMING_WINDOW_IN_NEW_COLUMN: u8 = 16;
+pub const OMNI_NIRI_MUTATION_EDIT_REMOVE_WINDOW_BY_INDEX: u8 = 17;
+pub const OMNI_NIRI_MUTATION_EDIT_RESET_ALL_COLUMN_CACHED_WIDTHS: u8 = 18;
 
 pub const OMNI_NIRI_MUTATION_MAX_EDITS: usize = 32;

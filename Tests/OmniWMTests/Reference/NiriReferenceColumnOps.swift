@@ -454,7 +454,11 @@ enum NiriReferenceColumnOps {
              .moveWindowHorizontal,
              .swapWindowHorizontal,
              .swapWindowsByMove,
-             .insertWindowByMove:
+             .insertWindowByMove,
+             .addWindow,
+             .removeWindow,
+             .validateSelection,
+             .fallbackSelectionOnRemoval:
             return outcome(rc: mutationErrInvalidArgs)
         }
     }

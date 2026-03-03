@@ -39,11 +39,15 @@ enum NiriStateZigMutationApplier {
     }
 
     private static func root(snapshot: NiriStateZigKernel.Snapshot) -> NiriRoot? {
-        if let root = snapshot.columnEntries.first?.column.findRoot() {
-            return root
+        for entry in snapshot.columnEntries {
+            if let root = entry.column.findRoot() {
+                return root
+            }
         }
-        if let root = snapshot.windowEntries.first?.window.findRoot() {
-            return root
+        for entry in snapshot.windowEntries {
+            if let root = entry.window.findRoot() {
+                return root
+            }
         }
         return nil
     }
@@ -55,13 +59,14 @@ enum NiriStateZigMutationApplier {
     static func apply(
         outcome: NiriStateZigKernel.MutationOutcome,
         snapshot: NiriStateZigKernel.Snapshot,
-        engine: NiriLayoutEngine
+        engine: NiriLayoutEngine,
+        incomingWindowHandle: WindowHandle? = nil
     ) -> ApplyOutcome {
         guard outcome.rc == 0, outcome.applied else {
             return ApplyOutcome(applied: false, targetWindow: nil, delegatedMoveColumn: nil)
         }
 
-        let targetWindow: NiriWindow?
+        var targetWindow: NiriWindow?
         if let targetIndex = outcome.targetWindowIndex {
             targetWindow = window(at: targetIndex, snapshot: snapshot)
         } else {
@@ -270,6 +275,60 @@ enum NiriStateZigMutationApplier {
                     for window in column.windowNodes {
                         window.size = 1.0
                     }
+                }
+
+            case .insertIncomingWindowIntoColumn:
+                guard let incomingWindowHandle,
+                      let targetColumn = column(at: edit.subjectIndex, snapshot: snapshot)
+                else {
+                    return ApplyOutcome(applied: false, targetWindow: targetWindow, delegatedMoveColumn: nil)
+                }
+
+                let visibleColumns = max(1, edit.valueA)
+                targetColumn.width = .proportion(1.0 / CGFloat(visibleColumns))
+                let windowNode = NiriWindow(handle: incomingWindowHandle)
+                targetColumn.appendChild(windowNode)
+                engine.handleToNode[incomingWindowHandle] = windowNode
+                targetWindow = windowNode
+
+            case .insertIncomingWindowInNewColumn:
+                guard let incomingWindowHandle,
+                      let targetRoot = root(snapshot: snapshot)
+                else {
+                    return ApplyOutcome(applied: false, targetWindow: targetWindow, delegatedMoveColumn: nil)
+                }
+
+                let visibleColumns = max(1, edit.valueA)
+                let newColumn = NiriContainer()
+                newColumn.width = .proportion(1.0 / CGFloat(visibleColumns))
+                if edit.subjectIndex >= 0 {
+                    guard let referenceColumn = column(at: edit.subjectIndex, snapshot: snapshot) else {
+                        return ApplyOutcome(applied: false, targetWindow: targetWindow, delegatedMoveColumn: nil)
+                    }
+                    targetRoot.insertAfter(newColumn, reference: referenceColumn)
+                } else {
+                    targetRoot.appendChild(newColumn)
+                }
+
+                let windowNode = NiriWindow(handle: incomingWindowHandle)
+                newColumn.appendChild(windowNode)
+                engine.handleToNode[incomingWindowHandle] = windowNode
+                targetWindow = windowNode
+
+            case .removeWindowByIndex:
+                guard let removedWindow = window(at: edit.subjectIndex, snapshot: snapshot) else {
+                    return ApplyOutcome(applied: false, targetWindow: targetWindow, delegatedMoveColumn: nil)
+                }
+                engine.closingHandles.remove(removedWindow.handle)
+                removedWindow.remove()
+                engine.handleToNode.removeValue(forKey: removedWindow.handle)
+
+            case .resetAllColumnCachedWidths:
+                guard let root = root(snapshot: snapshot) else {
+                    return ApplyOutcome(applied: false, targetWindow: targetWindow, delegatedMoveColumn: nil)
+                }
+                for column in root.columns {
+                    column.cachedWidth = 0
                 }
             }
         }

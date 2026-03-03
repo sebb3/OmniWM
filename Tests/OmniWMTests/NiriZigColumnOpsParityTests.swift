@@ -438,7 +438,15 @@ private func applyReferenceMutationOutcome(
                 }
             }
 
-        case .swapWindows, .swapColumnWidthState, .swapWindowSizeHeight, .resetWindowSizeHeight, .delegateMoveColumn:
+        case .swapWindows,
+             .swapColumnWidthState,
+             .swapWindowSizeHeight,
+             .resetWindowSizeHeight,
+             .delegateMoveColumn,
+             .insertIncomingWindowIntoColumn,
+             .insertIncomingWindowInNewColumn,
+             .removeWindowByIndex,
+             .resetAllColumnCachedWidths:
             return false
         }
     }
@@ -746,7 +754,11 @@ private func executeRuntimeMutation(
          .moveWindowHorizontal,
          .swapWindowHorizontal,
          .swapWindowsByMove,
-         .insertWindowByMove:
+         .insertWindowByMove,
+         .addWindow,
+         .removeWindow,
+         .validateSelection,
+         .fallbackSelectionOnRemoval:
         return false
     }
 }

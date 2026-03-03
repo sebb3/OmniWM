@@ -2,6 +2,8 @@ import CZigLayout
 import Foundation
 import Testing
 
+@testable import OmniWM
+
 private let abiOK: Int32 = 0
 private let abiErrInvalidArgs: Int32 = -1
 private let abiErrOutOfRange: Int32 = -2
@@ -102,7 +104,100 @@ private func runLayoutPass(columns: [OmniNiriColumnInput], windows: [OmniNiriWin
     }
 }
 
+private func runMutationPlan(
+    columns: [OmniNiriStateColumnInput],
+    windows: [OmniNiriStateWindowInput],
+    request: OmniNiriMutationRequest
+) -> (rc: Int32, result: OmniNiriMutationResult) {
+    var result = OmniNiriMutationResult()
+    result.applied = 0
+    result.has_target_window = 0
+    result.target_window_index = -1
+    result.has_target_node = 0
+    result.target_node_kind = UInt8(truncatingIfNeeded: OMNI_NIRI_MUTATION_NODE_NONE.rawValue)
+    result.target_node_index = -1
+    result.edit_count = 0
+
+    let rc: Int32 = columns.withUnsafeBufferPointer { columnBuf in
+        windows.withUnsafeBufferPointer { windowBuf in
+            var mutableRequest = request
+            return withUnsafePointer(to: &mutableRequest) { requestPtr in
+                withUnsafeMutablePointer(to: &result) { resultPtr in
+                    omni_niri_mutation_plan(
+                        columnBuf.baseAddress,
+                        columnBuf.count,
+                        windowBuf.baseAddress,
+                        windowBuf.count,
+                        requestPtr,
+                        resultPtr
+                    )
+                }
+            }
+        }
+    }
+
+    return (rc: rc, result: result)
+}
+
+private func makeMutationRequest(
+    op: UInt8,
+    sourceWindowIndex: Int64 = -1,
+    selectedNodeKind: UInt8 = UInt8(truncatingIfNeeded: OMNI_NIRI_MUTATION_NODE_NONE.rawValue),
+    selectedNodeIndex: Int64 = -1
+) -> OmniNiriMutationRequest {
+    OmniNiriMutationRequest(
+        op: op,
+        direction: 0,
+        infinite_loop: 0,
+        insert_position: 0,
+        source_window_index: sourceWindowIndex,
+        target_window_index: -1,
+        max_windows_per_column: 1,
+        source_column_index: -1,
+        target_column_index: -1,
+        insert_column_index: -1,
+        max_visible_columns: 3,
+        selected_node_kind: selectedNodeKind,
+        selected_node_index: selectedNodeIndex,
+        focused_window_index: -1
+    )
+}
+
 @Suite struct NiriZigAbiValidationTests {
+    @Test func mutationConstantsStayAlignedAcrossKernelAndCABI() {
+        #expect(Int32(NiriStateZigKernel.MutationOp.addWindow.rawValue) == OMNI_NIRI_MUTATION_OP_ADD_WINDOW.rawValue)
+        #expect(Int32(NiriStateZigKernel.MutationOp.removeWindow.rawValue) == OMNI_NIRI_MUTATION_OP_REMOVE_WINDOW.rawValue)
+        #expect(
+            Int32(NiriStateZigKernel.MutationOp.validateSelection.rawValue) ==
+                OMNI_NIRI_MUTATION_OP_VALIDATE_SELECTION.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.MutationOp.fallbackSelectionOnRemoval.rawValue) ==
+                OMNI_NIRI_MUTATION_OP_FALLBACK_SELECTION_ON_REMOVAL.rawValue
+        )
+
+        #expect(Int32(NiriStateZigKernel.MutationNodeKind.none.rawValue) == OMNI_NIRI_MUTATION_NODE_NONE.rawValue)
+        #expect(Int32(NiriStateZigKernel.MutationNodeKind.window.rawValue) == OMNI_NIRI_MUTATION_NODE_WINDOW.rawValue)
+        #expect(Int32(NiriStateZigKernel.MutationNodeKind.column.rawValue) == OMNI_NIRI_MUTATION_NODE_COLUMN.rawValue)
+
+        #expect(
+            Int32(NiriStateZigKernel.MutationEditKind.insertIncomingWindowIntoColumn.rawValue) ==
+                OMNI_NIRI_MUTATION_EDIT_INSERT_INCOMING_WINDOW_INTO_COLUMN.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.MutationEditKind.insertIncomingWindowInNewColumn.rawValue) ==
+                OMNI_NIRI_MUTATION_EDIT_INSERT_INCOMING_WINDOW_IN_NEW_COLUMN.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.MutationEditKind.removeWindowByIndex.rawValue) ==
+                OMNI_NIRI_MUTATION_EDIT_REMOVE_WINDOW_BY_INDEX.rawValue
+        )
+        #expect(
+            Int32(NiriStateZigKernel.MutationEditKind.resetAllColumnCachedWidths.rawValue) ==
+                OMNI_NIRI_MUTATION_EDIT_RESET_ALL_COLUMN_CACHED_WIDTHS.rawValue
+        )
+    }
+
     @Test func layoutPassRejectsOverflowProneColumnRange() {
         let columns = [
             OmniNiriColumnInput(
@@ -236,5 +331,108 @@ private func runLayoutPass(columns: [OmniNiriColumnInput], windows: [OmniNiriWin
         let outcome = validateState(columns: columns, windows: windows)
         #expect(outcome.rc == abiErrInvalidArgs)
         #expect(outcome.result.first_error_code == abiErrInvalidArgs)
+    }
+
+    @Test func mutationPlanRejectsInvalidNodeKindEvenWithNegativeIndex() {
+        let columns = [
+            OmniNiriStateColumnInput(
+                column_id: makeUUID(1),
+                window_start: 0,
+                window_count: 0,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            )
+        ]
+        let request = makeMutationRequest(
+            op: UInt8(truncatingIfNeeded: OMNI_NIRI_MUTATION_OP_VALIDATE_SELECTION.rawValue),
+            selectedNodeKind: 0xFF,
+            selectedNodeIndex: -1
+        )
+
+        let outcome = runMutationPlan(columns: columns, windows: [], request: request)
+        #expect(outcome.rc == abiErrInvalidArgs)
+    }
+
+    @Test func mutationPlanValidateSelectionReturnsColumnNodeTargetWithoutWindowCompatibilityTarget() {
+        let columns = [
+            OmniNiriStateColumnInput(
+                column_id: makeUUID(1),
+                window_start: 0,
+                window_count: 0,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            ),
+            OmniNiriStateColumnInput(
+                column_id: makeUUID(2),
+                window_start: 0,
+                window_count: 0,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            ),
+        ]
+        let request = makeMutationRequest(
+            op: UInt8(truncatingIfNeeded: OMNI_NIRI_MUTATION_OP_VALIDATE_SELECTION.rawValue),
+            selectedNodeKind: UInt8(truncatingIfNeeded: OMNI_NIRI_MUTATION_NODE_COLUMN.rawValue),
+            selectedNodeIndex: 1
+        )
+
+        let outcome = runMutationPlan(columns: columns, windows: [], request: request)
+        #expect(outcome.rc == abiOK)
+        #expect(outcome.result.has_target_node == 1)
+        #expect(
+            outcome.result.target_node_kind ==
+                UInt8(truncatingIfNeeded: OMNI_NIRI_MUTATION_NODE_COLUMN.rawValue)
+        )
+        #expect(outcome.result.target_node_index == 1)
+        #expect(outcome.result.has_target_window == 0)
+        #expect(outcome.result.target_window_index == -1)
+    }
+
+    @Test func mutationPlanValidateSelectionFindsFirstWindowBeyondLeadingEmptyColumn() {
+        let c0 = makeUUID(1)
+        let c1 = makeUUID(2)
+        let columns = [
+            OmniNiriStateColumnInput(
+                column_id: c0,
+                window_start: 0,
+                window_count: 0,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            ),
+            OmniNiriStateColumnInput(
+                column_id: c1,
+                window_start: 0,
+                window_count: 1,
+                active_tile_idx: 0,
+                is_tabbed: 0,
+                size_value: 1
+            ),
+        ]
+        let windows = [
+            OmniNiriStateWindowInput(
+                window_id: makeUUID(10),
+                column_id: c1,
+                column_index: 1,
+                size_value: 1
+            )
+        ]
+        let request = makeMutationRequest(
+            op: UInt8(truncatingIfNeeded: OMNI_NIRI_MUTATION_OP_VALIDATE_SELECTION.rawValue)
+        )
+
+        let outcome = runMutationPlan(columns: columns, windows: windows, request: request)
+        #expect(outcome.rc == abiOK)
+        #expect(outcome.result.has_target_node == 1)
+        #expect(
+            outcome.result.target_node_kind ==
+                UInt8(truncatingIfNeeded: OMNI_NIRI_MUTATION_NODE_WINDOW.rawValue)
+        )
+        #expect(outcome.result.target_node_index == 0)
+        #expect(outcome.result.has_target_window == 1)
+        #expect(outcome.result.target_window_index == 0)
     }
 }

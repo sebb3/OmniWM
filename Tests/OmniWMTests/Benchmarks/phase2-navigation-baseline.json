@@ -1,6 +1,6 @@
 {
   "date": "2026-03-03",
-  "commit": "89da084c8a08dde29731b8c4a937a86eafea7eb6",
-  "navigation_p95_sec": 0.000000400,
+  "commit": "70a57e08754187026745a6c82a39c1dd63e311be",
+  "navigation_p95_sec": 0.000000500,
   "notes": "Updated after Zig kernel modularization; measured from NiriZigNavigationParityTests/navigationKernelBenchmarkHarnessP95."
 }

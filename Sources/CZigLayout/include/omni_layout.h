@@ -444,7 +444,11 @@ typedef enum {
     OMNI_NIRI_MUTATION_OP_CLEANUP_EMPTY_COLUMN = 12,
     OMNI_NIRI_MUTATION_OP_NORMALIZE_COLUMN_SIZES = 13,
     OMNI_NIRI_MUTATION_OP_NORMALIZE_WINDOW_SIZES = 14,
-    OMNI_NIRI_MUTATION_OP_BALANCE_SIZES = 15
+    OMNI_NIRI_MUTATION_OP_BALANCE_SIZES = 15,
+    OMNI_NIRI_MUTATION_OP_ADD_WINDOW = 16,
+    OMNI_NIRI_MUTATION_OP_REMOVE_WINDOW = 17,
+    OMNI_NIRI_MUTATION_OP_VALIDATE_SELECTION = 18,
+    OMNI_NIRI_MUTATION_OP_FALLBACK_SELECTION_ON_REMOVAL = 19
 } OmniNiriMutationOp;
 
 typedef enum {
@@ -462,8 +466,18 @@ typedef enum {
     OMNI_NIRI_MUTATION_EDIT_SWAP_COLUMNS = 11,
     OMNI_NIRI_MUTATION_EDIT_NORMALIZE_COLUMNS_BY_FACTOR = 12,
     OMNI_NIRI_MUTATION_EDIT_NORMALIZE_COLUMN_WINDOWS_BY_FACTOR = 13,
-    OMNI_NIRI_MUTATION_EDIT_BALANCE_COLUMNS = 14
+    OMNI_NIRI_MUTATION_EDIT_BALANCE_COLUMNS = 14,
+    OMNI_NIRI_MUTATION_EDIT_INSERT_INCOMING_WINDOW_INTO_COLUMN = 15,
+    OMNI_NIRI_MUTATION_EDIT_INSERT_INCOMING_WINDOW_IN_NEW_COLUMN = 16,
+    OMNI_NIRI_MUTATION_EDIT_REMOVE_WINDOW_BY_INDEX = 17,
+    OMNI_NIRI_MUTATION_EDIT_RESET_ALL_COLUMN_CACHED_WIDTHS = 18
 } OmniNiriMutationEditKind;
+
+typedef enum {
+    OMNI_NIRI_MUTATION_NODE_NONE = 0,
+    OMNI_NIRI_MUTATION_NODE_WINDOW = 1,
+    OMNI_NIRI_MUTATION_NODE_COLUMN = 2
+} OmniNiriMutationNodeKind;
 
 typedef struct {
     uint8_t op;
@@ -477,6 +491,9 @@ typedef struct {
     int64_t target_column_index;
     int64_t insert_column_index;
     int64_t max_visible_columns;
+    uint8_t selected_node_kind;
+    int64_t selected_node_index;
+    int64_t focused_window_index;
 } OmniNiriMutationRequest;
 
 typedef struct {
@@ -497,6 +514,9 @@ typedef struct {
     uint8_t applied;
     uint8_t has_target_window;
     int64_t target_window_index;
+    uint8_t has_target_node;
+    uint8_t target_node_kind;
+    int64_t target_node_index;
     size_t edit_count;
     OmniNiriMutationEdit edits[OMNI_NIRI_MUTATION_MAX_EDITS];
 } OmniNiriMutationResult;

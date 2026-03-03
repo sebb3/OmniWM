@@ -618,7 +618,11 @@ private func executeRuntimeMutation(
          .cleanupEmptyColumn,
          .normalizeColumnSizes,
          .normalizeWindowSizes,
-         .balanceSizes:
+         .balanceSizes,
+         .addWindow,
+         .removeWindow,
+         .validateSelection,
+         .fallbackSelectionOnRemoval:
         return false
     }
 }

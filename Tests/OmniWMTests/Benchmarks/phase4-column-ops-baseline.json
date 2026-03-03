@@ -1,7 +1,7 @@
 {
   "date": "2026-03-03",
-  "commit": "7748fbfa495210e0e42ca199f59629ff81624da5",
-  "column_ops_planner_p95_sec": 0.000001250,
-  "column_ops_full_path_p95_sec": 0.000040708,
+  "commit": "70a57e08754187026745a6c82a39c1dd63e311be",
+  "column_ops_planner_p95_sec": 0.000001800,
+  "column_ops_full_path_p95_sec": 0.000063500,
   "notes": "Planner measured from NiriZigColumnOpsParityTests/columnOpsMutationPlannerBenchmarkHarnessP95 with 10k requests (3 runs, max recorded p95); runtime measured from NiriZigColumnOpsParityTests/columnOpsRuntimeFullPathBenchmarkHarnessP95 with 10k runtime operations (3 runs, max recorded p95)."
 }
