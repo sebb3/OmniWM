@@ -155,9 +155,12 @@ extension NiriLayoutEngine {
     ) {
         let containers = columns(in: workspaceId)
         guard !containers.isEmpty else {
-            interactionSnapshots.removeValue(forKey: workspaceId)
+            interactionIndexes.removeValue(forKey: workspaceId)
+            layoutContexts.removeValue(forKey: workspaceId)
             return
         }
+
+        guard let layoutContext = ensureLayoutContext(for: workspaceId) else { return }
 
         let workingFrame = workingArea?.workingFrame ?? monitorFrame
         let viewFrame = workingArea?.viewFrame ?? screenFrame ?? monitorFrame
@@ -213,6 +216,7 @@ extension NiriLayoutEngine {
         }
 
         let kernelResults = NiriLayoutZigKernel.run(
+            context: layoutContext,
             columns: containers,
             orientation: orientation,
             primaryGap: primaryGap,
@@ -252,6 +256,6 @@ extension NiriLayoutEngine {
             frames[result.window.handle] = roundedAnimatedFrame
         }
 
-        interactionSnapshots[workspaceId] = NiriLayoutZigKernel.makeInteractionSnapshot(columns: containers)
+        interactionIndexes[workspaceId] = NiriLayoutZigKernel.makeInteractionIndex(columns: containers)
     }
 }

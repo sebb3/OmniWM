@@ -124,6 +124,13 @@ pub const OmniNiriHitTestWindow = extern struct {
     is_fullscreen: u8,
 };
 
+pub const OmniNiriColumnDropzoneMeta = extern struct {
+    is_valid: u8,
+    min_y: f64,
+    max_y: f64,
+    post_insertion_count: usize,
+};
+
 pub const OmniNiriResizeHitResult = extern struct {
     window_index: i64,
     edges: u8,

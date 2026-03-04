@@ -128,9 +128,10 @@ extension NiriLayoutEngine {
         isInsertMode: Bool = false,
         in workspaceId: WorkspaceDescriptor.ID
     ) -> MoveHoverTarget? {
-        guard let snapshot = ensureInteractionSnapshot(for: workspaceId) else { return nil }
+        guard let interaction = interactionState(for: workspaceId) else { return nil }
         guard let result = NiriLayoutZigKernel.hitTestMoveTarget(
-            snapshot: snapshot,
+            context: interaction.context,
+            interaction: interaction.index,
             point: point,
             excludingWindowId: excludingWindowId,
             isInsertMode: isInsertMode
@@ -242,29 +243,13 @@ extension NiriLayoutEngine {
         in workspaceId: WorkspaceDescriptor.ID,
         gaps: CGFloat
     ) -> CGRect? {
-        guard let snapshot = ensureInteractionSnapshot(for: workspaceId),
-              let windowIndex = snapshot.windowIndexByNodeId[targetWindowId]
-        else {
-            return nil
-        }
-
-        let entry = snapshot.windowEntries[windowIndex]
-        guard snapshot.columnDropzoneMeta.indices.contains(entry.columnIndex),
-              let columnMeta = snapshot.columnDropzoneMeta[entry.columnIndex]
-        else {
-            return nil
-        }
-
-        return NiriLayoutZigKernel.computeInsertionDropzone(
-            .init(
-                targetFrame: entry.frame,
-                columnIndex: entry.columnIndex,
-                columnMinY: columnMeta.minY,
-                columnMaxY: columnMeta.maxY,
-                postInsertionCount: columnMeta.postInsertionCount,
-                gap: gaps,
-                position: position
-            )
+        guard let interaction = interactionState(for: workspaceId) else { return nil }
+        return NiriLayoutZigKernel.insertionDropzoneFrame(
+            context: interaction.context,
+            interaction: interaction.index,
+            targetWindowId: targetWindowId,
+            position: position,
+            gap: gaps
         )
     }
 }

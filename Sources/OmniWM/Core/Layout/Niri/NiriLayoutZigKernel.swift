@@ -3,9 +3,27 @@ import CZigLayout
 import Foundation
 
 enum NiriLayoutZigKernel {
+    struct InteractionIndex {
+        let windowEntries: [InteractionSnapshot.WindowEntry]
+        let windowIndexByNodeId: [NodeId: Int]
+    }
+
     struct LayoutPassResult {
         let windows: [WindowResult]
         let columns: [ColumnResult]
+    }
+
+    final class LayoutContext {
+        fileprivate let raw: OpaquePointer
+
+        init?() {
+            guard let raw = omni_niri_layout_context_create() else { return nil }
+            self.raw = raw
+        }
+
+        deinit {
+            omni_niri_layout_context_destroy(raw)
+        }
     }
 
     struct WindowResult {
@@ -155,6 +173,7 @@ enum NiriLayoutZigKernel {
     }
 
     static func run(
+        context: LayoutContext,
         columns: [NiriContainer],
         orientation: Monitor.Orientation,
         primaryGap: CGFloat,
@@ -293,10 +312,11 @@ enum NiriLayoutZigKernel {
             windowInputs.withUnsafeBufferPointer { winBuf in
                 rawOutputs.withUnsafeMutableBufferPointer { winOutBuf in
                     rawColumnOutputs.withUnsafeMutableBufferPointer { colOutBuf in
-                        omni_niri_layout_pass_v2(
-                            colBuf.baseAddress,
-                            colBuf.count,
-                            winBuf.baseAddress,
+                            omni_niri_layout_pass_v3(
+                                context.raw,
+                                colBuf.baseAddress,
+                                colBuf.count,
+                                winBuf.baseAddress,
                             winBuf.count,
                             Double(workingFrame.origin.x),
                             Double(workingFrame.origin.y),
@@ -329,7 +349,7 @@ enum NiriLayoutZigKernel {
 
         precondition(
             rc == OMNI_OK,
-            "omni_niri_layout_pass_v2 failed rc=\(rc) columns=\(columnInputs.count) windows=\(windowInputs.count)"
+            "omni_niri_layout_pass_v3 failed rc=\(rc) columns=\(columnInputs.count) windows=\(windowInputs.count)"
         )
 
         let windows = zip(flatWindows, rawOutputs).map { window, output in
@@ -434,13 +454,203 @@ enum NiriLayoutZigKernel {
         )
     }
 
+    static func makeInteractionIndex(columns: [NiriContainer]) -> InteractionIndex {
+        let estimatedWindowCount = columns.reduce(0) { partial, column in
+            partial + column.windowNodes.count
+        }
+
+        var entries: [InteractionSnapshot.WindowEntry] = []
+        entries.reserveCapacity(estimatedWindowCount)
+
+        var indexByNodeId: [NodeId: Int] = [:]
+        indexByNodeId.reserveCapacity(estimatedWindowCount)
+
+        for (columnIndex, column) in columns.enumerated() {
+            for window in column.windowNodes {
+                guard let frame = window.frame else { continue }
+                let index = entries.count
+                entries.append(
+                    InteractionSnapshot.WindowEntry(
+                        window: window,
+                        columnIndex: columnIndex,
+                        frame: frame
+                    )
+                )
+                indexByNodeId[window.id] = index
+            }
+        }
+
+        return InteractionIndex(
+            windowEntries: entries,
+            windowIndexByNodeId: indexByNodeId
+        )
+    }
+
+    @discardableResult
+    static func seedInteractionContext(
+        context: LayoutContext,
+        snapshot: InteractionSnapshot
+    ) -> Bool {
+        var rawColumnMeta = [OmniNiriColumnDropzoneMeta](
+            repeating: OmniNiriColumnDropzoneMeta(
+                is_valid: 0,
+                min_y: 0,
+                max_y: 0,
+                post_insertion_count: 0
+            ),
+            count: snapshot.columnDropzoneMeta.count
+        )
+
+        for (index, meta) in snapshot.columnDropzoneMeta.enumerated() {
+            guard let meta else { continue }
+            rawColumnMeta[index] = OmniNiriColumnDropzoneMeta(
+                is_valid: 1,
+                min_y: Double(meta.minY),
+                max_y: Double(meta.maxY),
+                post_insertion_count: meta.postInsertionCount
+            )
+        }
+
+        let rc = snapshot.inputs.withUnsafeBufferPointer { windowBuf in
+            rawColumnMeta.withUnsafeBufferPointer { columnBuf in
+                omni_niri_layout_context_set_interaction(
+                    context.raw,
+                    windowBuf.baseAddress,
+                    windowBuf.count,
+                    columnBuf.baseAddress,
+                    columnBuf.count
+                )
+            }
+        }
+
+        return rc == OMNI_OK
+    }
+
     static func hitTestTiled(
-        columns: [NiriContainer],
+        context: LayoutContext,
+        interaction: InteractionIndex,
         point: CGPoint
     ) -> NiriWindow? {
-        hitTestTiled(
-            snapshot: makeInteractionSnapshot(columns: columns),
-            point: point
+        guard !interaction.windowEntries.isEmpty else { return nil }
+
+        var outIndex: Int64 = -1
+        let rc = withUnsafeMutablePointer(to: &outIndex) { outPtr in
+            omni_niri_ctx_hit_test_tiled(
+                context.raw,
+                Double(point.x),
+                Double(point.y),
+                outPtr
+            )
+        }
+
+        precondition(rc == OMNI_OK, "omni_niri_ctx_hit_test_tiled failed rc=\(rc)")
+        guard outIndex >= 0, outIndex < Int64(interaction.windowEntries.count) else { return nil }
+        return interaction.windowEntries[Int(outIndex)].window
+    }
+
+    static func hitTestResize(
+        context: LayoutContext,
+        interaction: InteractionIndex,
+        point: CGPoint,
+        threshold: CGFloat
+    ) -> ResizeHitResult? {
+        guard !interaction.windowEntries.isEmpty else { return nil }
+
+        var out = OmniNiriResizeHitResult(window_index: -1, edges: 0)
+        let rc = withUnsafeMutablePointer(to: &out) { outPtr in
+            omni_niri_ctx_hit_test_resize(
+                context.raw,
+                Double(point.x),
+                Double(point.y),
+                Double(threshold),
+                outPtr
+            )
+        }
+
+        precondition(rc == OMNI_OK, "omni_niri_ctx_hit_test_resize failed rc=\(rc)")
+        guard out.window_index >= 0, out.window_index < Int64(interaction.windowEntries.count) else { return nil }
+
+        let index = Int(out.window_index)
+        let entry = interaction.windowEntries[index]
+        let edges = resizeEdgeFromCode(out.edges)
+        guard !edges.isEmpty else { return nil }
+
+        return ResizeHitResult(
+            window: entry.window,
+            columnIndex: entry.columnIndex,
+            edges: edges,
+            frame: entry.frame
+        )
+    }
+
+    static func hitTestMoveTarget(
+        context: LayoutContext,
+        interaction: InteractionIndex,
+        point: CGPoint,
+        excludingWindowId: NodeId,
+        isInsertMode: Bool
+    ) -> MoveTargetResult? {
+        guard !interaction.windowEntries.isEmpty else { return nil }
+
+        let excludingIndex = interaction.windowIndexByNodeId[excludingWindowId].map(Int64.init) ?? -1
+        var out = OmniNiriMoveTargetResult(
+            window_index: -1,
+            insert_position: insertPositionCode(.swap)
+        )
+
+        let rc = withUnsafeMutablePointer(to: &out) { outPtr in
+            omni_niri_ctx_hit_test_move_target(
+                context.raw,
+                Double(point.x),
+                Double(point.y),
+                excludingIndex,
+                isInsertMode ? 1 : 0,
+                outPtr
+            )
+        }
+
+        precondition(rc == OMNI_OK, "omni_niri_ctx_hit_test_move_target failed rc=\(rc)")
+        guard out.window_index >= 0, out.window_index < Int64(interaction.windowEntries.count) else { return nil }
+        guard let position = insertPositionFromCode(out.insert_position) else { return nil }
+
+        return MoveTargetResult(
+            window: interaction.windowEntries[Int(out.window_index)].window,
+            insertPosition: position
+        )
+    }
+
+    static func insertionDropzoneFrame(
+        context: LayoutContext,
+        interaction: InteractionIndex,
+        targetWindowId: NodeId,
+        position: InsertPosition,
+        gap: CGFloat
+    ) -> CGRect? {
+        guard let windowIndex = interaction.windowIndexByNodeId[targetWindowId] else { return nil }
+
+        var rawOutput = OmniNiriDropzoneResult(
+            frame_x: 0,
+            frame_y: 0,
+            frame_width: 0,
+            frame_height: 0,
+            is_valid: 0
+        )
+        let rc = withUnsafeMutablePointer(to: &rawOutput) { outputPtr in
+            omni_niri_ctx_insertion_dropzone(
+                context.raw,
+                Int64(windowIndex),
+                Double(gap),
+                insertPositionCode(position),
+                outputPtr
+            )
+        }
+        precondition(rc == OMNI_OK, "omni_niri_ctx_insertion_dropzone failed rc=\(rc)")
+        guard rawOutput.is_valid != 0 else { return nil }
+        return CGRect(
+            x: rawOutput.frame_x,
+            y: rawOutput.frame_y,
+            width: rawOutput.frame_width,
+            height: rawOutput.frame_height
         )
     }
 
@@ -466,18 +676,6 @@ enum NiriLayoutZigKernel {
         precondition(rc == OMNI_OK, "omni_niri_hit_test_tiled failed rc=\(rc)")
         guard outIndex >= 0, outIndex < Int64(snapshot.windowEntries.count) else { return nil }
         return snapshot.windowEntries[Int(outIndex)].window
-    }
-
-    static func hitTestResize(
-        columns: [NiriContainer],
-        point: CGPoint,
-        threshold: CGFloat
-    ) -> ResizeHitResult? {
-        hitTestResize(
-            snapshot: makeInteractionSnapshot(columns: columns),
-            point: point,
-            threshold: threshold
-        )
     }
 
     static func hitTestResize(

@@ -2,6 +2,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+typedef struct OmniNiriLayoutContext OmniNiriLayoutContext;
+
 /// Input descriptor for one window on a single axis.
 /// Zig struct OmniAxisInput must match this layout exactly.
 typedef struct {
@@ -163,6 +165,13 @@ typedef struct {
     double frame_height;
     uint8_t is_fullscreen;
 } OmniNiriHitTestWindow;
+
+typedef struct {
+    uint8_t is_valid;
+    double min_y;
+    double max_y;
+    size_t post_insertion_count;
+} OmniNiriColumnDropzoneMeta;
 
 typedef struct {
     int64_t window_index;
@@ -429,6 +438,54 @@ int32_t omni_niri_layout_pass_v2(
     OmniNiriColumnOutput *out_columns,
     size_t out_column_count);
 
+/// Create a reusable Niri layout context.
+/// Returns NULL on allocation failure.
+OmniNiriLayoutContext *omni_niri_layout_context_create(void);
+
+/// Destroy a reusable Niri layout context.
+void omni_niri_layout_context_destroy(OmniNiriLayoutContext *context);
+
+/// Seed context interaction buffers directly (primarily for tests/parity harnesses).
+/// Returns 0 on success, -1 for invalid args, -2 for capacity errors.
+int32_t omni_niri_layout_context_set_interaction(
+    OmniNiriLayoutContext *context,
+    const OmniNiriHitTestWindow *windows,
+    size_t window_count,
+    const OmniNiriColumnDropzoneMeta *column_dropzones,
+    size_t column_count);
+
+/// Layout-pass v3 emits the same outputs as v2 and updates interaction feed in context.
+/// Returns 0 on success, -1 for invalid args, -2 for range/assignment/capacity errors.
+int32_t omni_niri_layout_pass_v3(
+    OmniNiriLayoutContext *context,
+    const OmniNiriColumnInput *columns,
+    size_t column_count,
+    const OmniNiriWindowInput *windows,
+    size_t window_count,
+    double working_x,
+    double working_y,
+    double working_width,
+    double working_height,
+    double view_x,
+    double view_y,
+    double view_width,
+    double view_height,
+    double fullscreen_x,
+    double fullscreen_y,
+    double fullscreen_width,
+    double fullscreen_height,
+    double primary_gap,
+    double secondary_gap,
+    double view_start,
+    double viewport_span,
+    double workspace_offset,
+    double scale,
+    uint8_t orientation,
+    OmniNiriWindowOutput *out_windows,
+    size_t out_window_count,
+    OmniNiriColumnOutput *out_columns,
+    size_t out_column_count);
+
 /// Hit-test tiled windows and return first containing window index.
 /// Returns 0 on success, -1 for invalid args.
 int32_t omni_niri_hit_test_tiled(
@@ -438,11 +495,28 @@ int32_t omni_niri_hit_test_tiled(
     double point_y,
     int64_t *out_window_index);
 
+/// Hit-test tiled windows from reusable context feed.
+/// Returns 0 on success, -1 for invalid args.
+int32_t omni_niri_ctx_hit_test_tiled(
+    const OmniNiriLayoutContext *context,
+    double point_x,
+    double point_y,
+    int64_t *out_window_index);
+
 /// Hit-test resize edges around tiled windows.
 /// Returns 0 on success, -1 for invalid args.
 int32_t omni_niri_hit_test_resize(
     const OmniNiriHitTestWindow *windows,
     size_t window_count,
+    double point_x,
+    double point_y,
+    double threshold,
+    OmniNiriResizeHitResult *out_result);
+
+/// Hit-test resize edges from reusable context feed.
+/// Returns 0 on success, -1 for invalid args.
+int32_t omni_niri_ctx_hit_test_resize(
+    const OmniNiriLayoutContext *context,
     double point_x,
     double point_y,
     double threshold,
@@ -459,10 +533,29 @@ int32_t omni_niri_hit_test_move_target(
     uint8_t is_insert_mode,
     OmniNiriMoveTargetResult *out_result);
 
+/// Hit-test move targets from reusable context feed.
+/// Returns 0 on success, -1 for invalid args.
+int32_t omni_niri_ctx_hit_test_move_target(
+    const OmniNiriLayoutContext *context,
+    double point_x,
+    double point_y,
+    int64_t excluding_window_index,
+    uint8_t is_insert_mode,
+    OmniNiriMoveTargetResult *out_result);
+
 /// Compute insertion dropzone frame for before/after/swap placement.
 /// Returns 0 on success, -1 for invalid args.
 int32_t omni_niri_insertion_dropzone(
     const OmniNiriDropzoneInput *input,
+    OmniNiriDropzoneResult *out_result);
+
+/// Compute insertion dropzone using context metadata and target window index.
+/// Returns 0 on success, -1 for invalid args.
+int32_t omni_niri_ctx_insertion_dropzone(
+    const OmniNiriLayoutContext *context,
+    int64_t target_window_index,
+    double gap,
+    uint8_t insert_position,
     OmniNiriDropzoneResult *out_result);
 
 /// Compute interactive resize updates for column width/window weight.
@@ -507,6 +600,15 @@ int32_t omni_niri_validate_state_snapshot(
     const OmniNiriStateWindowInput *windows,
     size_t window_count,
     OmniNiriStateValidationResult *out_result);
+
+/// Encode state arrays into a reusable context for planner calls.
+/// Returns 0 on success, -1 for invalid args, -2 for capacity/range failures.
+int32_t omni_niri_ctx_encode_state(
+    OmniNiriLayoutContext *context,
+    const OmniNiriStateColumnInput *columns,
+    size_t column_count,
+    const OmniNiriStateWindowInput *windows,
+    size_t window_count);
 
 typedef enum {
     OMNI_NIRI_DIRECTION_LEFT = 0,
@@ -563,6 +665,13 @@ int32_t omni_niri_navigation_resolve(
     size_t column_count,
     const OmniNiriStateWindowInput *windows,
     size_t window_count,
+    const OmniNiriNavigationRequest *request,
+    OmniNiriNavigationResult *out_result);
+
+/// Resolve navigation request against context-encoded state.
+/// Returns 0 on success, -1 for invalid args, -2 for range errors.
+int32_t omni_niri_ctx_resolve_navigation(
+    const OmniNiriLayoutContext *context,
     const OmniNiriNavigationRequest *request,
     OmniNiriNavigationResult *out_result);
 
@@ -669,6 +778,13 @@ int32_t omni_niri_mutation_plan(
     const OmniNiriMutationRequest *request,
     OmniNiriMutationResult *out_result);
 
+/// Resolve mutation request against context-encoded state.
+/// Returns 0 on success, -1 for invalid args, -2 for range errors.
+int32_t omni_niri_ctx_resolve_mutation(
+    const OmniNiriLayoutContext *context,
+    const OmniNiriMutationRequest *request,
+    OmniNiriMutationResult *out_result);
+
 typedef enum {
     OMNI_NIRI_WORKSPACE_OP_MOVE_WINDOW_TO_WORKSPACE = 0,
     OMNI_NIRI_WORKSPACE_OP_MOVE_COLUMN_TO_WORKSPACE = 1
@@ -722,5 +838,13 @@ int32_t omni_niri_workspace_plan(
     size_t target_column_count,
     const OmniNiriStateWindowInput *target_windows,
     size_t target_window_count,
+    const OmniNiriWorkspaceRequest *request,
+    OmniNiriWorkspaceResult *out_result);
+
+/// Resolve workspace request against source/target context-encoded states.
+/// Returns 0 on success, -1 for invalid args, -2 for range errors.
+int32_t omni_niri_ctx_resolve_workspace(
+    const OmniNiriLayoutContext *source_context,
+    const OmniNiriLayoutContext *target_context,
     const OmniNiriWorkspaceRequest *request,
     OmniNiriWorkspaceResult *out_result);

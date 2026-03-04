@@ -8,9 +8,10 @@ extension NiriLayoutEngine {
         threshold: CGFloat? = nil
     ) -> ResizeHitTestResult? {
         let threshold = threshold ?? resizeConfiguration.edgeThreshold
-        guard let snapshot = ensureInteractionSnapshot(for: workspaceId) else { return nil }
+        guard let interaction = interactionState(for: workspaceId) else { return nil }
         guard let hit = NiriLayoutZigKernel.hitTestResize(
-            snapshot: snapshot,
+            context: interaction.context,
+            interaction: interaction.index,
             point: point,
             threshold: threshold
         ) else {
@@ -30,9 +31,10 @@ extension NiriLayoutEngine {
         point: CGPoint,
         in workspaceId: WorkspaceDescriptor.ID
     ) -> NiriWindow? {
-        guard let snapshot = ensureInteractionSnapshot(for: workspaceId) else { return nil }
+        guard let interaction = interactionState(for: workspaceId) else { return nil }
         return NiriLayoutZigKernel.hitTestTiled(
-            snapshot: snapshot,
+            context: interaction.context,
+            interaction: interaction.index,
             point: point
         )
     }

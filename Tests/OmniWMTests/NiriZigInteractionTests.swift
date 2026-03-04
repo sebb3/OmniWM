@@ -25,6 +25,25 @@ private func percentile(_ samples: [Double], _ p: Double) -> Double {
     return sorted[idx]
 }
 
+private struct PreflightInteractionBaseline: Decodable {
+    let layout_p95_sec: Double
+    let interaction_uncached_tiled_p95_sec: Double
+    let interaction_uncached_resize_p95_sec: Double
+    let interaction_uncached_move_p95_sec: Double
+    let interaction_context_tiled_p95_sec: Double
+    let interaction_context_resize_p95_sec: Double
+    let interaction_context_move_p95_sec: Double
+}
+
+private func loadPreflightInteractionBaseline() -> PreflightInteractionBaseline? {
+    let benchmarksDir = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Benchmarks")
+    let baselinePath = benchmarksDir.appendingPathComponent("preflight-baseline-2026-03-03.json")
+    guard let data = try? Data(contentsOf: baselinePath) else { return nil }
+    return try? JSONDecoder().decode(PreflightInteractionBaseline.self, from: data)
+}
+
 private struct LCG {
     private var state: UInt64
 
@@ -125,6 +144,30 @@ private func referenceInsertionDropzone(
     return CGRect(x: x, y: y, width: width, height: newHeight)
 }
 
+@MainActor
+@discardableResult
+private func seedInteractionContextFromCurrentFrames(
+    engine: NiriLayoutEngine,
+    workspaceId: WorkspaceDescriptor.ID
+) -> Bool {
+    guard let root = engine.root(for: workspaceId),
+          let context = engine.ensureLayoutContext(for: workspaceId)
+    else {
+        return false
+    }
+
+    let snapshot = NiriLayoutZigKernel.makeInteractionSnapshot(columns: root.columns)
+    guard NiriLayoutZigKernel.seedInteractionContext(context: context, snapshot: snapshot) else {
+        return false
+    }
+
+    engine.interactionIndexes[workspaceId] = NiriLayoutZigKernel.InteractionIndex(
+        windowEntries: snapshot.windowEntries,
+        windowIndexByNodeId: snapshot.windowIndexByNodeId
+    )
+    return true
+}
+
 @Suite struct NiriZigInteractionTests {
     @MainActor
     @Test func layoutPassV2PopulatesColumnFramesAndHiddenSides() {
@@ -200,6 +243,8 @@ private func referenceInsertionDropzone(
         engine.handleToNode[h1] = w1
         engine.handleToNode[h2] = w2
 
+        #expect(seedInteractionContextFromCurrentFrames(engine: engine, workspaceId: wsId))
+
         let hit = engine.hitTestTiled(point: CGPoint(x: 350, y: 50), in: wsId)
         #expect(hit?.id == w2.id)
 
@@ -229,6 +274,8 @@ private func referenceInsertionDropzone(
         normalWindow.frame = CGRect(x: 220, y: 20, width: 240, height: 220)
         column.appendChild(normalWindow)
         engine.handleToNode[normalHandle] = normalWindow
+
+        #expect(seedInteractionContextFromCurrentFrames(engine: engine, workspaceId: wsId))
 
         let fullscreenEdgeHit = engine.hitTestResize(
             point: CGPoint(x: 1, y: 1),
@@ -316,7 +363,7 @@ private func referenceInsertionDropzone(
             }
         }
 
-        engine.interactionSnapshots[wsId] = NiriLayoutZigKernel.makeInteractionSnapshot(columns: root.columns)
+        #expect(seedInteractionContextFromCurrentFrames(engine: engine, workspaceId: wsId))
         let excludedId = windows[0].id
 
         var rng = LCG(seed: 0xCAFE_F00D)
@@ -369,7 +416,7 @@ private func referenceInsertionDropzone(
             windows.append(window)
         }
 
-        engine.interactionSnapshots[wsId] = NiriLayoutZigKernel.makeInteractionSnapshot(columns: root.columns)
+        #expect(seedInteractionContextFromCurrentFrames(engine: engine, workspaceId: wsId))
 
         let targets = [windows.first, windows.last].compactMap { $0 }
         let positions: [InsertPosition] = [.before, .after, .swap]
@@ -420,7 +467,7 @@ private func referenceInsertionDropzone(
         column.appendChild(upperWindow)
         engine.handleToNode[upperHandle] = upperWindow
 
-        engine.interactionSnapshots[wsId] = NiriLayoutZigKernel.makeInteractionSnapshot(columns: root.columns)
+        #expect(seedInteractionContextFromCurrentFrames(engine: engine, workspaceId: wsId))
 
         let lowerDropzone = engine.insertionDropzoneFrame(
             targetWindowId: lowerWindow.id,
@@ -478,7 +525,7 @@ private func referenceInsertionDropzone(
             }
         }
 
-        engine.interactionSnapshots[wsId] = NiriLayoutZigKernel.makeInteractionSnapshot(columns: root.columns)
+        #expect(seedInteractionContextFromCurrentFrames(engine: engine, workspaceId: wsId))
 
         var rng = LCG(seed: 0xDEAD_BEEF)
         var points: [CGPoint] = []
@@ -531,7 +578,7 @@ private func referenceInsertionDropzone(
 
         print(
             String(
-                format: "Niri interaction benchmark p95 (zig snapshot): tiled=%.6f resize=%.6f move=%.6f",
+                format: "Niri interaction benchmark p95 (zig context): tiled=%.9f resize=%.9f move=%.9f",
                 zigSnapshotTiledP95,
                 zigSnapshotResizeP95,
                 zigSnapshotMoveP95
@@ -539,7 +586,7 @@ private func referenceInsertionDropzone(
         )
         print(
             String(
-                format: "Niri interaction benchmark p95 (zig uncached): tiled=%.6f resize=%.6f move=%.6f",
+                format: "Niri interaction benchmark p95 (zig uncached): tiled=%.9f resize=%.9f move=%.9f",
                 zigUncachedTiledP95,
                 zigUncachedResizeP95,
                 zigUncachedMoveP95
@@ -552,5 +599,146 @@ private func referenceInsertionDropzone(
         #expect(zigUncachedTiledP95 > 0)
         #expect(zigUncachedResizeP95 > 0)
         #expect(zigUncachedMoveP95 > 0)
+
+        if let baseline = loadPreflightInteractionBaseline() {
+            // Context hit-tests should remain close to fast-path floor.
+            #expect(zigSnapshotTiledP95 <= baseline.interaction_context_tiled_p95_sec * 1.25)
+            #expect(zigSnapshotResizeP95 <= baseline.interaction_context_resize_p95_sec * 1.25)
+            #expect(zigSnapshotMoveP95 <= baseline.interaction_context_move_p95_sec * 1.25)
+
+            // Uncached interaction path guards the feed-build overhead.
+            #expect(zigUncachedTiledP95 <= baseline.interaction_uncached_tiled_p95_sec * 2.5)
+            #expect(zigUncachedResizeP95 <= baseline.interaction_uncached_resize_p95_sec * 2.5)
+            #expect(zigUncachedMoveP95 <= baseline.interaction_uncached_move_p95_sec * 2.5)
+        }
+    }
+
+    @Test func layoutContextLifecycleCreateDestroyRecreate() {
+        weak var released: AnyObject?
+        do {
+            let context = NiriLayoutZigKernel.LayoutContext()
+            #expect(context != nil)
+            released = context
+        }
+        #expect(released == nil)
+
+        let recreated = NiriLayoutZigKernel.LayoutContext()
+        #expect(recreated != nil)
+    }
+
+    @MainActor
+    @Test func contextInteractionParityMatchesSnapshotPath() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 6)
+        let wsId = WorkspaceDescriptor.ID()
+        let root = NiriRoot(workspaceId: wsId)
+        engine.roots[wsId] = root
+
+        var windows: [NiriWindow] = []
+        for columnIndex in 0 ..< 3 {
+            let column = NiriContainer()
+            root.appendChild(column)
+            for rowIndex in 0 ..< 3 {
+                let handle = makeTestHandle(pid: pid_t(12_000 + columnIndex * 10 + rowIndex))
+                let window = NiriWindow(handle: handle)
+                window.frame = CGRect(
+                    x: CGFloat(columnIndex) * 260,
+                    y: CGFloat(rowIndex) * 120,
+                    width: 240,
+                    height: 100
+                )
+                column.appendChild(window)
+                engine.handleToNode[handle] = window
+                windows.append(window)
+            }
+        }
+
+        let snapshot = NiriLayoutZigKernel.makeInteractionSnapshot(columns: root.columns)
+        guard let context = NiriLayoutZigKernel.LayoutContext() else {
+            Issue.record("failed to create layout context")
+            return
+        }
+        #expect(NiriLayoutZigKernel.seedInteractionContext(context: context, snapshot: snapshot))
+
+        let interaction = NiriLayoutZigKernel.InteractionIndex(
+            windowEntries: snapshot.windowEntries,
+            windowIndexByNodeId: snapshot.windowIndexByNodeId
+        )
+
+        var rng = LCG(seed: 0xBEEF_CAFE)
+        let excludedId = windows[0].id
+        for _ in 0 ..< 1_000 {
+            let point = CGPoint(
+                x: 780 * rng.nextUnit(),
+                y: 420 * rng.nextUnit()
+            )
+
+            let snapshotTiled = NiriLayoutZigKernel.hitTestTiled(snapshot: snapshot, point: point)
+            let contextTiled = NiriLayoutZigKernel.hitTestTiled(context: context, interaction: interaction, point: point)
+            #expect(snapshotTiled?.id == contextTiled?.id)
+
+            let snapshotResize = NiriLayoutZigKernel.hitTestResize(snapshot: snapshot, point: point, threshold: 8)
+            let contextResize = NiriLayoutZigKernel.hitTestResize(
+                context: context,
+                interaction: interaction,
+                point: point,
+                threshold: 8
+            )
+            #expect(snapshotResize?.window.id == contextResize?.window.id)
+            #expect(snapshotResize?.edges == contextResize?.edges)
+
+            for isInsertMode in [false, true] {
+                let snapshotMove = NiriLayoutZigKernel.hitTestMoveTarget(
+                    snapshot: snapshot,
+                    point: point,
+                    excludingWindowId: excludedId,
+                    isInsertMode: isInsertMode
+                )
+                let contextMove = NiriLayoutZigKernel.hitTestMoveTarget(
+                    context: context,
+                    interaction: interaction,
+                    point: point,
+                    excludingWindowId: excludedId,
+                    isInsertMode: isInsertMode
+                )
+                #expect(snapshotMove?.window.id == contextMove?.window.id)
+                #expect(snapshotMove?.insertPosition == contextMove?.insertPosition)
+            }
+        }
+
+        for window in windows {
+            guard let windowIndex = snapshot.windowIndexByNodeId[window.id],
+                  snapshot.windowEntries.indices.contains(windowIndex)
+            else {
+                continue
+            }
+            let entry = snapshot.windowEntries[windowIndex]
+            guard snapshot.columnDropzoneMeta.indices.contains(entry.columnIndex),
+                  let columnMeta = snapshot.columnDropzoneMeta[entry.columnIndex]
+            else {
+                continue
+            }
+
+            for position in [InsertPosition.before, .after, .swap] {
+                let snapshotDropzone = NiriLayoutZigKernel.computeInsertionDropzone(
+                    .init(
+                        targetFrame: entry.frame,
+                        columnIndex: entry.columnIndex,
+                        columnMinY: columnMeta.minY,
+                        columnMaxY: columnMeta.maxY,
+                        postInsertionCount: columnMeta.postInsertionCount,
+                        gap: 24,
+                        position: position
+                    )
+                )
+                let contextDropzone = NiriLayoutZigKernel.insertionDropzoneFrame(
+                    context: context,
+                    interaction: interaction,
+                    targetWindowId: window.id,
+                    position: position,
+                    gap: 24
+                )
+                #expect(rectsApproximatelyEqual(snapshotDropzone, contextDropzone))
+            }
+        }
     }
 }

@@ -2,8 +2,11 @@
   "date": "2026-03-03",
   "commit": "d726e5d3769688e1cf7ad70ee949634062add253",
   "layout_p95_sec": 0.000036,
-  "interaction_uncached_tiled_p95_sec": 0.000037,
-  "interaction_uncached_resize_p95_sec": 0.000038,
-  "interaction_uncached_move_p95_sec": 0.000037,
-  "notes": "Interaction cached p95 printed as 0.000000 at 6-decimal precision; treat as formatting floor effect, not zero work."
+  "interaction_context_tiled_p95_sec": 0.000000400,
+  "interaction_context_resize_p95_sec": 0.000000500,
+  "interaction_context_move_p95_sec": 0.000000700,
+  "interaction_uncached_tiled_p95_sec": 0.000045,
+  "interaction_uncached_resize_p95_sec": 0.000050,
+  "interaction_uncached_move_p95_sec": 0.000052,
+  "notes": "Context-backed interaction p95 values measured with 9-decimal precision after layout-context cutover."
 }

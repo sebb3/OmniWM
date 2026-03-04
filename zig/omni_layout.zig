@@ -21,6 +21,7 @@ const mutation = @import("omni/mutation.zig");
 const workspace = @import("omni/workspace.zig");
 const layout_pass = @import("omni/layout_pass.zig");
 const interaction = @import("omni/interaction.zig");
+const layout_context = @import("omni/layout_context.zig");
 const viewport = @import("omni/viewport.zig");
 
 /// Solve axis layout for `window_count` windows.
@@ -279,6 +280,96 @@ export fn omni_niri_layout_pass_v2(
     );
 }
 
+/// Create a reusable Niri layout context.
+export fn omni_niri_layout_context_create() [*c]layout_context.OmniNiriLayoutContext {
+    return layout_context.omni_niri_layout_context_create_impl();
+}
+
+/// Destroy a reusable Niri layout context.
+export fn omni_niri_layout_context_destroy(context: [*c]layout_context.OmniNiriLayoutContext) void {
+    layout_context.omni_niri_layout_context_destroy_impl(context);
+}
+
+/// Seed context interaction buffers directly (primarily for tests and parity harnesses).
+export fn omni_niri_layout_context_set_interaction(
+    context: [*c]layout_context.OmniNiriLayoutContext,
+    windows: [*c]const abi.OmniNiriHitTestWindow,
+    window_count: usize,
+    column_dropzones: [*c]const abi.OmniNiriColumnDropzoneMeta,
+    column_count: usize,
+) i32 {
+    return layout_context.omni_niri_layout_context_set_interaction_impl(
+        context,
+        windows,
+        window_count,
+        column_dropzones,
+        column_count,
+    );
+}
+
+/// Run Niri tiled layout pass and update a reusable context with hit-test/dropzone feed data.
+export fn omni_niri_layout_pass_v3(
+    context: [*c]layout_context.OmniNiriLayoutContext,
+    columns: [*c]const abi.OmniNiriColumnInput,
+    column_count: usize,
+    windows: [*c]const abi.OmniNiriWindowInput,
+    window_count: usize,
+    working_x: f64,
+    working_y: f64,
+    working_width: f64,
+    working_height: f64,
+    view_x: f64,
+    view_y: f64,
+    view_width: f64,
+    view_height: f64,
+    fullscreen_x: f64,
+    fullscreen_y: f64,
+    fullscreen_width: f64,
+    fullscreen_height: f64,
+    primary_gap: f64,
+    secondary_gap: f64,
+    view_start: f64,
+    viewport_span: f64,
+    workspace_offset: f64,
+    scale: f64,
+    orientation: u8,
+    out_windows: [*c]abi.OmniNiriWindowOutput,
+    out_window_count: usize,
+    out_columns: [*c]abi.OmniNiriColumnOutput,
+    out_column_count: usize,
+) i32 {
+    return layout_context.omni_niri_layout_pass_v3_impl(
+        context,
+        columns,
+        column_count,
+        windows,
+        window_count,
+        working_x,
+        working_y,
+        working_width,
+        working_height,
+        view_x,
+        view_y,
+        view_width,
+        view_height,
+        fullscreen_x,
+        fullscreen_y,
+        fullscreen_width,
+        fullscreen_height,
+        primary_gap,
+        secondary_gap,
+        view_start,
+        viewport_span,
+        workspace_offset,
+        scale,
+        orientation,
+        out_windows,
+        out_window_count,
+        out_columns,
+        out_column_count,
+    );
+}
+
 /// Hit-test tiled windows and return the first window index containing the point.
 export fn omni_niri_hit_test_tiled(
     windows: [*c]const abi.OmniNiriHitTestWindow,
@@ -290,6 +381,21 @@ export fn omni_niri_hit_test_tiled(
     return interaction.omni_niri_hit_test_tiled_impl(
         windows,
         window_count,
+        point_x,
+        point_y,
+        out_window_index,
+    );
+}
+
+/// Hit-test tiled windows from a reusable context.
+export fn omni_niri_ctx_hit_test_tiled(
+    context: [*c]const layout_context.OmniNiriLayoutContext,
+    point_x: f64,
+    point_y: f64,
+    out_window_index: [*c]i64,
+) i32 {
+    return layout_context.omni_niri_ctx_hit_test_tiled_impl(
+        context,
         point_x,
         point_y,
         out_window_index,
@@ -308,6 +414,23 @@ export fn omni_niri_hit_test_resize(
     return interaction.omni_niri_hit_test_resize_impl(
         windows,
         window_count,
+        point_x,
+        point_y,
+        threshold,
+        out_result,
+    );
+}
+
+/// Hit-test resize edges from a reusable context.
+export fn omni_niri_ctx_hit_test_resize(
+    context: [*c]const layout_context.OmniNiriLayoutContext,
+    point_x: f64,
+    point_y: f64,
+    threshold: f64,
+    out_result: [*c]abi.OmniNiriResizeHitResult,
+) i32 {
+    return layout_context.omni_niri_ctx_hit_test_resize_impl(
+        context,
         point_x,
         point_y,
         threshold,
@@ -336,12 +459,106 @@ export fn omni_niri_hit_test_move_target(
     );
 }
 
+/// Hit-test move target from a reusable context.
+export fn omni_niri_ctx_hit_test_move_target(
+    context: [*c]const layout_context.OmniNiriLayoutContext,
+    point_x: f64,
+    point_y: f64,
+    excluding_window_index: i64,
+    is_insert_mode: u8,
+    out_result: [*c]abi.OmniNiriMoveTargetResult,
+) i32 {
+    return layout_context.omni_niri_ctx_hit_test_move_target_impl(
+        context,
+        point_x,
+        point_y,
+        excluding_window_index,
+        is_insert_mode,
+        out_result,
+    );
+}
+
 /// Compute insertion dropzone frame for before/after/swap placement.
 export fn omni_niri_insertion_dropzone(
     input: [*c]const abi.OmniNiriDropzoneInput,
     out_result: [*c]abi.OmniNiriDropzoneResult,
 ) i32 {
     return interaction.omni_niri_insertion_dropzone_impl(input, out_result);
+}
+
+/// Compute insertion dropzone from a reusable context by target window index.
+export fn omni_niri_ctx_insertion_dropzone(
+    context: [*c]const layout_context.OmniNiriLayoutContext,
+    target_window_index: i64,
+    gap: f64,
+    insert_position: u8,
+    out_result: [*c]abi.OmniNiriDropzoneResult,
+) i32 {
+    return layout_context.omni_niri_ctx_insertion_dropzone_impl(
+        context,
+        target_window_index,
+        gap,
+        insert_position,
+        out_result,
+    );
+}
+
+/// Encode state arrays into a reusable context for planner calls.
+export fn omni_niri_ctx_encode_state(
+    context: [*c]layout_context.OmniNiriLayoutContext,
+    columns: [*c]const abi.OmniNiriStateColumnInput,
+    column_count: usize,
+    windows: [*c]const abi.OmniNiriStateWindowInput,
+    window_count: usize,
+) i32 {
+    return layout_context.omni_niri_ctx_encode_state_impl(
+        context,
+        columns,
+        column_count,
+        windows,
+        window_count,
+    );
+}
+
+/// Resolve navigation request from context-encoded state.
+export fn omni_niri_ctx_resolve_navigation(
+    context: [*c]const layout_context.OmniNiriLayoutContext,
+    request: [*c]const abi.OmniNiriNavigationRequest,
+    out_result: [*c]abi.OmniNiriNavigationResult,
+) i32 {
+    return layout_context.omni_niri_ctx_resolve_navigation_impl(
+        context,
+        request,
+        out_result,
+    );
+}
+
+/// Resolve mutation request from context-encoded state.
+export fn omni_niri_ctx_resolve_mutation(
+    context: [*c]const layout_context.OmniNiriLayoutContext,
+    request: [*c]const abi.OmniNiriMutationRequest,
+    out_result: [*c]abi.OmniNiriMutationResult,
+) i32 {
+    return layout_context.omni_niri_ctx_resolve_mutation_impl(
+        context,
+        request,
+        out_result,
+    );
+}
+
+/// Resolve workspace request from source/target context-encoded states.
+export fn omni_niri_ctx_resolve_workspace(
+    source_context: [*c]const layout_context.OmniNiriLayoutContext,
+    target_context: [*c]const layout_context.OmniNiriLayoutContext,
+    request: [*c]const abi.OmniNiriWorkspaceRequest,
+    out_result: [*c]abi.OmniNiriWorkspaceResult,
+) i32 {
+    return layout_context.omni_niri_ctx_resolve_workspace_impl(
+        source_context,
+        target_context,
+        request,
+        out_result,
+    );
 }
 
 /// Compute interactive resize result for column width/window weight.
