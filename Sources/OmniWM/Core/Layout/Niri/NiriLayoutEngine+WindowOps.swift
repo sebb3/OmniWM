@@ -2,14 +2,32 @@ import AppKit
 import Foundation
 
 extension NiriLayoutEngine {
-    func planMutation(
+    private struct WindowMutationPreparedRequest {
+        let snapshot: NiriStateZigKernel.Snapshot
+        let request: NiriStateZigKernel.MutationRequest
+    }
+
+    private struct WindowMutationApplyOutcome {
+        let applied: Bool
+        let targetWindow: NiriWindow?
+        let delegatedMoveColumn: (column: NiriContainer, direction: Direction)?
+    }
+
+    private struct HorizontalSwapAnimationCapture {
+        let sourceWindow: NiriWindow
+        let targetWindow: NiriWindow
+        let sourcePoint: CGPoint
+        let targetPoint: CGPoint
+    }
+
+    private func prepareWindowMutationRequest(
         op: NiriStateZigKernel.MutationOp,
         sourceWindow: NiriWindow,
         targetWindow: NiriWindow? = nil,
         direction: Direction? = nil,
         insertPosition: InsertPosition? = nil,
         in workspaceId: WorkspaceDescriptor.ID
-    ) -> (snapshot: NiriStateZigKernel.Snapshot, outcome: NiriStateZigKernel.MutationOutcome)? {
+    ) -> WindowMutationPreparedRequest? {
         let snapshot = NiriStateZigKernel.makeSnapshot(columns: columns(in: workspaceId))
         guard let sourceWindowIndex = snapshot.windowIndexByNodeId[sourceWindow.id] else {
             return nil
@@ -35,12 +53,381 @@ extension NiriLayoutEngine {
             maxWindowsPerColumn: maxWindowsPerColumn
         )
 
-        let outcome = NiriStateZigKernel.resolveMutation(snapshot: snapshot, request: request)
+        return WindowMutationPreparedRequest(snapshot: snapshot, request: request)
+    }
+
+    private func applyLegacyWindowMutation(
+        _ prepared: WindowMutationPreparedRequest
+    ) -> WindowMutationApplyOutcome? {
+        let outcome = NiriStateZigKernel.resolveMutation(
+            snapshot: prepared.snapshot,
+            request: prepared.request
+        )
         guard outcome.rc == 0 else {
             return nil
         }
 
-        return (snapshot, outcome)
+        let applyOutcome = NiriStateZigMutationApplier.apply(
+            outcome: outcome,
+            snapshot: prepared.snapshot,
+            engine: self
+        )
+
+        return WindowMutationApplyOutcome(
+            applied: applyOutcome.applied,
+            targetWindow: applyOutcome.targetWindow,
+            delegatedMoveColumn: applyOutcome.delegatedMoveColumn
+        )
+    }
+
+    private func applyRuntimeWindowMutation(
+        _ prepared: WindowMutationPreparedRequest,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) -> WindowMutationApplyOutcome? {
+        guard let context = ensureLayoutContext(for: workspaceId) else {
+            return nil
+        }
+
+        let seedRC = NiriStateZigKernel.seedRuntimeState(
+            context: context,
+            snapshot: prepared.snapshot
+        )
+        guard seedRC == 0 else {
+            return nil
+        }
+        runtimeMirrorStates[workspaceId] = RuntimeMirrorState(
+            isSeeded: true,
+            columnCount: prepared.snapshot.columns.count,
+            windowCount: prepared.snapshot.windows.count
+        )
+
+        let applyOutcome = NiriStateZigKernel.applyMutation(
+            context: context,
+            request: .init(request: prepared.request)
+        )
+        guard applyOutcome.rc == 0 else {
+            return nil
+        }
+        guard applyOutcome.applied else {
+            return WindowMutationApplyOutcome(
+                applied: false,
+                targetWindow: nil,
+                delegatedMoveColumn: nil
+            )
+        }
+
+        let exported = NiriStateZigKernel.exportRuntimeState(context: context)
+        guard exported.rc == 0 else {
+            return nil
+        }
+
+        let projection = NiriStateZigRuntimeProjector.project(
+            export: exported.export,
+            hints: applyOutcome.hints,
+            workspaceId: workspaceId,
+            engine: self
+        )
+        guard projection.applied else {
+            return nil
+        }
+
+        var runtimeOutcome = WindowMutationApplyOutcome(
+            applied: true,
+            targetWindow: nil,
+            delegatedMoveColumn: nil
+        )
+        if let targetWindowId = applyOutcome.targetWindowId {
+            guard let resolvedTarget = root(for: workspaceId)?.findNode(by: targetWindowId) as? NiriWindow else {
+                return nil
+            }
+            runtimeOutcome = WindowMutationApplyOutcome(
+                applied: true,
+                targetWindow: resolvedTarget,
+                delegatedMoveColumn: nil
+            )
+        }
+        if let delegated = applyOutcome.hints.delegatedMoveColumn {
+            guard let resolvedColumn = root(for: workspaceId)?.findNode(by: delegated.columnId) as? NiriContainer else {
+                return nil
+            }
+            runtimeOutcome = WindowMutationApplyOutcome(
+                applied: true,
+                targetWindow: runtimeOutcome.targetWindow,
+                delegatedMoveColumn: (resolvedColumn, delegated.direction)
+            )
+        }
+
+        applyRuntimeMutationCompatibilitySideEffects(
+            prepared: prepared,
+            outcome: runtimeOutcome
+        )
+
+        runtimeMirrorStates[workspaceId] = RuntimeMirrorState(
+            isSeeded: true,
+            columnCount: exported.export.columns.count,
+            windowCount: exported.export.windows.count
+        )
+
+        return runtimeOutcome
+    }
+
+    private func applyRuntimeMutationCompatibilitySideEffects(
+        prepared: WindowMutationPreparedRequest,
+        outcome: WindowMutationApplyOutcome
+    ) {
+        switch prepared.request.op {
+        case .swapWindowHorizontal:
+            // Runtime projection only carries scalar size; preserve legacy width-state behavior in Swift.
+            guard outcome.delegatedMoveColumn == nil,
+                  let direction = prepared.request.direction,
+                  prepared.snapshot.windowEntries.indices.contains(prepared.request.sourceWindowIndex)
+            else {
+                return
+            }
+
+            let sourceEntry = prepared.snapshot.windowEntries[prepared.request.sourceWindowIndex]
+            let step = direction == .right ? 1 : direction == .left ? -1 : 0
+            guard step != 0,
+                  let targetColumnIndex = wrapIndex(sourceEntry.columnIndex + step, total: prepared.snapshot.columns.count),
+                  targetColumnIndex != sourceEntry.columnIndex,
+                  prepared.snapshot.columnEntries.indices.contains(sourceEntry.columnIndex),
+                  prepared.snapshot.columnEntries.indices.contains(targetColumnIndex)
+            else {
+                return
+            }
+
+            let sourceColumn = prepared.snapshot.columnEntries[sourceEntry.columnIndex].column
+            let targetColumn = prepared.snapshot.columnEntries[targetColumnIndex].column
+            let sourceWidth = sourceColumn.width
+            let sourceIsFullWidth = sourceColumn.isFullWidth
+            let sourceSavedWidth = sourceColumn.savedWidth
+
+            sourceColumn.width = targetColumn.width
+            sourceColumn.isFullWidth = targetColumn.isFullWidth
+            sourceColumn.savedWidth = targetColumn.savedWidth
+
+            targetColumn.width = sourceWidth
+            targetColumn.isFullWidth = sourceIsFullWidth
+            targetColumn.savedWidth = sourceSavedWidth
+
+        case .swapWindowsByMove:
+            guard prepared.snapshot.windowEntries.indices.contains(prepared.request.sourceWindowIndex),
+                  prepared.snapshot.windowEntries.indices.contains(prepared.request.targetWindowIndex)
+            else {
+                return
+            }
+            let sourceEntry = prepared.snapshot.windowEntries[prepared.request.sourceWindowIndex]
+            let targetEntry = prepared.snapshot.windowEntries[prepared.request.targetWindowIndex]
+            guard sourceEntry.column !== targetEntry.column else {
+                return
+            }
+
+            let sourceWindow = sourceEntry.window
+            let targetWindow = targetEntry.window
+            let sourceSize = sourceWindow.size
+            let sourceHeight = sourceWindow.height
+            sourceWindow.size = targetWindow.size
+            sourceWindow.height = targetWindow.height
+            targetWindow.size = sourceSize
+            targetWindow.height = sourceHeight
+
+        case .insertWindowByMove:
+            guard prepared.snapshot.windowEntries.indices.contains(prepared.request.sourceWindowIndex) else {
+                return
+            }
+            let sourceWindow = prepared.snapshot.windowEntries[prepared.request.sourceWindowIndex].window
+            sourceWindow.size = 1.0
+            sourceWindow.height = .default
+
+        case .moveWindowVertical,
+             .swapWindowVertical,
+             .moveWindowHorizontal,
+             .moveWindowToColumn,
+             .createColumnAndMove,
+             .insertWindowInNewColumn,
+             .moveColumn,
+             .consumeWindow,
+             .expelWindow,
+             .cleanupEmptyColumn,
+             .normalizeColumnSizes,
+             .normalizeWindowSizes,
+             .balanceSizes,
+             .addWindow,
+             .removeWindow,
+             .validateSelection,
+             .fallbackSelectionOnRemoval:
+            return
+        }
+    }
+
+    private func executePreparedWindowMutation(
+        _ prepared: WindowMutationPreparedRequest,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) -> WindowMutationApplyOutcome? {
+        switch backend {
+        case .legacyPlanApply:
+            return applyLegacyWindowMutation(prepared)
+        case .zigContext:
+            return applyRuntimeWindowMutation(prepared, in: workspaceId)
+        }
+    }
+
+    func applyWindowMutation(
+        op: NiriStateZigKernel.MutationOp,
+        sourceWindow: NiriWindow,
+        targetWindow: NiriWindow? = nil,
+        direction: Direction? = nil,
+        insertPosition: InsertPosition? = nil,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) -> (applied: Bool, targetWindow: NiriWindow?, delegatedMoveColumn: (column: NiriContainer, direction: Direction)?)? {
+        guard let prepared = prepareWindowMutationRequest(
+            op: op,
+            sourceWindow: sourceWindow,
+            targetWindow: targetWindow,
+            direction: direction,
+            insertPosition: insertPosition,
+            in: workspaceId
+        ) else {
+            return nil
+        }
+        guard let outcome = executePreparedWindowMutation(prepared, in: workspaceId) else {
+            return nil
+        }
+        return (
+            applied: outcome.applied,
+            targetWindow: outcome.targetWindow,
+            delegatedMoveColumn: outcome.delegatedMoveColumn
+        )
+    }
+
+    private func captureHorizontalSwapAnimation(
+        snapshot: NiriStateZigKernel.Snapshot,
+        sourceWindow: NiriWindow,
+        direction: Direction,
+        in workspaceId: WorkspaceDescriptor.ID,
+        state: ViewportState,
+        gaps: CGFloat,
+        now: CFTimeInterval
+    ) -> HorizontalSwapAnimationCapture? {
+        guard direction == .left || direction == .right else {
+            return nil
+        }
+        guard let sourceWindowIndex = snapshot.windowIndexByNodeId[sourceWindow.id],
+              snapshot.windowEntries.indices.contains(sourceWindowIndex)
+        else {
+            return nil
+        }
+
+        let sourceEntry = snapshot.windowEntries[sourceWindowIndex]
+        guard snapshot.columns.indices.contains(sourceEntry.columnIndex) else {
+            return nil
+        }
+        let sourceColumn = snapshot.columns[sourceEntry.columnIndex]
+        let sourceCount = Int(sourceColumn.window_count)
+        guard sourceCount > 0 else {
+            return nil
+        }
+
+        let step = direction == .right ? 1 : -1
+        guard let targetColumnIndex = wrapIndex(sourceEntry.columnIndex + step, total: snapshot.columns.count),
+              targetColumnIndex != sourceEntry.columnIndex,
+              snapshot.columns.indices.contains(targetColumnIndex)
+        else {
+            return nil
+        }
+
+        let targetColumn = snapshot.columns[targetColumnIndex]
+        let targetCount = Int(targetColumn.window_count)
+        guard targetCount > 0 else {
+            return nil
+        }
+
+        let sourceActiveRow = min(Int(sourceColumn.active_tile_idx), sourceCount - 1)
+        let targetActiveRow = min(Int(targetColumn.active_tile_idx), targetCount - 1)
+        let sourceActiveWindowIndex = Int(sourceColumn.window_start) + sourceActiveRow
+        let targetActiveWindowIndex = Int(targetColumn.window_start) + targetActiveRow
+        guard snapshot.windowEntries.indices.contains(sourceActiveWindowIndex),
+              snapshot.windowEntries.indices.contains(targetActiveWindowIndex)
+        else {
+            return nil
+        }
+
+        let sourceActiveEntry = snapshot.windowEntries[sourceActiveWindowIndex]
+        let targetActiveEntry = snapshot.windowEntries[targetActiveWindowIndex]
+        let preColumns = columns(in: workspaceId)
+        guard preColumns.indices.contains(sourceActiveEntry.columnIndex),
+              preColumns.indices.contains(targetActiveEntry.columnIndex)
+        else {
+            return nil
+        }
+
+        let sourceColX = state.columnX(
+            at: sourceActiveEntry.columnIndex,
+            columns: preColumns,
+            gap: gaps
+        )
+        let targetColX = state.columnX(
+            at: targetActiveEntry.columnIndex,
+            columns: preColumns,
+            gap: gaps
+        )
+        let sourceColRenderOffset = sourceActiveEntry.column.renderOffset(at: now)
+        let targetColRenderOffset = targetActiveEntry.column.renderOffset(at: now)
+        let sourceTileOffset = computeTileOffset(
+            column: sourceActiveEntry.column,
+            tileIdx: sourceActiveEntry.rowIndex,
+            gaps: gaps
+        )
+        let targetTileOffset = computeTileOffset(
+            column: targetActiveEntry.column,
+            tileIdx: targetActiveEntry.rowIndex,
+            gaps: gaps
+        )
+
+        return HorizontalSwapAnimationCapture(
+            sourceWindow: sourceActiveEntry.window,
+            targetWindow: targetActiveEntry.window,
+            sourcePoint: CGPoint(
+                x: sourceColX + sourceColRenderOffset.x,
+                y: sourceTileOffset
+            ),
+            targetPoint: CGPoint(
+                x: targetColX + targetColRenderOffset.x,
+                y: targetTileOffset
+            )
+        )
+    }
+
+    func planMutation(
+        op: NiriStateZigKernel.MutationOp,
+        sourceWindow: NiriWindow,
+        targetWindow: NiriWindow? = nil,
+        direction: Direction? = nil,
+        insertPosition: InsertPosition? = nil,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) -> (snapshot: NiriStateZigKernel.Snapshot, outcome: NiriStateZigKernel.MutationOutcome)? {
+        guard backend == .legacyPlanApply else {
+            return nil
+        }
+        guard let prepared = prepareWindowMutationRequest(
+            op: op,
+            sourceWindow: sourceWindow,
+            targetWindow: targetWindow,
+            direction: direction,
+            insertPosition: insertPosition,
+            in: workspaceId
+        ) else {
+            return nil
+        }
+        let outcome = NiriStateZigKernel.resolveMutation(
+            snapshot: prepared.snapshot,
+            request: prepared.request
+        )
+        guard outcome.rc == 0 else {
+            return nil
+        }
+
+        return (prepared.snapshot, outcome)
     }
 
     func moveWindow(
@@ -94,7 +481,7 @@ extension NiriLayoutEngine {
         direction: Direction,
         in workspaceId: WorkspaceDescriptor.ID
     ) -> Bool {
-        guard let plan = planMutation(
+        guard let applyOutcome = applyWindowMutation(
             op: .moveWindowVertical,
             sourceWindow: node,
             direction: direction,
@@ -102,12 +489,6 @@ extension NiriLayoutEngine {
         ) else {
             return false
         }
-
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
         return applyOutcome.applied
     }
 
@@ -116,7 +497,7 @@ extension NiriLayoutEngine {
         direction: Direction,
         in workspaceId: WorkspaceDescriptor.ID
     ) -> Bool {
-        guard let plan = planMutation(
+        guard let applyOutcome = applyWindowMutation(
             op: .swapWindowVertical,
             sourceWindow: node,
             direction: direction,
@@ -124,12 +505,6 @@ extension NiriLayoutEngine {
         ) else {
             return false
         }
-
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
         return applyOutcome.applied
     }
 
@@ -141,7 +516,7 @@ extension NiriLayoutEngine {
         workingFrame: CGRect,
         gaps: CGFloat
     ) -> Bool {
-        guard let plan = planMutation(
+        guard let applyOutcome = applyWindowMutation(
             op: .moveWindowHorizontal,
             sourceWindow: node,
             direction: direction,
@@ -149,12 +524,6 @@ extension NiriLayoutEngine {
         ) else {
             return false
         }
-
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
         guard applyOutcome.applied else {
             return false
         }
@@ -180,7 +549,7 @@ extension NiriLayoutEngine {
         workingFrame: CGRect,
         gaps: CGFloat
     ) -> Bool {
-        guard let plan = planMutation(
+        guard let prepared = prepareWindowMutationRequest(
             op: .swapWindowHorizontal,
             sourceWindow: node,
             direction: direction,
@@ -190,49 +559,22 @@ extension NiriLayoutEngine {
         }
 
         let now = animationClock?.now() ?? CACurrentMediaTime()
-        let preCols = columns(in: workspaceId)
-        let swapEdit = plan.outcome.edits.first(where: { $0.kind == .swapWindows })
-
-        var sourceWindowForAnimation: NiriWindow?
-        var targetWindowForAnimation: NiriWindow?
-        var sourcePt: CGPoint?
-        var targetPt: CGPoint?
-
-        if let swapEdit,
-           plan.snapshot.windowEntries.indices.contains(swapEdit.subjectIndex),
-           plan.snapshot.windowEntries.indices.contains(swapEdit.relatedIndex)
-        {
-            let sourceEntry = plan.snapshot.windowEntries[swapEdit.subjectIndex]
-            let targetEntry = plan.snapshot.windowEntries[swapEdit.relatedIndex]
-            sourceWindowForAnimation = sourceEntry.window
-            targetWindowForAnimation = targetEntry.window
-
-            if let sourceColIdx = columnIndex(of: sourceEntry.column, in: workspaceId),
-               let targetColIdx = columnIndex(of: targetEntry.column, in: workspaceId)
-            {
-                let sourceColX = state.columnX(at: sourceColIdx, columns: preCols, gap: gaps)
-                let targetColX = state.columnX(at: targetColIdx, columns: preCols, gap: gaps)
-                let sourceColRenderOffset = sourceEntry.column.renderOffset(at: now)
-                let targetColRenderOffset = targetEntry.column.renderOffset(at: now)
-                let sourceTileOffset = computeTileOffset(column: sourceEntry.column, tileIdx: sourceEntry.rowIndex, gaps: gaps)
-                let targetTileOffset = computeTileOffset(column: targetEntry.column, tileIdx: targetEntry.rowIndex, gaps: gaps)
-
-                sourcePt = CGPoint(
-                    x: sourceColX + sourceColRenderOffset.x,
-                    y: sourceTileOffset
-                )
-                targetPt = CGPoint(
-                    x: targetColX + targetColRenderOffset.x,
-                    y: targetTileOffset
-                )
-            }
-        }
-
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
+        let animationCapture = captureHorizontalSwapAnimation(
+            snapshot: prepared.snapshot,
+            sourceWindow: node,
+            direction: direction,
+            in: workspaceId,
+            state: state,
+            gaps: gaps,
+            now: now
         )
+        guard let applyOutcome = executePreparedWindowMutation(
+            prepared,
+            in: workspaceId
+        )
+        else {
+            return false
+        }
         guard applyOutcome.applied else {
             return false
         }
@@ -248,15 +590,16 @@ extension NiriLayoutEngine {
             )
         }
 
-        if let sourceWindowForAnimation,
-           let targetWindowForAnimation,
-           let sourcePt,
-           let targetPt,
-           let sourceColumn = column(of: sourceWindowForAnimation),
-           let targetColumn = column(of: targetWindowForAnimation),
+        if let animationCapture,
+           let sourceColumn = column(of: animationCapture.sourceWindow),
+           let targetColumn = column(of: animationCapture.targetWindow),
            let newSourceColIdx = columnIndex(of: sourceColumn, in: workspaceId),
            let newTargetColIdx = columnIndex(of: targetColumn, in: workspaceId)
         {
+            let sourceWindowForAnimation = animationCapture.sourceWindow
+            let targetWindowForAnimation = animationCapture.targetWindow
+            let sourcePt = animationCapture.sourcePoint
+            let targetPt = animationCapture.targetPoint
             let newCols = columns(in: workspaceId)
             let newSourceTileIdx = sourceColumn.windowNodes.firstIndex(where: { $0 === sourceWindowForAnimation }) ?? 0
             let newTargetTileIdx = targetColumn.windowNodes.firstIndex(where: { $0 === targetWindowForAnimation }) ?? 0

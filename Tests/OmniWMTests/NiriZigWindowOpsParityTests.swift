@@ -964,6 +964,124 @@ private func makeRandomMutationRequest(
         }
     }
 
+    @Test func phase4BackendSwitchDelegateSwapHorizontalParity() {
+        let dual = makePhase3SingleWindowColumnsScenario()
+        let zigEngine = dual.zigEngine
+        let legacyEngine = dual.referenceEngine
+        let wsId = dual.workspaceId
+        zigEngine.backend = .zigContext
+        legacyEngine.backend = .legacyPlanApply
+
+        var zigState = ViewportState()
+        var legacyState = ViewportState()
+
+        let zigSnapshot = NiriStateZigKernel.makeSnapshot(columns: zigEngine.columns(in: wsId))
+        let legacySnapshot = NiriStateZigKernel.makeSnapshot(columns: legacyEngine.columns(in: wsId))
+        guard let sourceIndex = windowIndex(in: zigSnapshot, pid: 81_001),
+              legacySnapshot.windowEntries.indices.contains(sourceIndex)
+        else {
+            #expect(Bool(false), "missing source window for backend-switch delegated swap scenario")
+            return
+        }
+
+        let request = NiriStateZigKernel.MutationRequest(
+            op: .swapWindowHorizontal,
+            sourceWindowIndex: sourceIndex,
+            direction: .right,
+            infiniteLoop: false,
+            maxWindowsPerColumn: zigEngine.maxWindowsPerColumn
+        )
+
+        let zigApplied = executeRuntimeMutation(
+            engine: zigEngine,
+            workspaceId: wsId,
+            request: request,
+            snapshot: zigSnapshot,
+            state: &zigState,
+            workingFrame: dual.workingFrame,
+            gaps: dual.gaps
+        )
+        let legacyApplied = executeRuntimeMutation(
+            engine: legacyEngine,
+            workspaceId: wsId,
+            request: request,
+            snapshot: legacySnapshot,
+            state: &legacyState,
+            workingFrame: dual.workingFrame,
+            gaps: dual.gaps
+        )
+
+        #expect(zigApplied == legacyApplied)
+        #expect(zigApplied)
+        assertMutationInvariants(engine: zigEngine, workspaceId: wsId)
+        assertMutationInvariants(engine: legacyEngine, workspaceId: wsId)
+        #expect(
+            layoutSignature(engine: zigEngine, workspaceId: wsId) ==
+                layoutSignature(engine: legacyEngine, workspaceId: wsId)
+        )
+
+        let zigLeadingPIDs = zigEngine.columns(in: wsId).compactMap { $0.windowNodes.first?.handle.pid }
+        let legacyLeadingPIDs = legacyEngine.columns(in: wsId).compactMap { $0.windowNodes.first?.handle.pid }
+        #expect(zigLeadingPIDs == [81_002, 81_001])
+        #expect(zigLeadingPIDs == legacyLeadingPIDs)
+    }
+
+    @Test func phase4BackendSwitchRandomizedRuntimeParityMatchesLegacyPlanApply() {
+        let traceCount = 400
+        let opsPerTrace = 12
+        var rng = MutationLCG(seed: 0xBADC_0FFE_1234_5678)
+
+        for trace in 0 ..< traceCount {
+            let dual = makeDualEngines(seed: UInt64(70_000 + trace))
+            let zigEngine = dual.zigEngine
+            let legacyEngine = dual.referenceEngine
+            let wsId = dual.workspaceId
+            zigEngine.backend = .zigContext
+            legacyEngine.backend = .legacyPlanApply
+
+            var zigState = ViewportState()
+            var legacyState = ViewportState()
+
+            for _ in 0 ..< opsPerTrace {
+                let zigSnapshot = NiriStateZigKernel.makeSnapshot(columns: zigEngine.columns(in: wsId))
+                let legacySnapshot = NiriStateZigKernel.makeSnapshot(columns: legacyEngine.columns(in: wsId))
+                #expect(zigSnapshot.windowEntries.count == legacySnapshot.windowEntries.count)
+                #expect(!zigSnapshot.windowEntries.isEmpty)
+                guard !zigSnapshot.windowEntries.isEmpty else { break }
+
+                let request = makeRandomMutationRequest(
+                    snapshot: zigSnapshot,
+                    maxWindowsPerColumn: zigEngine.maxWindowsPerColumn,
+                    infiniteLoop: zigEngine.infiniteLoop,
+                    rng: &rng
+                )
+
+                let zigApplied = executeRuntimeMutation(
+                    engine: zigEngine,
+                    workspaceId: wsId,
+                    request: request,
+                    snapshot: zigSnapshot,
+                    state: &zigState,
+                    workingFrame: dual.workingFrame,
+                    gaps: dual.gaps
+                )
+                let legacyApplied = executeRuntimeMutation(
+                    engine: legacyEngine,
+                    workspaceId: wsId,
+                    request: request,
+                    snapshot: legacySnapshot,
+                    state: &legacyState,
+                    workingFrame: dual.workingFrame,
+                    gaps: dual.gaps
+                )
+
+                #expect(zigApplied == legacyApplied)
+                assertMutationInvariants(engine: zigEngine, workspaceId: wsId)
+                assertMutationInvariants(engine: legacyEngine, workspaceId: wsId)
+            }
+        }
+    }
+
     @Test func windowOpsMutationPlannerBenchmarkHarnessP95() throws {
         let dual = makeDualEngines(seed: 0xD00D_BEEF_F00D_1234)
         let snapshot = NiriStateZigKernel.makeSnapshot(columns: dual.zigEngine.columns(in: dual.workspaceId))

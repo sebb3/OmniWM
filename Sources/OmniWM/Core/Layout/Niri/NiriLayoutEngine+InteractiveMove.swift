@@ -161,7 +161,7 @@ extension NiriLayoutEngine {
             return false
         }
 
-        guard let plan = planMutation(
+        guard let applyOutcome = applyWindowMutation(
             op: .swapWindowsByMove,
             sourceWindow: sourceWindow,
             targetWindow: targetWindow,
@@ -169,12 +169,6 @@ extension NiriLayoutEngine {
         ) else {
             return false
         }
-
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
         guard applyOutcome.applied else {
             return false
         }
@@ -206,7 +200,7 @@ extension NiriLayoutEngine {
             return false
         }
 
-        guard let plan = planMutation(
+        guard let applyOutcome = applyWindowMutation(
             op: .insertWindowByMove,
             sourceWindow: sourceWindow,
             targetWindow: targetWindow,
@@ -215,12 +209,6 @@ extension NiriLayoutEngine {
         ) else {
             return false
         }
-
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
         guard applyOutcome.applied else {
             return false
         }
