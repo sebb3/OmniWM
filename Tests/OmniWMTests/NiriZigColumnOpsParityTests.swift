@@ -1083,6 +1083,128 @@ private func executeRuntimeMutation(
         #expect(expelOutcome.zig.targetWindowIndex != nil)
     }
 
+    @Test func phase5BackendSwitchRandomizedRuntimeParityMatchesLegacyPlanApply() {
+        let traceCount = 400
+        let opsPerTrace = 12
+        var rng = ColumnMutationLCG(seed: 0xE5E5_AAAA_1234_5678)
+
+        for trace in 0 ..< traceCount {
+            let dual = makeRandomDualEngines(seed: UInt64(220_000 + trace))
+            let zigEngine = dual.zigEngine
+            let legacyEngine = dual.referenceEngine
+            let wsId = dual.workspaceId
+            zigEngine.backend = .zigContext
+            legacyEngine.backend = .legacyPlanApply
+
+            var zigState = ViewportState()
+            zigState.activeColumnIndex = 0
+            zigState.viewOffsetPixels = .static(0)
+
+            var legacyState = ViewportState()
+            legacyState.activeColumnIndex = 0
+            legacyState.viewOffsetPixels = .static(0)
+
+            for _ in 0 ..< opsPerTrace {
+                let zigSnapshot = NiriStateZigKernel.makeSnapshot(columns: zigEngine.columns(in: wsId))
+                let legacySnapshot = NiriStateZigKernel.makeSnapshot(columns: legacyEngine.columns(in: wsId))
+                #expect(zigSnapshot.columnEntries.count == legacySnapshot.columnEntries.count)
+                #expect(zigSnapshot.windowEntries.count == legacySnapshot.windowEntries.count)
+
+                let request = makeRandomMutationRequest(
+                    snapshot: zigSnapshot,
+                    engine: zigEngine,
+                    rng: &rng
+                )
+
+                let zigApplied = executeRuntimeMutation(
+                    engine: zigEngine,
+                    workspaceId: wsId,
+                    request: request,
+                    snapshot: zigSnapshot,
+                    state: &zigState,
+                    workingFrame: dual.workingFrame,
+                    gaps: dual.gaps
+                )
+                let legacyApplied = executeRuntimeMutation(
+                    engine: legacyEngine,
+                    workspaceId: wsId,
+                    request: request,
+                    snapshot: legacySnapshot,
+                    state: &legacyState,
+                    workingFrame: dual.workingFrame,
+                    gaps: dual.gaps
+                )
+
+                #expect(zigApplied == legacyApplied)
+                assertMutationInvariants(engine: zigEngine, workspaceId: wsId)
+                assertMutationInvariants(engine: legacyEngine, workspaceId: wsId)
+                #expect(zigEngine.columns(in: wsId).count == legacyEngine.columns(in: wsId).count)
+                #expect(
+                    (zigEngine.root(for: wsId)?.allWindows.count ?? 0) ==
+                        (legacyEngine.root(for: wsId)?.allWindows.count ?? 0)
+                )
+            }
+        }
+    }
+
+    @Test func phase5BackendSwitchBalanceSizesResetsWidthStateParity() {
+        let dual = makeRandomDualEngines(seed: 0xE5E5_AAAA_0000_0001)
+        let zigEngine = dual.zigEngine
+        let legacyEngine = dual.referenceEngine
+        let wsId = dual.workspaceId
+        zigEngine.backend = .zigContext
+        legacyEngine.backend = .legacyPlanApply
+
+        let zigCols = zigEngine.columns(in: wsId)
+        let legacyCols = legacyEngine.columns(in: wsId)
+        #expect(zigCols.count == legacyCols.count)
+
+        for idx in 0 ..< min(zigCols.count, legacyCols.count) {
+            let zigCol = zigCols[idx]
+            let legacyCol = legacyCols[idx]
+            let fullWidth = idx % 2 == 0
+            let saved = ProportionalSize.proportion(0.25 + CGFloat(idx) * 0.05)
+
+            zigCol.isFullWidth = fullWidth
+            legacyCol.isFullWidth = fullWidth
+            zigCol.savedWidth = saved
+            legacyCol.savedWidth = saved
+            zigCol.presetWidthIdx = idx
+            legacyCol.presetWidthIdx = idx
+        }
+
+        zigEngine.balanceSizes(
+            in: wsId,
+            workingAreaWidth: dual.workingFrame.width,
+            gaps: dual.gaps
+        )
+        legacyEngine.balanceSizes(
+            in: wsId,
+            workingAreaWidth: dual.workingFrame.width,
+            gaps: dual.gaps
+        )
+
+        let updatedZigCols = zigEngine.columns(in: wsId)
+        let updatedLegacyCols = legacyEngine.columns(in: wsId)
+        #expect(updatedZigCols.count == updatedLegacyCols.count)
+
+        for idx in 0 ..< min(updatedZigCols.count, updatedLegacyCols.count) {
+            #expect(!updatedZigCols[idx].isFullWidth)
+            #expect(updatedZigCols[idx].savedWidth == nil)
+            #expect(updatedZigCols[idx].presetWidthIdx == nil)
+            #expect(updatedZigCols[idx].isFullWidth == updatedLegacyCols[idx].isFullWidth)
+            #expect(updatedZigCols[idx].savedWidth == updatedLegacyCols[idx].savedWidth)
+            #expect(updatedZigCols[idx].presetWidthIdx == updatedLegacyCols[idx].presetWidthIdx)
+        }
+
+        #expect(
+            layoutSignature(engine: zigEngine, workspaceId: wsId) ==
+                layoutSignature(engine: legacyEngine, workspaceId: wsId)
+        )
+        assertMutationInvariants(engine: zigEngine, workspaceId: wsId)
+        assertMutationInvariants(engine: legacyEngine, workspaceId: wsId)
+    }
+
     @Test func randomizedMutationTraceParityMatchesReferenceModel() {
         let traceCount = 5_000
         let opsPerTrace = 10
@@ -1133,6 +1255,7 @@ private func executeRuntimeMutation(
         let dual = makeRandomDualEngines(seed: 0x5566_7788)
         let engine = dual.zigEngine
         let wsId = dual.workspaceId
+        engine.backend = .zigContext
 
         var state = ViewportState()
         state.activeColumnIndex = 0

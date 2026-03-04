@@ -2,6 +2,16 @@ import AppKit
 import Foundation
 
 extension NiriLayoutEngine {
+    private struct ColumnMutationPreparedRequest {
+        let snapshot: NiriStateZigKernel.Snapshot
+        let request: NiriStateZigKernel.MutationRequest
+    }
+
+    private struct ColumnMutationApplyOutcome {
+        let applied: Bool
+        let targetWindow: NiriWindow?
+    }
+
     private func validatedSourceColumn(
         for window: NiriWindow,
         expectedSourceColumn: NiriContainer,
@@ -15,7 +25,7 @@ extension NiriLayoutEngine {
         return actualSourceColumn
     }
 
-    private func planColumnMutation(
+    private func prepareColumnMutationRequest(
         op: NiriStateZigKernel.MutationOp,
         sourceWindow: NiriWindow? = nil,
         sourceColumn: NiriContainer? = nil,
@@ -24,7 +34,7 @@ extension NiriLayoutEngine {
         direction: Direction? = nil,
         in workspaceId: WorkspaceDescriptor.ID,
         maxVisibleColumns: Int = -1
-    ) -> (snapshot: NiriStateZigKernel.Snapshot, outcome: NiriStateZigKernel.MutationOutcome)? {
+    ) -> ColumnMutationPreparedRequest? {
         let snapshot = NiriStateZigKernel.makeSnapshot(columns: columns(in: workspaceId))
 
         let sourceWindowIndex: Int
@@ -69,12 +79,127 @@ extension NiriLayoutEngine {
             maxVisibleColumns: maxVisibleColumns
         )
 
-        let outcome = NiriStateZigKernel.resolveMutation(snapshot: snapshot, request: request)
+        return ColumnMutationPreparedRequest(snapshot: snapshot, request: request)
+    }
+
+    private func applyLegacyColumnMutation(
+        _ prepared: ColumnMutationPreparedRequest
+    ) -> ColumnMutationApplyOutcome? {
+        let outcome = NiriStateZigKernel.resolveMutation(
+            snapshot: prepared.snapshot,
+            request: prepared.request
+        )
         guard outcome.rc == 0 else {
             return nil
         }
 
-        return (snapshot, outcome)
+        let applyOutcome = NiriStateZigMutationApplier.apply(
+            outcome: outcome,
+            snapshot: prepared.snapshot,
+            engine: self
+        )
+
+        return ColumnMutationApplyOutcome(
+            applied: applyOutcome.applied,
+            targetWindow: applyOutcome.targetWindow
+        )
+    }
+
+    private func applyRuntimeColumnMutation(
+        _ prepared: ColumnMutationPreparedRequest,
+        in workspaceId: WorkspaceDescriptor.ID,
+        createdColumnId: UUID?,
+        placeholderColumnId: UUID?
+    ) -> ColumnMutationApplyOutcome? {
+        guard let context = ensureLayoutContext(for: workspaceId) else {
+            return nil
+        }
+
+        let seedRC = NiriStateZigKernel.seedRuntimeState(
+            context: context,
+            snapshot: prepared.snapshot
+        )
+        guard seedRC == 0 else {
+            return nil
+        }
+        runtimeMirrorStates[workspaceId] = RuntimeMirrorState(
+            isSeeded: true,
+            columnCount: prepared.snapshot.columns.count,
+            windowCount: prepared.snapshot.windows.count
+        )
+
+        let applyOutcome = NiriStateZigKernel.applyMutation(
+            context: context,
+            request: .init(
+                request: prepared.request,
+                createdColumnId: createdColumnId,
+                placeholderColumnId: placeholderColumnId
+            )
+        )
+        guard applyOutcome.rc == 0 else {
+            return nil
+        }
+        guard applyOutcome.applied else {
+            return ColumnMutationApplyOutcome(
+                applied: false,
+                targetWindow: nil
+            )
+        }
+
+        let exported = NiriStateZigKernel.exportRuntimeState(context: context)
+        guard exported.rc == 0 else {
+            return nil
+        }
+
+        let projection = NiriStateZigRuntimeProjector.project(
+            export: exported.export,
+            hints: applyOutcome.hints,
+            workspaceId: workspaceId,
+            engine: self
+        )
+        guard projection.applied else {
+            return nil
+        }
+
+        let targetWindow: NiriWindow?
+        if let targetWindowId = applyOutcome.targetWindowId {
+            guard let resolvedWindow = root(for: workspaceId)?.findNode(by: targetWindowId) as? NiriWindow else {
+                return nil
+            }
+            targetWindow = resolvedWindow
+        } else {
+            targetWindow = nil
+        }
+
+        runtimeMirrorStates[workspaceId] = RuntimeMirrorState(
+            isSeeded: true,
+            columnCount: exported.export.columns.count,
+            windowCount: exported.export.windows.count
+        )
+
+        return ColumnMutationApplyOutcome(
+            applied: true,
+            targetWindow: targetWindow
+        )
+    }
+
+    private func executePreparedColumnMutation(
+        _ prepared: ColumnMutationPreparedRequest,
+        in workspaceId: WorkspaceDescriptor.ID,
+        createdColumnId: UUID? = nil,
+        placeholderColumnId: UUID? = nil
+    ) -> ColumnMutationApplyOutcome? {
+        switch backend {
+        case .legacyPlanApply:
+            return applyLegacyColumnMutation(prepared)
+        case .zigContext:
+            return applyRuntimeColumnMutation(
+                prepared,
+                in: workspaceId,
+                createdColumnId: createdColumnId,
+                placeholderColumnId: placeholderColumnId
+            )
+        }
     }
 
     func moveWindowToColumn(
@@ -92,7 +217,7 @@ extension NiriLayoutEngine {
             return
         }
 
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .moveWindowToColumn,
             sourceWindow: node,
             targetColumn: targetColumn,
@@ -101,11 +226,16 @@ extension NiriLayoutEngine {
             return
         }
 
-        _ = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
+        guard let applyOutcome = executePreparedColumnMutation(
+            prepared,
+            in: workspaceId,
+            placeholderColumnId: UUID()
+        ) else {
+            return
+        }
+        guard applyOutcome.applied else {
+            return
+        }
     }
 
     func createColumnAndMove(
@@ -127,7 +257,7 @@ extension NiriLayoutEngine {
 
         let insertionDirection: Direction = direction == .right ? .right : .left
 
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .createColumnAndMove,
             sourceWindow: node,
             direction: insertionDirection,
@@ -137,11 +267,14 @@ extension NiriLayoutEngine {
             return
         }
 
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
+        guard let applyOutcome = executePreparedColumnMutation(
+            prepared,
+            in: workspaceId,
+            createdColumnId: UUID(),
+            placeholderColumnId: UUID()
+        ) else {
+            return
+        }
         guard applyOutcome.applied else {
             return
         }
@@ -177,7 +310,7 @@ extension NiriLayoutEngine {
         workingFrame: CGRect,
         gaps: CGFloat
     ) -> Bool {
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .insertWindowInNewColumn,
             sourceWindow: window,
             insertColumnIndex: insertIndex,
@@ -187,11 +320,14 @@ extension NiriLayoutEngine {
             return false
         }
 
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
+        guard let applyOutcome = executePreparedColumnMutation(
+            prepared,
+            in: workspaceId,
+            createdColumnId: UUID(),
+            placeholderColumnId: UUID()
+        ) else {
+            return false
+        }
         guard applyOutcome.applied else {
             return false
         }
@@ -229,7 +365,7 @@ extension NiriLayoutEngine {
         in workspaceId: WorkspaceDescriptor.ID,
         state _: inout ViewportState
     ) {
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .cleanupEmptyColumn,
             sourceColumn: column,
             in: workspaceId
@@ -237,31 +373,27 @@ extension NiriLayoutEngine {
             return
         }
 
-        _ = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
+        _ = executePreparedColumnMutation(
+            prepared,
+            in: workspaceId,
+            placeholderColumnId: UUID()
         )
     }
 
     func normalizeColumnSizes(in workspaceId: WorkspaceDescriptor.ID) {
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .normalizeColumnSizes,
             in: workspaceId
         ) else {
             return
         }
 
-        _ = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
+        _ = executePreparedColumnMutation(prepared, in: workspaceId)
     }
 
     func normalizeWindowSizes(in column: NiriContainer) {
         guard let workspaceId = column.findRoot()?.workspaceId else { return }
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .normalizeWindowSizes,
             sourceColumn: column,
             in: workspaceId
@@ -269,11 +401,7 @@ extension NiriLayoutEngine {
             return
         }
 
-        _ = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
+        _ = executePreparedColumnMutation(prepared, in: workspaceId)
     }
 
     func balanceSizes(
@@ -281,7 +409,7 @@ extension NiriLayoutEngine {
         workingAreaWidth: CGFloat,
         gaps: CGFloat
     ) {
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .balanceSizes,
             in: workspaceId,
             maxVisibleColumns: maxVisibleColumns
@@ -289,17 +417,24 @@ extension NiriLayoutEngine {
             return
         }
 
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
+        guard let applyOutcome = executePreparedColumnMutation(
+            prepared,
+            in: workspaceId
+        ) else {
+            return
+        }
         guard applyOutcome.applied else {
             return
         }
 
         let cols = columns(in: workspaceId)
         guard !cols.isEmpty else { return }
+
+        for column in cols {
+            column.isFullWidth = false
+            column.savedWidth = nil
+            column.presetWidthIdx = nil
+        }
 
         let balancedWidth = 1.0 / CGFloat(maxVisibleColumns)
         let targetPixels = (workingAreaWidth - gaps) * balancedWidth
@@ -326,13 +461,19 @@ extension NiriLayoutEngine {
 
         let cols = columns(in: workspaceId)
         guard let currentIdx = columnIndex(of: column, in: workspaceId) else { return false }
+        let directionStep = direction == .right ? 1 : -1
+        guard let targetIdx = wrapIndex(currentIdx + directionStep, total: cols.count),
+              targetIdx != currentIdx
+        else {
+            return false
+        }
 
         let currentColX = state.columnX(at: currentIdx, columns: cols, gap: gaps)
         let nextColX = currentIdx + 1 < cols.count
             ? state.columnX(at: currentIdx + 1, columns: cols, gap: gaps)
             : currentColX + (column.cachedWidth > 0 ? column.cachedWidth : workingFrame.width / CGFloat(maxVisibleColumns)) + gaps
 
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .moveColumn,
             sourceColumn: column,
             direction: direction,
@@ -341,18 +482,12 @@ extension NiriLayoutEngine {
             return false
         }
 
-        guard plan.outcome.applied,
-              let swapEdit = plan.outcome.edits.first(where: { $0.kind == .swapColumns })
-        else {
+        guard let applyOutcome = executePreparedColumnMutation(
+            prepared,
+            in: workspaceId
+        ) else {
             return false
         }
-
-        let targetIdx = swapEdit.relatedIndex
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
         guard applyOutcome.applied else {
             return false
         }
@@ -429,7 +564,7 @@ extension NiriLayoutEngine {
             return false
         }
 
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .consumeWindow,
             sourceWindow: window,
             direction: direction,
@@ -438,15 +573,28 @@ extension NiriLayoutEngine {
             return false
         }
 
-        guard plan.outcome.applied,
-              let moveEdit = plan.outcome.edits.first(where: { $0.kind == .moveWindowToColumnIndex }),
-              plan.snapshot.windowEntries.indices.contains(moveEdit.subjectIndex)
+        let directionStep = direction == .right ? 1 : -1
+        guard let neighborIdx = wrapIndex(currentIdx + directionStep, total: prepared.snapshot.columns.count),
+              neighborIdx != currentIdx,
+              prepared.snapshot.columnEntries.indices.contains(neighborIdx)
         else {
             return false
         }
 
-        let movingWindow = plan.snapshot.windowEntries[moveEdit.subjectIndex].window
-        let movingEntry = plan.snapshot.windowEntries[moveEdit.subjectIndex]
+        let neighborEntry = prepared.snapshot.columnEntries[neighborIdx]
+        guard neighborEntry.windowCount > 0 else {
+            return false
+        }
+
+        let movingWindowIndex = direction == .right
+            ? neighborEntry.windowStart
+            : neighborEntry.windowStart + neighborEntry.windowCount - 1
+        guard prepared.snapshot.windowEntries.indices.contains(movingWindowIndex) else {
+            return false
+        }
+
+        let movingEntry = prepared.snapshot.windowEntries[movingWindowIndex]
+        let movingWindow = movingEntry.window
 
         let now = animationClock?.now() ?? CACurrentMediaTime()
         let cols = columns(in: workspaceId)
@@ -454,11 +602,13 @@ extension NiriLayoutEngine {
         let sourceColRenderOffset = movingEntry.column.renderOffset(at: now)
         let sourceTileOffset = computeTileOffset(column: movingEntry.column, tileIdx: movingEntry.rowIndex, gaps: gaps)
 
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
+        guard let applyOutcome = executePreparedColumnMutation(
+            prepared,
+            in: workspaceId,
+            placeholderColumnId: UUID()
+        ) else {
+            return false
+        }
         guard applyOutcome.applied else {
             return false
         }
@@ -522,7 +672,7 @@ extension NiriLayoutEngine {
         let sourceColRenderOffset = currentColumn.renderOffset(at: now)
         let sourceTileOffset = computeTileOffset(column: currentColumn, tileIdx: sourceTileIdx, gaps: gaps)
 
-        guard let plan = planColumnMutation(
+        guard let prepared = prepareColumnMutationRequest(
             op: .expelWindow,
             sourceWindow: window,
             direction: direction,
@@ -532,11 +682,14 @@ extension NiriLayoutEngine {
             return false
         }
 
-        let applyOutcome = NiriStateZigMutationApplier.apply(
-            outcome: plan.outcome,
-            snapshot: plan.snapshot,
-            engine: self
-        )
+        guard let applyOutcome = executePreparedColumnMutation(
+            prepared,
+            in: workspaceId,
+            createdColumnId: UUID(),
+            placeholderColumnId: UUID()
+        ) else {
+            return false
+        }
         guard applyOutcome.applied else {
             return false
         }
