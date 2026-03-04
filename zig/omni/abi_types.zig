@@ -207,6 +207,29 @@ pub const OmniNiriStateWindowInput = extern struct {
     size_value: f64,
 };
 
+pub const OmniNiriRuntimeColumnState = extern struct {
+    column_id: OmniUuid128,
+    window_start: usize,
+    window_count: usize,
+    active_tile_idx: usize,
+    is_tabbed: u8,
+    size_value: f64,
+};
+
+pub const OmniNiriRuntimeWindowState = extern struct {
+    window_id: OmniUuid128,
+    column_id: OmniUuid128,
+    column_index: usize,
+    size_value: f64,
+};
+
+pub const OmniNiriRuntimeStateExport = extern struct {
+    columns: [*c]const OmniNiriRuntimeColumnState,
+    column_count: usize,
+    windows: [*c]const OmniNiriRuntimeWindowState,
+    window_count: usize,
+};
+
 pub const OmniNiriStateValidationResult = extern struct {
     column_count: usize,
     window_count: usize,
@@ -240,6 +263,26 @@ pub const OmniNiriNavigationResult = extern struct {
     target_active_tile_idx: i64,
     refresh_tabbed_visibility_source: u8,
     refresh_tabbed_visibility_target: u8,
+};
+
+pub const OmniNiriNavigationApplyRequest = extern struct {
+    request: OmniNiriNavigationRequest,
+};
+
+pub const OmniNiriNavigationApplyResult = extern struct {
+    applied: u8,
+    has_target_window_id: u8,
+    target_window_id: OmniUuid128,
+    update_source_active_tile: u8,
+    source_column_id: OmniUuid128,
+    source_active_tile_idx: i64,
+    update_target_active_tile: u8,
+    target_column_id: OmniUuid128,
+    target_active_tile_idx: i64,
+    refresh_tabbed_visibility_source: u8,
+    refresh_source_column_id: OmniUuid128,
+    refresh_tabbed_visibility_target: u8,
+    refresh_target_column_id: OmniUuid128,
 };
 
 pub const OmniNiriMutationRequest = extern struct {
@@ -280,6 +323,31 @@ pub const OmniNiriMutationResult = extern struct {
     edits: [OMNI_NIRI_MUTATION_MAX_EDITS]OmniNiriMutationEdit,
 };
 
+pub const OmniNiriMutationApplyRequest = extern struct {
+    request: OmniNiriMutationRequest,
+    has_incoming_window_id: u8,
+    incoming_window_id: OmniUuid128,
+    has_created_column_id: u8,
+    created_column_id: OmniUuid128,
+    has_placeholder_column_id: u8,
+    placeholder_column_id: OmniUuid128,
+};
+
+pub const OmniNiriMutationApplyResult = extern struct {
+    applied: u8,
+    has_target_window_id: u8,
+    target_window_id: OmniUuid128,
+    has_target_node_id: u8,
+    target_node_kind: u8,
+    target_node_id: OmniUuid128,
+    refresh_tabbed_visibility_count: u8,
+    refresh_tabbed_visibility_column_ids: [OMNI_NIRI_RUNTIME_HINT_MAX_COLUMNS]OmniUuid128,
+    reset_all_column_cached_widths: u8,
+    has_delegate_move_column: u8,
+    delegate_move_column_id: OmniUuid128,
+    delegate_move_direction: u8,
+};
+
 pub const OmniNiriWorkspaceRequest = extern struct {
     op: u8,
     source_window_index: i64,
@@ -299,6 +367,24 @@ pub const OmniNiriWorkspaceResult = extern struct {
     applied: u8,
     edit_count: usize,
     edits: [OMNI_NIRI_WORKSPACE_MAX_EDITS]OmniNiriWorkspaceEdit,
+};
+
+pub const OmniNiriWorkspaceApplyRequest = extern struct {
+    request: OmniNiriWorkspaceRequest,
+    has_target_created_column_id: u8,
+    target_created_column_id: OmniUuid128,
+    has_source_placeholder_column_id: u8,
+    source_placeholder_column_id: OmniUuid128,
+};
+
+pub const OmniNiriWorkspaceApplyResult = extern struct {
+    applied: u8,
+    has_source_selection_window_id: u8,
+    source_selection_window_id: OmniUuid128,
+    has_target_selection_window_id: u8,
+    target_selection_window_id: OmniUuid128,
+    has_moved_window_id: u8,
+    moved_window_id: OmniUuid128,
 };
 
 pub const MAX_WINDOWS: usize = 512;
@@ -395,6 +481,7 @@ pub const OMNI_NIRI_MUTATION_EDIT_REMOVE_WINDOW_BY_INDEX: u8 = 17;
 pub const OMNI_NIRI_MUTATION_EDIT_RESET_ALL_COLUMN_CACHED_WIDTHS: u8 = 18;
 
 pub const OMNI_NIRI_MUTATION_MAX_EDITS: usize = 32;
+pub const OMNI_NIRI_RUNTIME_HINT_MAX_COLUMNS: usize = 2;
 
 pub const OMNI_NIRI_WORKSPACE_OP_MOVE_WINDOW_TO_WORKSPACE: u8 = 0;
 pub const OMNI_NIRI_WORKSPACE_OP_MOVE_COLUMN_TO_WORKSPACE: u8 = 1;

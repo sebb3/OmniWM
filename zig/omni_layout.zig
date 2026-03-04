@@ -503,15 +503,15 @@ export fn omni_niri_ctx_insertion_dropzone(
     );
 }
 
-/// Encode state arrays into a reusable context for planner calls.
-export fn omni_niri_ctx_encode_state(
+/// Seed authoritative runtime state into a reusable context.
+export fn omni_niri_ctx_seed_runtime_state(
     context: [*c]layout_context.OmniNiriLayoutContext,
-    columns: [*c]const abi.OmniNiriStateColumnInput,
+    columns: [*c]const abi.OmniNiriRuntimeColumnState,
     column_count: usize,
-    windows: [*c]const abi.OmniNiriStateWindowInput,
+    windows: [*c]const abi.OmniNiriRuntimeWindowState,
     window_count: usize,
 ) i32 {
-    return layout_context.omni_niri_ctx_encode_state_impl(
+    return layout_context.omni_niri_ctx_seed_runtime_state_impl(
         context,
         columns,
         column_count,
@@ -520,40 +520,51 @@ export fn omni_niri_ctx_encode_state(
     );
 }
 
-/// Resolve navigation request from context-encoded state.
-export fn omni_niri_ctx_resolve_navigation(
+/// Export authoritative runtime state pointers/counts from context.
+export fn omni_niri_ctx_export_runtime_state(
     context: [*c]const layout_context.OmniNiriLayoutContext,
-    request: [*c]const abi.OmniNiriNavigationRequest,
-    out_result: [*c]abi.OmniNiriNavigationResult,
+    out_export: [*c]abi.OmniNiriRuntimeStateExport,
 ) i32 {
-    return layout_context.omni_niri_ctx_resolve_navigation_impl(
+    return layout_context.omni_niri_ctx_export_runtime_state_impl(
+        context,
+        out_export,
+    );
+}
+
+/// Apply navigation request against authoritative runtime context.
+export fn omni_niri_ctx_apply_navigation(
+    context: [*c]layout_context.OmniNiriLayoutContext,
+    request: [*c]const abi.OmniNiriNavigationApplyRequest,
+    out_result: [*c]abi.OmniNiriNavigationApplyResult,
+) i32 {
+    return layout_context.omni_niri_ctx_apply_navigation_impl(
         context,
         request,
         out_result,
     );
 }
 
-/// Resolve mutation request from context-encoded state.
-export fn omni_niri_ctx_resolve_mutation(
-    context: [*c]const layout_context.OmniNiriLayoutContext,
-    request: [*c]const abi.OmniNiriMutationRequest,
-    out_result: [*c]abi.OmniNiriMutationResult,
+/// Apply mutation request against authoritative runtime context.
+export fn omni_niri_ctx_apply_mutation(
+    context: [*c]layout_context.OmniNiriLayoutContext,
+    request: [*c]const abi.OmniNiriMutationApplyRequest,
+    out_result: [*c]abi.OmniNiriMutationApplyResult,
 ) i32 {
-    return layout_context.omni_niri_ctx_resolve_mutation_impl(
+    return layout_context.omni_niri_ctx_apply_mutation_impl(
         context,
         request,
         out_result,
     );
 }
 
-/// Resolve workspace request from source/target context-encoded states.
-export fn omni_niri_ctx_resolve_workspace(
-    source_context: [*c]const layout_context.OmniNiriLayoutContext,
-    target_context: [*c]const layout_context.OmniNiriLayoutContext,
-    request: [*c]const abi.OmniNiriWorkspaceRequest,
-    out_result: [*c]abi.OmniNiriWorkspaceResult,
+/// Apply workspace request against source/target authoritative runtime contexts.
+export fn omni_niri_ctx_apply_workspace(
+    source_context: [*c]layout_context.OmniNiriLayoutContext,
+    target_context: [*c]layout_context.OmniNiriLayoutContext,
+    request: [*c]const abi.OmniNiriWorkspaceApplyRequest,
+    out_result: [*c]abi.OmniNiriWorkspaceApplyResult,
 ) i32 {
-    return layout_context.omni_niri_ctx_resolve_workspace_impl(
+    return layout_context.omni_niri_ctx_apply_workspace_impl(
         source_context,
         target_context,
         request,

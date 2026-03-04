@@ -585,6 +585,29 @@ typedef struct {
 } OmniNiriStateWindowInput;
 
 typedef struct {
+    OmniUuid128 column_id;
+    size_t window_start;
+    size_t window_count;
+    size_t active_tile_idx;
+    uint8_t is_tabbed;
+    double size_value;
+} OmniNiriRuntimeColumnState;
+
+typedef struct {
+    OmniUuid128 window_id;
+    OmniUuid128 column_id;
+    size_t column_index;
+    double size_value;
+} OmniNiriRuntimeWindowState;
+
+typedef struct {
+    const OmniNiriRuntimeColumnState *columns;
+    size_t column_count;
+    const OmniNiriRuntimeWindowState *windows;
+    size_t window_count;
+} OmniNiriRuntimeStateExport;
+
+typedef struct {
     size_t column_count;
     size_t window_count;
     int64_t first_invalid_column_index;
@@ -601,14 +624,20 @@ int32_t omni_niri_validate_state_snapshot(
     size_t window_count,
     OmniNiriStateValidationResult *out_result);
 
-/// Encode state arrays into a reusable context for planner calls.
+/// Seed authoritative runtime state into a reusable context.
 /// Returns 0 on success, -1 for invalid args, -2 for capacity/range failures.
-int32_t omni_niri_ctx_encode_state(
+int32_t omni_niri_ctx_seed_runtime_state(
     OmniNiriLayoutContext *context,
-    const OmniNiriStateColumnInput *columns,
+    const OmniNiriRuntimeColumnState *columns,
     size_t column_count,
-    const OmniNiriStateWindowInput *windows,
+    const OmniNiriRuntimeWindowState *windows,
     size_t window_count);
+
+/// Export context-owned authoritative runtime state pointers and counts.
+/// Returns 0 on success, -1 for invalid args.
+int32_t omni_niri_ctx_export_runtime_state(
+    const OmniNiriLayoutContext *context,
+    OmniNiriRuntimeStateExport *out_export);
 
 typedef enum {
     OMNI_NIRI_DIRECTION_LEFT = 0,
@@ -658,6 +687,26 @@ typedef struct {
     uint8_t refresh_tabbed_visibility_target;
 } OmniNiriNavigationResult;
 
+typedef struct {
+    OmniNiriNavigationRequest request;
+} OmniNiriNavigationApplyRequest;
+
+typedef struct {
+    uint8_t applied;
+    uint8_t has_target_window_id;
+    OmniUuid128 target_window_id;
+    uint8_t update_source_active_tile;
+    OmniUuid128 source_column_id;
+    int64_t source_active_tile_idx;
+    uint8_t update_target_active_tile;
+    OmniUuid128 target_column_id;
+    int64_t target_active_tile_idx;
+    uint8_t refresh_tabbed_visibility_source;
+    OmniUuid128 refresh_source_column_id;
+    uint8_t refresh_tabbed_visibility_target;
+    OmniUuid128 refresh_target_column_id;
+} OmniNiriNavigationApplyResult;
+
 /// Resolve navigation request against a validated snapshot.
 /// Returns 0 on success, -1 for invalid args, -2 for range errors.
 int32_t omni_niri_navigation_resolve(
@@ -668,12 +717,12 @@ int32_t omni_niri_navigation_resolve(
     const OmniNiriNavigationRequest *request,
     OmniNiriNavigationResult *out_result);
 
-/// Resolve navigation request against context-encoded state.
+/// Apply navigation request against context authoritative runtime state.
 /// Returns 0 on success, -1 for invalid args, -2 for range errors.
-int32_t omni_niri_ctx_resolve_navigation(
+int32_t omni_niri_ctx_apply_navigation(
     const OmniNiriLayoutContext *context,
-    const OmniNiriNavigationRequest *request,
-    OmniNiriNavigationResult *out_result);
+    const OmniNiriNavigationApplyRequest *request,
+    OmniNiriNavigationApplyResult *out_result);
 
 typedef enum {
     OMNI_NIRI_MUTATION_OP_MOVE_WINDOW_VERTICAL = 0,
@@ -757,6 +806,10 @@ enum {
     OMNI_NIRI_MUTATION_MAX_EDITS = 32
 };
 
+enum {
+    OMNI_NIRI_RUNTIME_HINT_MAX_COLUMNS = 2
+};
+
 typedef struct {
     uint8_t applied;
     uint8_t has_target_window;
@@ -768,6 +821,31 @@ typedef struct {
     OmniNiriMutationEdit edits[OMNI_NIRI_MUTATION_MAX_EDITS];
 } OmniNiriMutationResult;
 
+typedef struct {
+    OmniNiriMutationRequest request;
+    uint8_t has_incoming_window_id;
+    OmniUuid128 incoming_window_id;
+    uint8_t has_created_column_id;
+    OmniUuid128 created_column_id;
+    uint8_t has_placeholder_column_id;
+    OmniUuid128 placeholder_column_id;
+} OmniNiriMutationApplyRequest;
+
+typedef struct {
+    uint8_t applied;
+    uint8_t has_target_window_id;
+    OmniUuid128 target_window_id;
+    uint8_t has_target_node_id;
+    uint8_t target_node_kind;
+    OmniUuid128 target_node_id;
+    uint8_t refresh_tabbed_visibility_count;
+    OmniUuid128 refresh_tabbed_visibility_column_ids[OMNI_NIRI_RUNTIME_HINT_MAX_COLUMNS];
+    uint8_t reset_all_column_cached_widths;
+    uint8_t has_delegate_move_column;
+    OmniUuid128 delegate_move_column_id;
+    uint8_t delegate_move_direction;
+} OmniNiriMutationApplyResult;
+
 /// Build mutation edit plan for a snapshot and mutation request.
 /// Returns 0 on success, -1 for invalid args, -2 for range/edit-limit errors.
 int32_t omni_niri_mutation_plan(
@@ -778,12 +856,12 @@ int32_t omni_niri_mutation_plan(
     const OmniNiriMutationRequest *request,
     OmniNiriMutationResult *out_result);
 
-/// Resolve mutation request against context-encoded state.
+/// Apply mutation request against context authoritative runtime state.
 /// Returns 0 on success, -1 for invalid args, -2 for range errors.
-int32_t omni_niri_ctx_resolve_mutation(
+int32_t omni_niri_ctx_apply_mutation(
     const OmniNiriLayoutContext *context,
-    const OmniNiriMutationRequest *request,
-    OmniNiriMutationResult *out_result);
+    const OmniNiriMutationApplyRequest *request,
+    OmniNiriMutationApplyResult *out_result);
 
 typedef enum {
     OMNI_NIRI_WORKSPACE_OP_MOVE_WINDOW_TO_WORKSPACE = 0,
@@ -827,6 +905,24 @@ typedef struct {
     OmniNiriWorkspaceEdit edits[OMNI_NIRI_WORKSPACE_MAX_EDITS];
 } OmniNiriWorkspaceResult;
 
+typedef struct {
+    OmniNiriWorkspaceRequest request;
+    uint8_t has_target_created_column_id;
+    OmniUuid128 target_created_column_id;
+    uint8_t has_source_placeholder_column_id;
+    OmniUuid128 source_placeholder_column_id;
+} OmniNiriWorkspaceApplyRequest;
+
+typedef struct {
+    uint8_t applied;
+    uint8_t has_source_selection_window_id;
+    OmniUuid128 source_selection_window_id;
+    uint8_t has_target_selection_window_id;
+    OmniUuid128 target_selection_window_id;
+    uint8_t has_moved_window_id;
+    OmniUuid128 moved_window_id;
+} OmniNiriWorkspaceApplyResult;
+
 /// Build workspace transfer edit plan for source/target snapshots.
 /// Returns 0 on success, -1 for invalid args, -2 for range/edit-limit errors.
 int32_t omni_niri_workspace_plan(
@@ -841,10 +937,10 @@ int32_t omni_niri_workspace_plan(
     const OmniNiriWorkspaceRequest *request,
     OmniNiriWorkspaceResult *out_result);
 
-/// Resolve workspace request against source/target context-encoded states.
+/// Apply workspace request against source/target context authoritative runtime states.
 /// Returns 0 on success, -1 for invalid args, -2 for range errors.
-int32_t omni_niri_ctx_resolve_workspace(
+int32_t omni_niri_ctx_apply_workspace(
     const OmniNiriLayoutContext *source_context,
     const OmniNiriLayoutContext *target_context,
-    const OmniNiriWorkspaceRequest *request,
-    OmniNiriWorkspaceResult *out_result);
+    const OmniNiriWorkspaceApplyRequest *request,
+    OmniNiriWorkspaceApplyResult *out_result);
