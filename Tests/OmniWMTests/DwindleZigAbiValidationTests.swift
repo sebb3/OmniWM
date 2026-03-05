@@ -78,6 +78,24 @@ private func approxEqual(_ lhs: Double, _ rhs: Double, epsilon: Double = 0.01) -
     abs(lhs - rhs) <= epsilon
 }
 
+private func defaultRuntimeSettings(
+    smartSplit: Bool = true,
+    defaultSplitRatio: Double = 1.0,
+    splitWidthMultiplier: Double = 1.0,
+    innerGap: Double = 8.0
+) -> OmniDwindleRuntimeSettings {
+    OmniDwindleRuntimeSettings(
+        smart_split: smartSplit ? 1 : 0,
+        default_split_ratio: defaultSplitRatio,
+        split_width_multiplier: splitWidthMultiplier,
+        inner_gap: innerGap
+    )
+}
+
+private func zeroDwindleRect() -> OmniDwindleRect {
+    OmniDwindleRect(x: 0, y: 0, width: 0, height: 0)
+}
+
 private func defaultLayoutRequest() -> OmniDwindleLayoutRequest {
     OmniDwindleLayoutRequest(
         screen_x: 0,
@@ -91,7 +109,8 @@ private func defaultLayoutRequest() -> OmniDwindleLayoutRequest {
         outer_gap_right: 0,
         single_window_aspect_width: 4,
         single_window_aspect_height: 3,
-        single_window_aspect_tolerance: 0.1
+        single_window_aspect_tolerance: 0.1,
+        runtime_settings: defaultRuntimeSettings()
     )
 }
 
@@ -110,11 +129,16 @@ private func defaultOpResult() -> OmniDwindleOpResult {
 
 private func makeOpRequest(
     op: UInt8,
+    runtimeSettings: OmniDwindleRuntimeSettings = defaultRuntimeSettings(),
     configurePayload: (inout OmniDwindleOpPayload) -> Void = { _ in }
 ) -> OmniDwindleOpRequest {
     var payload = OmniDwindleOpPayload()
     configurePayload(&payload)
-    return OmniDwindleOpRequest(op: op, payload: payload)
+    return OmniDwindleOpRequest(
+        op: op,
+        payload: payload,
+        runtime_settings: runtimeSettings
+    )
 }
 
 private func withDwindleContext<T>(_ body: (OpaquePointer) -> T) -> T {
@@ -368,6 +392,51 @@ private func layoutFrameCount(context: OpaquePointer) -> Int {
                 }
             }
             #expect(badRemovedBufferRC == abiErrInvalidArgs)
+
+            var badRuntime = defaultRuntimeSettings()
+            badRuntime.smart_split = 2
+            var invalidRuntimeRequest = makeOpRequest(
+                op: UInt8(truncatingIfNeeded: OMNI_DWINDLE_OP_VALIDATE_SELECTION.rawValue),
+                runtimeSettings: badRuntime
+            )
+            let invalidRuntimeRC = withUnsafePointer(to: &invalidRuntimeRequest) { requestPtr in
+                withUnsafeMutablePointer(to: &result) { resultPtr in
+                    omni_dwindle_ctx_apply_op(context, requestPtr, resultPtr, nil, 0)
+                }
+            }
+            #expect(invalidRuntimeRC == abiErrInvalidArgs)
+
+            var invalidActiveFrameFlag = makeOpRequest(
+                op: UInt8(truncatingIfNeeded: OMNI_DWINDLE_OP_ADD_WINDOW.rawValue)
+            ) { payload in
+                payload.add_window = OmniDwindleAddWindowPayload(
+                    window_id: makeUUID(99),
+                    has_active_window_frame: 2,
+                    active_window_frame: zeroDwindleRect()
+                )
+            }
+            let invalidFrameFlagRC = withUnsafePointer(to: &invalidActiveFrameFlag) { requestPtr in
+                withUnsafeMutablePointer(to: &result) { resultPtr in
+                    omni_dwindle_ctx_apply_op(context, requestPtr, resultPtr, nil, 0)
+                }
+            }
+            #expect(invalidFrameFlagRC == abiErrInvalidArgs)
+
+            var invalidActiveFrame = makeOpRequest(
+                op: UInt8(truncatingIfNeeded: OMNI_DWINDLE_OP_ADD_WINDOW.rawValue)
+            ) { payload in
+                payload.add_window = OmniDwindleAddWindowPayload(
+                    window_id: makeUUID(98),
+                    has_active_window_frame: 1,
+                    active_window_frame: OmniDwindleRect(x: 0, y: 0, width: .nan, height: 10)
+                )
+            }
+            let invalidFrameRC = withUnsafePointer(to: &invalidActiveFrame) { requestPtr in
+                withUnsafeMutablePointer(to: &result) { resultPtr in
+                    omni_dwindle_ctx_apply_op(context, requestPtr, resultPtr, nil, 0)
+                }
+            }
+            #expect(invalidFrameRC == abiErrInvalidArgs)
         }
     }
 
@@ -395,7 +464,11 @@ private func layoutFrameCount(context: OpaquePointer) -> Int {
             let addRequest = makeOpRequest(
                 op: UInt8(truncatingIfNeeded: OMNI_DWINDLE_OP_ADD_WINDOW.rawValue)
             ) { payload in
-                payload.add_window = OmniDwindleAddWindowPayload(window_id: makeUUID(11))
+                payload.add_window = OmniDwindleAddWindowPayload(
+                    window_id: makeUUID(11),
+                    has_active_window_frame: 0,
+                    active_window_frame: zeroDwindleRect()
+                )
             }
             let addResult = applyOp(context: context, request: addRequest, removedCapacity: 4)
             #expect(addResult.rc == abiOK)
@@ -428,7 +501,11 @@ private func layoutFrameCount(context: OpaquePointer) -> Int {
                 let addRequest = makeOpRequest(
                     op: UInt8(truncatingIfNeeded: OMNI_DWINDLE_OP_ADD_WINDOW.rawValue)
                 ) { payload in
-                    payload.add_window = OmniDwindleAddWindowPayload(window_id: makeUUID(marker))
+                    payload.add_window = OmniDwindleAddWindowPayload(
+                        window_id: makeUUID(marker),
+                        has_active_window_frame: 0,
+                        active_window_frame: zeroDwindleRect()
+                    )
                 }
                 let addResult = applyOp(context: context, request: addRequest, removedCapacity: 0)
                 #expect(addResult.rc == abiOK)
@@ -457,7 +534,11 @@ private func layoutFrameCount(context: OpaquePointer) -> Int {
                 let addRequest = makeOpRequest(
                     op: UInt8(truncatingIfNeeded: OMNI_DWINDLE_OP_ADD_WINDOW.rawValue)
                 ) { payload in
-                    payload.add_window = OmniDwindleAddWindowPayload(window_id: makeUUID(marker))
+                    payload.add_window = OmniDwindleAddWindowPayload(
+                        window_id: makeUUID(marker),
+                        has_active_window_frame: 0,
+                        active_window_frame: zeroDwindleRect()
+                    )
                 }
                 let addResult = applyOp(context: context, request: addRequest, removedCapacity: 4)
                 #expect(addResult.rc == abiOK)

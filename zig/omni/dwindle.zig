@@ -20,6 +20,18 @@ const Rect = struct {
     height: f64,
 };
 
+const RuntimeSettings = struct {
+    smart_split: bool,
+    default_split_ratio: f64,
+    split_width_multiplier: f64,
+    inner_gap: f64,
+};
+
+const SplitPlan = struct {
+    orientation: u8,
+    new_first: bool,
+};
+
 const Size = struct {
     width: f64,
     height: f64,
@@ -98,6 +110,33 @@ fn frameToRect(frame: abi.OmniDwindleWindowFrame) Rect {
         .y = frame.frame_y,
         .width = frame.frame_width,
         .height = frame.frame_height,
+    };
+}
+
+fn abiRectToRect(raw: abi.OmniDwindleRect) Rect {
+    return .{
+        .x = raw.x,
+        .y = raw.y,
+        .width = raw.width,
+        .height = raw.height,
+    };
+}
+
+fn decodeRuntimeSettings(raw: abi.OmniDwindleRuntimeSettings) RuntimeSettings {
+    return .{
+        .smart_split = raw.smart_split != 0,
+        .default_split_ratio = if (std.math.isFinite(raw.default_split_ratio))
+            raw.default_split_ratio
+        else
+            DEFAULT_SPLIT_RATIO,
+        .split_width_multiplier = if (isFiniteNonNegative(raw.split_width_multiplier))
+            raw.split_width_multiplier
+        else
+            DEFAULT_SPLIT_WIDTH_MULTIPLIER,
+        .inner_gap = if (isFiniteNonNegative(raw.inner_gap))
+            raw.inner_gap
+        else
+            DEFAULT_MUTATION_INNER_GAP,
     };
 }
 
@@ -1078,12 +1117,56 @@ fn appendNode(
     return abi.OMNI_OK;
 }
 
-fn aspectOrientationForRect(rect: ?Rect) u8 {
+fn aspectOrientationForRect(rect: ?Rect, split_width_multiplier: f64) u8 {
     if (rect == null) return abi.OMNI_DWINDLE_ORIENTATION_HORIZONTAL;
-    if (rect.?.height * DEFAULT_SPLIT_WIDTH_MULTIPLIER > rect.?.width) {
+    if (rect.?.height * split_width_multiplier > rect.?.width) {
         return abi.OMNI_DWINDLE_ORIENTATION_VERTICAL;
     }
     return abi.OMNI_DWINDLE_ORIENTATION_HORIZONTAL;
+}
+
+fn planSplitForAddWindow(
+    target_rect: ?Rect,
+    active_window_frame: ?Rect,
+    runtime_settings: RuntimeSettings,
+) SplitPlan {
+    if (!runtime_settings.smart_split or target_rect == null or active_window_frame == null) {
+        return .{
+            .orientation = aspectOrientationForRect(target_rect, runtime_settings.split_width_multiplier),
+            .new_first = false,
+        };
+    }
+
+    const target = target_rect.?;
+    const active = active_window_frame.?;
+    const target_center_x = target.x + target.width / 2.0;
+    const target_center_y = target.y + target.height / 2.0;
+    const active_center_x = active.x + active.width / 2.0;
+    const active_center_y = active.y + active.height / 2.0;
+
+    const delta_x = active_center_x - target_center_x;
+    const delta_y = active_center_y - target_center_y;
+
+    const slope = if (@abs(delta_x) < 0.001)
+        std.math.inf(f64)
+    else
+        delta_y / delta_x;
+    const aspect = if (@abs(target.width) < 0.001)
+        std.math.inf(f64)
+    else
+        target.height / target.width;
+
+    if (@abs(slope) < aspect) {
+        return .{
+            .orientation = abi.OMNI_DWINDLE_ORIENTATION_HORIZONTAL,
+            .new_first = delta_x < 0,
+        };
+    }
+
+    return .{
+        .orientation = abi.OMNI_DWINDLE_ORIENTATION_VERTICAL,
+        .new_first = delta_y < 0,
+    };
 }
 
 fn replaceNodeWithNode(
@@ -1271,7 +1354,13 @@ fn removeLeafAtIndex(ctx: *OmniDwindleLayoutContext, leaf_idx: usize) i32 {
     return abi.OMNI_OK;
 }
 
-fn addWindowInternal(ctx: *OmniDwindleLayoutContext, window_id: abi.OmniUuid128, out_applied: *bool) i32 {
+fn addWindowInternal(
+    ctx: *OmniDwindleLayoutContext,
+    window_id: abi.OmniUuid128,
+    runtime_settings: RuntimeSettings,
+    active_window_frame: ?Rect,
+    out_applied: *bool,
+) i32 {
     out_applied.* = false;
     if (findLeafByWindowId(ctx, window_id) != null) return abi.OMNI_OK;
 
@@ -1320,7 +1409,9 @@ fn addWindowInternal(ctx: *OmniDwindleLayoutContext, window_id: abi.OmniUuid128,
         new_first = direction == abi.OMNI_DWINDLE_DIRECTION_LEFT or direction == abi.OMNI_DWINDLE_DIRECTION_UP;
     } else {
         const target_rect = cachedNodeFrameRect(ctx, target_idx.?);
-        orientation = aspectOrientationForRect(target_rect);
+        const split_plan = planSplitForAddWindow(target_rect, active_window_frame, runtime_settings);
+        orientation = split_plan.orientation;
+        new_first = split_plan.new_first;
     }
 
     const original = ctx.nodes[target_idx.?];
@@ -1356,7 +1447,7 @@ fn addWindowInternal(ctx: *OmniDwindleLayoutContext, window_id: abi.OmniUuid128,
     var split_node = ctx.nodes[target_idx.?];
     split_node.kind = abi.OMNI_DWINDLE_NODE_SPLIT;
     split_node.orientation = orientation;
-    split_node.ratio = DEFAULT_SPLIT_RATIO;
+    split_node.ratio = runtime_settings.default_split_ratio;
     split_node.has_window_id = 0;
     split_node.window_id = zeroUuid();
     split_node.is_fullscreen = 0;
@@ -1520,7 +1611,7 @@ fn normalizeSelection(ctx: *OmniDwindleLayoutContext) bool {
     return changed;
 }
 
-fn moveFocusInternal(ctx: *OmniDwindleLayoutContext, direction: u8) i32 {
+fn moveFocusInternal(ctx: *OmniDwindleLayoutContext, direction: u8, inner_gap: f64) i32 {
     const root_idx = rootIndex(ctx) orelse return abi.OMNI_OK;
 
     var current_idx = selectedIndex(ctx);
@@ -1537,7 +1628,7 @@ fn moveFocusInternal(ctx: *OmniDwindleLayoutContext, direction: u8) i32 {
         ctx,
         current.window_id,
         direction,
-        DEFAULT_MUTATION_INNER_GAP,
+        inner_gap,
     ) orelse return abi.OMNI_OK;
 
     const neighbor_leaf = findLeafByWindowId(ctx, neighbor_id) orelse return abi.OMNI_OK;
@@ -1545,7 +1636,12 @@ fn moveFocusInternal(ctx: *OmniDwindleLayoutContext, direction: u8) i32 {
     return abi.OMNI_OK;
 }
 
-fn swapWindowsInternal(ctx: *OmniDwindleLayoutContext, direction: u8, out_applied: *bool) i32 {
+fn swapWindowsInternal(
+    ctx: *OmniDwindleLayoutContext,
+    direction: u8,
+    inner_gap: f64,
+    out_applied: *bool,
+) i32 {
     out_applied.* = false;
     const selected_idx = selectedIndex(ctx) orelse return abi.OMNI_OK;
     if (selected_idx >= ctx.node_count) return abi.OMNI_ERR_OUT_OF_RANGE;
@@ -1556,7 +1652,7 @@ fn swapWindowsInternal(ctx: *OmniDwindleLayoutContext, direction: u8, out_applie
         ctx,
         selected.window_id,
         direction,
-        DEFAULT_MUTATION_INNER_GAP,
+        inner_gap,
     ) orelse return abi.OMNI_OK;
     const neighbor_idx = findLeafByWindowId(ctx, neighbor_id) orelse return abi.OMNI_OK;
     if (neighbor_idx >= ctx.node_count) return abi.OMNI_ERR_OUT_OF_RANGE;
@@ -1926,10 +2022,31 @@ pub fn omni_dwindle_ctx_apply_op_impl(
 
     const op = request[0].op;
     if (!isValidOp(op)) return abi.OMNI_ERR_INVALID_ARGS;
+    const runtime_settings_raw = request[0].runtime_settings;
+    if (!isFlag(runtime_settings_raw.smart_split) or
+        !std.math.isFinite(runtime_settings_raw.default_split_ratio) or
+        !isFiniteNonNegative(runtime_settings_raw.split_width_multiplier) or
+        !isFiniteNonNegative(runtime_settings_raw.inner_gap))
+    {
+        return abi.OMNI_ERR_INVALID_ARGS;
+    }
+    const runtime_settings = decodeRuntimeSettings(runtime_settings_raw);
 
     switch (op) {
         abi.OMNI_DWINDLE_OP_ADD_WINDOW => {
-            if (isZeroUuid(request[0].payload.add_window.window_id)) return abi.OMNI_ERR_INVALID_ARGS;
+            const payload = request[0].payload.add_window;
+            if (isZeroUuid(payload.window_id)) return abi.OMNI_ERR_INVALID_ARGS;
+            if (!isFlag(payload.has_active_window_frame)) return abi.OMNI_ERR_INVALID_ARGS;
+            if (payload.has_active_window_frame != 0) {
+                const frame = payload.active_window_frame;
+                if (!std.math.isFinite(frame.x) or
+                    !std.math.isFinite(frame.y) or
+                    !isFiniteNonNegative(frame.width) or
+                    !isFiniteNonNegative(frame.height))
+                {
+                    return abi.OMNI_ERR_INVALID_ARGS;
+                }
+            }
         },
         abi.OMNI_DWINDLE_OP_REMOVE_WINDOW => {
             if (isZeroUuid(request[0].payload.remove_window.window_id)) return abi.OMNI_ERR_INVALID_ARGS;
@@ -2000,7 +2117,18 @@ pub fn omni_dwindle_ctx_apply_op_impl(
     switch (op) {
         abi.OMNI_DWINDLE_OP_ADD_WINDOW => {
             var did_apply = false;
-            const rc = addWindowInternal(ctx, request[0].payload.add_window.window_id, &did_apply);
+            const payload = request[0].payload.add_window;
+            const active_window_frame: ?Rect = if (payload.has_active_window_frame != 0)
+                abiRectToRect(payload.active_window_frame)
+            else
+                null;
+            const rc = addWindowInternal(
+                ctx,
+                payload.window_id,
+                runtime_settings,
+                active_window_frame,
+                &did_apply,
+            );
             if (rc != abi.OMNI_OK) return rc;
             applied = did_apply;
         },
@@ -2020,21 +2148,32 @@ pub fn omni_dwindle_ctx_apply_op_impl(
 
             for (0..sync_incoming_count) |idx| {
                 var did_add = false;
-                const rc = addWindowInternal(ctx, sync_incoming[idx], &did_add);
+                const rc = addWindowInternal(
+                    ctx,
+                    sync_incoming[idx],
+                    runtime_settings,
+                    null,
+                    &did_add,
+                );
                 if (rc != abi.OMNI_OK) return rc;
                 if (did_add) applied = true;
             }
         },
         abi.OMNI_DWINDLE_OP_MOVE_FOCUS => {
             const before = selectedIndex(ctx);
-            const rc = moveFocusInternal(ctx, request[0].payload.move_focus.direction);
+            const rc = moveFocusInternal(ctx, request[0].payload.move_focus.direction, runtime_settings.inner_gap);
             if (rc != abi.OMNI_OK) return rc;
             const after = selectedIndex(ctx);
             applied = before == null and after != null or before != null and after == null or (before != null and after != null and before.? != after.?);
         },
         abi.OMNI_DWINDLE_OP_SWAP_WINDOWS => {
             var did_apply = false;
-            const rc = swapWindowsInternal(ctx, request[0].payload.swap_windows.direction, &did_apply);
+            const rc = swapWindowsInternal(
+                ctx,
+                request[0].payload.swap_windows.direction,
+                runtime_settings.inner_gap,
+                &did_apply,
+            );
             if (rc != abi.OMNI_OK) return rc;
             applied = did_apply;
         },
@@ -2135,7 +2274,11 @@ pub fn omni_dwindle_ctx_calculate_layout_impl(
         !isFiniteNonNegative(req.outer_gap_right) or
         !isFiniteNonNegative(req.single_window_aspect_width) or
         !isFiniteNonNegative(req.single_window_aspect_height) or
-        !isFiniteNonNegative(req.single_window_aspect_tolerance))
+        !isFiniteNonNegative(req.single_window_aspect_tolerance) or
+        !isFlag(req.runtime_settings.smart_split) or
+        !std.math.isFinite(req.runtime_settings.default_split_ratio) or
+        !isFiniteNonNegative(req.runtime_settings.split_width_multiplier) or
+        !isFiniteNonNegative(req.runtime_settings.inner_gap))
     {
         return abi.OMNI_ERR_INVALID_ARGS;
     }

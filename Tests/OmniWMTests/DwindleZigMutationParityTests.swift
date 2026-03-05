@@ -212,7 +212,11 @@ private func applyReferenceMutationOp(
                 nextPid: &nextPid
             )
 
-            let zigResult = DwindleZigKernel.applyOp(context: context, op: op)
+            let zigResult = DwindleZigKernel.applyOp(
+                context: context,
+                op: op,
+                runtimeSettings: engine.settings
+            )
             #expect(zigResult.rc == 0)
             guard zigResult.rc == 0 else { continue }
 
@@ -235,5 +239,165 @@ private func applyReferenceMutationOp(
                 screen: screen
             )
         }
+    }
+
+    @MainActor
+    @Test func addWindowActiveFrameBiasChangesSplitOrientationAndPlacement() {
+        let screen = CGRect(x: 0, y: 0, width: 900, height: 1600)
+        var settings = DwindleSettings()
+        settings.smartSplit = true
+        settings.defaultSplitRatio = 1.0
+        settings.splitWidthMultiplier = 1.0
+        settings.singleWindowAspectRatio = CGSize(width: 3, height: 4)
+
+        let w1 = dwindleMutationUUID(71)
+        let w2 = dwindleMutationUUID(72)
+
+        func layoutFrames(
+            context: DwindleZigKernel.LayoutContext,
+            settings: DwindleSettings
+        ) -> [UUID: CGRect] {
+            let result = DwindleZigKernel.calculateLayout(
+                context: context,
+                request: DwindleZigKernel.LayoutRequest(screen: screen, settings: settings),
+                constraints: []
+            )
+            #expect(result.rc == 0)
+            return result.framesByWindowId
+        }
+
+        guard let noActiveContext = DwindleZigKernel.LayoutContext() else {
+            #expect(Bool(false))
+            return
+        }
+
+        _ = DwindleZigKernel.applyOp(
+            context: noActiveContext,
+            op: .addWindow(windowId: w1),
+            runtimeSettings: settings
+        )
+        _ = layoutFrames(context: noActiveContext, settings: settings)
+        _ = DwindleZigKernel.applyOp(
+            context: noActiveContext,
+            op: .addWindow(windowId: w2),
+            runtimeSettings: settings
+        )
+        let noActiveFrames = layoutFrames(context: noActiveContext, settings: settings)
+
+        guard let noActiveW1 = noActiveFrames[w1], let noActiveW2 = noActiveFrames[w2] else {
+            #expect(Bool(false))
+            return
+        }
+        #expect(abs(noActiveW1.minX - noActiveW2.minX) <= 1.0)
+        #expect(abs(noActiveW1.minY - noActiveW2.minY) > 1.0)
+
+        guard let activeContext = DwindleZigKernel.LayoutContext() else {
+            #expect(Bool(false))
+            return
+        }
+
+        _ = DwindleZigKernel.applyOp(
+            context: activeContext,
+            op: .addWindow(windowId: w1),
+            runtimeSettings: settings
+        )
+        _ = layoutFrames(context: activeContext, settings: settings)
+        _ = DwindleZigKernel.applyOp(
+            context: activeContext,
+            op: .addWindow(windowId: w2),
+            runtimeSettings: settings,
+            activeWindowFrame: CGRect(x: -300, y: 0, width: 120, height: 120)
+        )
+        let activeFrames = layoutFrames(context: activeContext, settings: settings)
+
+        guard let activeW1 = activeFrames[w1], let activeW2 = activeFrames[w2] else {
+            #expect(Bool(false))
+            return
+        }
+        #expect(abs(activeW1.minY - activeW2.minY) <= 1.0)
+        #expect(abs(activeW1.minX - activeW2.minX) > 1.0)
+        #expect(activeW2.midX < activeW1.midX)
+    }
+
+    @MainActor
+    @Test func runtimeInnerGapControlsMoveFocusAndSwapNeighborResolution() {
+        let screen = CGRect(x: 0, y: 0, width: 1800, height: 900)
+        var layoutSettings = DwindleSettings()
+        layoutSettings.innerGap = 50
+
+        let w1 = dwindleMutationUUID(81)
+        let w2 = dwindleMutationUUID(82)
+
+        guard let context = DwindleZigKernel.LayoutContext() else {
+            #expect(Bool(false))
+            return
+        }
+
+        _ = DwindleZigKernel.applyOp(
+            context: context,
+            op: .addWindow(windowId: w1),
+            runtimeSettings: layoutSettings
+        )
+        _ = DwindleZigKernel.applyOp(
+            context: context,
+            op: .addWindow(windowId: w2),
+            runtimeSettings: layoutSettings
+        )
+        let baselineLayout = DwindleZigKernel.calculateLayout(
+            context: context,
+            request: DwindleZigKernel.LayoutRequest(screen: screen, settings: layoutSettings),
+            constraints: []
+        )
+        #expect(baselineLayout.rc == 0)
+
+        var smallGapSettings = layoutSettings
+        smallGapSettings.innerGap = 0
+
+        let moveSmallGap = DwindleZigKernel.applyOp(
+            context: context,
+            op: .moveFocus(direction: .left),
+            runtimeSettings: smallGapSettings
+        )
+        #expect(moveSmallGap.rc == 0)
+        #expect(!moveSmallGap.applied)
+        #expect(moveSmallGap.selectedWindowId == w2)
+
+        let swapSmallGap = DwindleZigKernel.applyOp(
+            context: context,
+            op: .swapWindows(direction: .left),
+            runtimeSettings: smallGapSettings
+        )
+        #expect(swapSmallGap.rc == 0)
+        #expect(!swapSmallGap.applied)
+        #expect(swapSmallGap.selectedWindowId == w2)
+
+        var largeGapSettings = layoutSettings
+        largeGapSettings.innerGap = 60
+
+        let moveLargeGap = DwindleZigKernel.applyOp(
+            context: context,
+            op: .moveFocus(direction: .left),
+            runtimeSettings: largeGapSettings
+        )
+        #expect(moveLargeGap.rc == 0)
+        #expect(moveLargeGap.applied)
+        #expect(moveLargeGap.selectedWindowId == w1)
+
+        let moveBackToRight = DwindleZigKernel.applyOp(
+            context: context,
+            op: .moveFocus(direction: .right),
+            runtimeSettings: largeGapSettings
+        )
+        #expect(moveBackToRight.rc == 0)
+        #expect(moveBackToRight.selectedWindowId == w2)
+
+        let swapLargeGap = DwindleZigKernel.applyOp(
+            context: context,
+            op: .swapWindows(direction: .left),
+            runtimeSettings: largeGapSettings
+        )
+        #expect(swapLargeGap.rc == 0)
+        #expect(swapLargeGap.applied)
+        #expect(swapLargeGap.selectedWindowId == w2)
     }
 }

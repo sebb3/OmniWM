@@ -4,8 +4,6 @@ import Testing
 
 @testable import OmniWM
 
-private let dwindleFuzzMutationInnerGap: CGFloat = 8.0
-
 private func dwindleFuzzUUID(_ rng: inout DwindleMutationLCG) -> UUID {
     var hi = rng.next()
     let lo = rng.next()
@@ -111,16 +109,10 @@ private func applyReferenceFuzzOp(
         return expectedRemoved
 
     case let .moveFocus(direction):
-        let priorGap = engine.settings.innerGap
-        engine.settings.innerGap = dwindleFuzzMutationInnerGap
-        defer { engine.settings.innerGap = priorGap }
         _ = engine.moveFocus(direction: direction, in: workspaceId)
         return []
 
     case let .swapWindows(direction):
-        let priorGap = engine.settings.innerGap
-        engine.settings.innerGap = dwindleFuzzMutationInnerGap
-        defer { engine.settings.innerGap = priorGap }
         _ = engine.swapWindows(direction: direction, in: workspaceId)
         return []
 
@@ -314,7 +306,11 @@ private func randomFuzzOp(
                     nextPid: &nextPid
                 )
 
-                let zigResult = DwindleZigKernel.applyOp(context: context, op: op)
+                let zigResult = DwindleZigKernel.applyOp(
+                    context: context,
+                    op: op,
+                    runtimeSettings: engine.settings
+                )
                 #expect(zigResult.rc == 0)
                 guard zigResult.rc == 0 else { continue }
 
@@ -326,7 +322,11 @@ private func randomFuzzOp(
                 }
 
                 _ = dwindleMutationNormalizeSelectionReference(engine: engine, workspaceId: workspaceId)
-                let normalized = DwindleZigKernel.applyOp(context: context, op: .validateSelection)
+                let normalized = DwindleZigKernel.applyOp(
+                    context: context,
+                    op: .validateSelection,
+                    runtimeSettings: engine.settings
+                )
                 #expect(normalized.rc == 0)
                 let expectedSelected = dwindleMutationSelectedWindowId(engine: engine, workspaceId: workspaceId)
                 #expect(normalized.selectedWindowId == expectedSelected)

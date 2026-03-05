@@ -50,6 +50,7 @@ enum DwindleZigKernel {
         let outerGapRight: CGFloat
         let singleWindowAspectRatio: CGSize
         let singleWindowAspectTolerance: CGFloat
+        let runtimeSettings: OmniDwindleRuntimeSettings
 
         init(screen: CGRect, settings: DwindleSettings) {
             self.screen = screen
@@ -60,6 +61,7 @@ enum DwindleZigKernel {
             outerGapRight = settings.outerGapRight
             singleWindowAspectRatio = settings.singleWindowAspectRatio
             singleWindowAspectTolerance = settings.singleWindowAspectRatioTolerance
+            runtimeSettings = DwindleZigKernel.runtimeSettingsRaw(from: settings)
         }
     }
 
@@ -188,7 +190,8 @@ enum DwindleZigKernel {
             outer_gap_right: Double(request.outerGapRight),
             single_window_aspect_width: Double(request.singleWindowAspectRatio.width),
             single_window_aspect_height: Double(request.singleWindowAspectRatio.height),
-            single_window_aspect_tolerance: Double(request.singleWindowAspectTolerance)
+            single_window_aspect_tolerance: Double(request.singleWindowAspectTolerance),
+            runtime_settings: request.runtimeSettings
         )
 
         let rawConstraints = constraints.map { constraint in
@@ -291,7 +294,9 @@ enum DwindleZigKernel {
 
     static func applyOp(
         context: LayoutContext,
-        op: Op
+        op: Op,
+        runtimeSettings: DwindleSettings,
+        activeWindowFrame: CGRect? = nil
     ) -> OpResult {
         var removedRaw = [OmniUuid128](repeating: zeroUUID(), count: 512)
         var rawResult = OmniDwindleOpResult(
@@ -304,11 +309,16 @@ enum DwindleZigKernel {
             preselection_direction: directionCode(.left),
             removed_window_count: 0
         )
+        let rawRuntimeSettings = runtimeSettingsRaw(from: runtimeSettings)
 
         func invoke(opCode: UInt8, configure: (inout OmniDwindleOpPayload) -> Void) -> Int32 {
             var payload = OmniDwindleOpPayload()
             configure(&payload)
-            var request = OmniDwindleOpRequest(op: opCode, payload: payload)
+            var request = OmniDwindleOpRequest(
+                op: opCode,
+                payload: payload,
+                runtime_settings: rawRuntimeSettings
+            )
             return removedRaw.withUnsafeMutableBufferPointer { removedBuf in
                 withUnsafePointer(to: &request) { requestPtr in
                     withUnsafeMutablePointer(to: &rawResult) { resultPtr in
@@ -328,7 +338,11 @@ enum DwindleZigKernel {
         switch op {
         case let .addWindow(windowId):
             rc = invoke(opCode: UInt8(truncatingIfNeeded: OMNI_DWINDLE_OP_ADD_WINDOW.rawValue)) { payload in
-                payload.add_window = OmniDwindleAddWindowPayload(window_id: omniUUID(from: windowId))
+                payload.add_window = OmniDwindleAddWindowPayload(
+                    window_id: omniUUID(from: windowId),
+                    has_active_window_frame: activeWindowFrame == nil ? 0 : 1,
+                    active_window_frame: activeWindowFrame.map(rawRect(from:)) ?? zeroRect()
+                )
             }
         case let .removeWindow(windowId):
             rc = invoke(opCode: UInt8(truncatingIfNeeded: OMNI_DWINDLE_OP_REMOVE_WINDOW.rawValue)) { payload in
@@ -468,6 +482,28 @@ enum DwindleZigKernel {
         withUnsafeBytes(of: value) { raw in
             raw.allSatisfy { $0 == 0 }
         }
+    }
+
+    private static func runtimeSettingsRaw(from settings: DwindleSettings) -> OmniDwindleRuntimeSettings {
+        OmniDwindleRuntimeSettings(
+            smart_split: settings.smartSplit ? 1 : 0,
+            default_split_ratio: Double(settings.defaultSplitRatio),
+            split_width_multiplier: Double(settings.splitWidthMultiplier),
+            inner_gap: Double(settings.innerGap)
+        )
+    }
+
+    private static func rawRect(from frame: CGRect) -> OmniDwindleRect {
+        OmniDwindleRect(
+            x: Double(frame.origin.x),
+            y: Double(frame.origin.y),
+            width: Double(frame.size.width),
+            height: Double(frame.size.height)
+        )
+    }
+
+    private static func zeroRect() -> OmniDwindleRect {
+        OmniDwindleRect(x: 0, y: 0, width: 0, height: 0)
     }
 
     private static func directionCode(_ direction: Direction) -> UInt8 {

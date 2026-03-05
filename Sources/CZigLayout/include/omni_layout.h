@@ -1007,6 +1007,20 @@ typedef struct {
 } OmniDwindleSeedState;
 
 typedef struct {
+    uint8_t smart_split;
+    double default_split_ratio;
+    double split_width_multiplier;
+    double inner_gap;
+} OmniDwindleRuntimeSettings;
+
+typedef struct {
+    double x;
+    double y;
+    double width;
+    double height;
+} OmniDwindleRect;
+
+typedef struct {
     double screen_x;
     double screen_y;
     double screen_width;
@@ -1019,6 +1033,7 @@ typedef struct {
     double single_window_aspect_width;
     double single_window_aspect_height;
     double single_window_aspect_tolerance;
+    OmniDwindleRuntimeSettings runtime_settings;
 } OmniDwindleLayoutRequest;
 
 typedef struct {
@@ -1042,6 +1057,8 @@ typedef struct {
 
 typedef struct {
     OmniUuid128 window_id;
+    uint8_t has_active_window_frame;
+    OmniDwindleRect active_window_frame;
 } OmniDwindleAddWindowPayload;
 
 typedef struct {
@@ -1123,6 +1140,7 @@ typedef union {
 typedef struct {
     uint8_t op;
     OmniDwindleOpPayload payload;
+    OmniDwindleRuntimeSettings runtime_settings;
 } OmniDwindleOpRequest;
 
 typedef struct {

@@ -407,6 +407,20 @@ pub const OmniDwindleSeedState = extern struct {
     preselection_direction: u8,
 };
 
+pub const OmniDwindleRuntimeSettings = extern struct {
+    smart_split: u8,
+    default_split_ratio: f64,
+    split_width_multiplier: f64,
+    inner_gap: f64,
+};
+
+pub const OmniDwindleRect = extern struct {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+};
+
 pub const OmniDwindleLayoutRequest = extern struct {
     screen_x: f64,
     screen_y: f64,
@@ -420,6 +434,7 @@ pub const OmniDwindleLayoutRequest = extern struct {
     single_window_aspect_width: f64,
     single_window_aspect_height: f64,
     single_window_aspect_tolerance: f64,
+    runtime_settings: OmniDwindleRuntimeSettings,
 };
 
 pub const OmniDwindleWindowConstraint = extern struct {
@@ -443,6 +458,8 @@ pub const OmniDwindleWindowFrame = extern struct {
 
 pub const OmniDwindleAddWindowPayload = extern struct {
     window_id: OmniUuid128,
+    has_active_window_frame: u8,
+    active_window_frame: OmniDwindleRect,
 };
 
 pub const OmniDwindleRemoveWindowPayload = extern struct {
@@ -524,6 +541,7 @@ pub const OmniDwindleOpPayload = extern union {
 pub const OmniDwindleOpRequest = extern struct {
     op: u8,
     payload: OmniDwindleOpPayload,
+    runtime_settings: OmniDwindleRuntimeSettings,
 };
 
 pub const OmniDwindleOpResult = extern struct {

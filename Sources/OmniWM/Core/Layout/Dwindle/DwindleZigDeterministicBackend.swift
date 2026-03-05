@@ -74,10 +74,16 @@ final class DwindleZigDeterministicBackend: DwindleDeterministicBackend {
 
     private func applyZigOp(
         _ op: DwindleZigKernel.Op,
-        in workspaceId: WorkspaceDescriptor.ID
+        in workspaceId: WorkspaceDescriptor.ID,
+        activeWindowFrame: CGRect? = nil
     ) -> DwindleZigKernel.OpResult? {
         withZigState(for: workspaceId) { state in
-            let result = DwindleZigKernel.applyOp(context: state.context, op: op)
+            let result = DwindleZigKernel.applyOp(
+                context: state.context,
+                op: op,
+                runtimeSettings: settings,
+                activeWindowFrame: activeWindowFrame
+            )
             if result.rc == 0 {
                 applyZigResult(result, to: &state)
             }
@@ -261,7 +267,12 @@ final class DwindleZigDeterministicBackend: DwindleDeterministicBackend {
         state.handlesById[handle.id] = handle
         let node = ensureAnimationNode(in: &state, windowId: handle.id, handle: handle)
 
-        let result = DwindleZigKernel.applyOp(context: state.context, op: .addWindow(windowId: handle.id))
+        let result = DwindleZigKernel.applyOp(
+            context: state.context,
+            op: .addWindow(windowId: handle.id),
+            runtimeSettings: settings,
+            activeWindowFrame: activeWindowFrame
+        )
         guard result.rc == 0 else {
             zigStates[workspaceId] = previousState
             return node
@@ -279,7 +290,11 @@ final class DwindleZigDeterministicBackend: DwindleDeterministicBackend {
         }
 
         let previousById = state.handlesById
-        let result = DwindleZigKernel.applyOp(context: state.context, op: .removeWindow(windowId: handle.id))
+        let result = DwindleZigKernel.applyOp(
+            context: state.context,
+            op: .removeWindow(windowId: handle.id),
+            runtimeSettings: settings
+        )
         guard result.rc == 0 else {
             return
         }
@@ -315,7 +330,8 @@ final class DwindleZigDeterministicBackend: DwindleDeterministicBackend {
 
         let result = DwindleZigKernel.applyOp(
             context: state.context,
-            op: .syncWindows(windowIds: deduped.order)
+            op: .syncWindows(windowIds: deduped.order),
+            runtimeSettings: settings
         )
 
         guard result.rc == 0 else {
