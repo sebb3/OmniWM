@@ -3,64 +3,76 @@ import CZigLayout
 import Foundation
 
 extension NiriLayoutEngine {
-    private func applyLegacyNavigationResult(
+    private func column(
+        for columnId: NodeId,
+        snapshot: NiriStateZigKernel.Snapshot
+    ) -> NiriContainer? {
+        snapshot.columnEntries.first(where: { $0.column.id == columnId })?.column
+    }
+
+    private func applyNavigationResultSideEffects(
         snapshot: NiriStateZigKernel.Snapshot,
-        result: OmniNiriNavigationResult
+        outcome: NiriStateZigKernel.NavigationApplyOutcome
     ) {
-        func refreshColumn(at rawColumnIndex: Int64) {
-            guard let columnIndex = Int(exactly: rawColumnIndex),
-                  snapshot.columnEntries.indices.contains(columnIndex)
-            else {
-                return
-            }
-            updateTabbedColumnVisibility(column: snapshot.columnEntries[columnIndex].column)
-        }
-
-        func applyActiveUpdate(
-            enabled: UInt8,
-            rawColumnIndex: Int64,
-            rawActiveIndex: Int64,
-            refreshFlag: UInt8
-        ) {
-            guard enabled != 0,
-                  let columnIndex = Int(exactly: rawColumnIndex),
-                  let activeIndex = Int(exactly: rawActiveIndex),
-                  snapshot.columnEntries.indices.contains(columnIndex)
-            else {
-                return
-            }
-
-            let column = snapshot.columnEntries[columnIndex].column
-            column.setActiveTileIdx(activeIndex)
-            if refreshFlag != 0 {
-                updateTabbedColumnVisibility(column: column)
-            }
-        }
-
-        applyActiveUpdate(
-            enabled: result.update_source_active_tile,
-            rawColumnIndex: result.source_column_index,
-            rawActiveIndex: result.source_active_tile_idx,
-            refreshFlag: result.refresh_tabbed_visibility_source
-        )
-        applyActiveUpdate(
-            enabled: result.update_target_active_tile,
-            rawColumnIndex: result.target_column_index,
-            rawActiveIndex: result.target_active_tile_idx,
-            refreshFlag: result.refresh_tabbed_visibility_target
-        )
-
-        if result.update_source_active_tile == 0,
-           result.refresh_tabbed_visibility_source != 0
+        if let sourceUpdate = outcome.sourceActiveTileUpdate,
+           let column = column(for: sourceUpdate.columnId, snapshot: snapshot)
         {
-            refreshColumn(at: result.source_column_index)
+            column.setActiveTileIdx(sourceUpdate.activeTileIdx)
         }
 
-        if result.update_target_active_tile == 0,
-           result.refresh_tabbed_visibility_target != 0
+        if let targetUpdate = outcome.targetActiveTileUpdate,
+           let column = column(for: targetUpdate.columnId, snapshot: snapshot)
         {
-            refreshColumn(at: result.target_column_index)
+            column.setActiveTileIdx(targetUpdate.activeTileIdx)
         }
+
+        var refreshColumnIds: [NodeId] = []
+        if let sourceId = outcome.refreshSourceColumnId {
+            refreshColumnIds.append(sourceId)
+        }
+        if let targetId = outcome.refreshTargetColumnId, !refreshColumnIds.contains(targetId) {
+            refreshColumnIds.append(targetId)
+        }
+
+        for columnId in refreshColumnIds {
+            guard let column = column(for: columnId, snapshot: snapshot) else { continue }
+            updateTabbedColumnVisibility(column: column)
+        }
+    }
+
+    private func resolveNavigationTargetWithTransientRuntime(
+        snapshot: NiriStateZigKernel.Snapshot,
+        request: NiriStateZigKernel.NavigationRequest
+    ) -> NiriNode? {
+        guard let context = NiriLayoutZigKernel.LayoutContext() else {
+            return nil
+        }
+
+        let seedRC = NiriStateZigKernel.seedRuntimeState(
+            context: context,
+            snapshot: snapshot
+        )
+        guard seedRC == OMNI_OK else {
+            return nil
+        }
+
+        let outcome = NiriStateZigKernel.applyNavigation(
+            context: context,
+            request: .init(request: request)
+        )
+        guard outcome.rc == OMNI_OK else {
+            return nil
+        }
+
+        applyNavigationResultSideEffects(
+            snapshot: snapshot,
+            outcome: outcome
+        )
+
+        guard let targetWindowId = outcome.targetWindowId else {
+            return nil
+        }
+        return snapshot.windowEntries.first(where: { $0.window.id == targetWindowId })?.window
     }
 
     private func resolveNavigationTargetNode(
@@ -93,23 +105,11 @@ extension NiriLayoutEngine {
             targetWindowIndex: targetWindowIndex
         )
 
-        func resolveWithLegacySnapshot() -> NiriNode? {
-            let outcome = NiriStateZigKernel.resolveNavigation(snapshot: snapshot, request: request)
-            guard outcome.rc == OMNI_OK else {
-                return nil
-            }
-
-            applyLegacyNavigationResult(snapshot: snapshot, result: outcome.result)
-            guard let targetIndex = outcome.targetWindowIndex,
-                  snapshot.windowEntries.indices.contains(targetIndex)
-            else {
-                return nil
-            }
-            return snapshot.windowEntries[targetIndex].window
-        }
-
         guard let workspaceId else {
-            return resolveWithLegacySnapshot()
+            return resolveNavigationTargetWithTransientRuntime(
+                snapshot: snapshot,
+                request: request
+            )
         }
 
         guard let context = ensureLayoutContext(for: workspaceId) else {
