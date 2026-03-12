@@ -211,29 +211,34 @@ final class WindowActionHandler {
             }
         }
 
+        var targetState = controller.workspaceManager.niriViewportState(for: workspaceId)
         if let niriWindow = engine.findNode(for: token) {
-            controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
-                state.selectedNodeId = niriWindow.id
+            targetState.selectedNodeId = niriWindow.id
 
-                if let column = engine.findColumn(containing: niriWindow, in: workspaceId),
-                   let colIdx = engine.columnIndex(of: column, in: workspaceId),
-                   let monitor = controller.workspaceManager.monitor(for: workspaceId)
-                {
-                    engine.activateWindow(niriWindow.id)
+            if let column = engine.findColumn(containing: niriWindow, in: workspaceId),
+               let colIdx = engine.columnIndex(of: column, in: workspaceId),
+               let monitor = controller.workspaceManager.monitor(for: workspaceId)
+            {
+                engine.activateWindow(niriWindow.id)
 
-                    let cols = engine.columns(in: workspaceId)
-                    let gap = CGFloat(controller.workspaceManager.gaps)
-                    state.snapToColumn(
-                        colIdx,
-                        columns: cols,
-                        gap: gap,
-                        viewportWidth: monitor.visibleFrame.width
-                    )
-                }
+                let cols = engine.columns(in: workspaceId)
+                let gap = CGFloat(controller.workspaceManager.gaps)
+                targetState.snapToColumn(
+                    colIdx,
+                    columns: cols,
+                    gap: gap,
+                    viewportWidth: monitor.visibleFrame.width
+                )
             }
         }
 
-        _ = controller.workspaceManager.rememberFocus(token, in: workspaceId)
+        _ = controller.workspaceManager.applySessionPatch(
+            .init(
+                workspaceId: workspaceId,
+                viewportState: targetState,
+                rememberedFocusToken: token
+            )
+        )
         controller.layoutRefreshController.commitWorkspaceTransition(reason: .workspaceTransition) { [weak controller] in
             controller?.focusWindow(token)
         }

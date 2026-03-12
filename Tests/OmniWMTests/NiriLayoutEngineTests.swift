@@ -28,6 +28,39 @@ func makeTestMonitor(
     )
 }
 
+private func hasNiriScrollDirective(
+    _ directives: [AnimationDirective],
+    workspaceId: WorkspaceDescriptor.ID
+) -> Bool {
+    directives.contains { directive in
+        if case let .startNiriScroll(candidate) = directive {
+            return candidate == workspaceId
+        }
+        return false
+    }
+}
+
+private func hasActivationDirective(
+    _ directives: [AnimationDirective],
+    token: WindowToken
+) -> Bool {
+    directives.contains { directive in
+        if case let .activateWindow(candidate) = directive {
+            return candidate == token
+        }
+        return false
+    }
+}
+
+private func hasHiddenVisibilityChange(_ changes: [LayoutVisibilityChange]) -> Bool {
+    changes.contains { change in
+        if case .hide = change {
+            return true
+        }
+        return false
+    }
+}
+
 @Suite struct NiriLayoutEngineTests {
 
     @Test func selectionFallbackAfterRemoval_sameSibling() {
@@ -364,5 +397,214 @@ func makeTestMonitor(
         #expect(niriMonitor.workspaceSwitch?.orderedWorkspaceIds == [ws1, ws2])
         #expect(layout1.frames[handle1.id]?.minX == 0)
         #expect((layout2.frames[handle2.id]?.minX ?? 0) > 0)
+    }
+
+    @Test @MainActor func snapshotPlanIncludesViewportPatchAndActivationForNewWindow() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for Niri plan test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let firstToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 401)
+        _ = controller.workspaceManager.setManagedFocus(firstToken, in: workspaceId, onMonitor: monitor.id)
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        controller.layoutRefreshController.layoutState.hasCompletedInitialRefresh = true
+        let newToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 402)
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        guard let plan = plans.first else {
+            Issue.record("Expected a Niri layout plan for the active workspace")
+            return
+        }
+
+        #expect(plan.sessionPatch.viewportState != nil)
+        #expect(plan.sessionPatch.rememberedFocusToken == newToken)
+        #expect(hasNiriScrollDirective(plan.animationDirectives, workspaceId: workspaceId))
+        #expect(hasActivationDirective(plan.animationDirectives, token: newToken))
+    }
+
+    @Test @MainActor func snapshotPlanEmitsHideDiffForOffscreenWindows() async throws {
+        let monitor = makeLayoutPlanTestMonitor(width: 960, height: 1080)
+        let controller = makeLayoutPlanTestController(monitors: [monitor])
+        guard let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing active workspace for Niri hide-diff test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        for windowId in 501 ... 504 {
+            _ = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: windowId)
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.viewOffsetPixels = .gesture(
+                ViewGesture(currentViewOffset: -2500, isTrackpad: true)
+            )
+        }
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        guard let plan = plans.first else {
+            Issue.record("Expected a Niri layout plan after viewport shift")
+            return
+        }
+
+        #expect(hasHiddenVisibilityChange(plan.diff.visibilityChanges))
+    }
+
+    @Test @MainActor func snapshotPlanUsesRemovalSeedForFallbackAndScrollParity() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for Niri removal-seed test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let removedToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 551)
+        let survivingToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 552)
+        _ = controller.workspaceManager.setManagedFocus(removedToken, in: workspaceId, onMonitor: monitor.id)
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        guard let engine = controller.niriEngine,
+              let removedNodeId = engine.findNode(for: removedToken)?.id
+        else {
+            Issue.record("Expected Niri engine state for removal-seed test")
+            return
+        }
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = removedNodeId
+        }
+        let oldFrames = engine.captureWindowFrames(in: workspaceId)
+        guard !oldFrames.isEmpty else {
+            Issue.record("Expected non-empty Niri frame snapshot before removal")
+            return
+        }
+
+        _ = controller.workspaceManager.removeWindow(pid: removedToken.pid, windowId: removedToken.windowId)
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId],
+            useScrollAnimationPath: true,
+            removalSeeds: [
+                workspaceId: NiriWindowRemovalSeed(
+                    removedNodeId: removedNodeId,
+                    oldFrames: oldFrames
+                )
+            ]
+        )
+        guard let plan = plans.first else {
+            Issue.record("Expected a Niri layout plan after removal")
+            return
+        }
+        guard let survivingNodeId = engine.findNode(for: survivingToken)?.id else {
+            Issue.record("Expected surviving node after Niri removal")
+            return
+        }
+
+        #expect(!plan.diff.frameChanges.contains(where: { $0.token == removedToken }))
+        #expect(plan.diff.frameChanges.contains(where: { $0.token == survivingToken }))
+        #expect(plan.sessionPatch.rememberedFocusToken == survivingToken)
+        #expect(plan.sessionPatch.viewportState?.selectedNodeId == survivingNodeId)
+        #expect(hasNiriScrollDirective(plan.animationDirectives, workspaceId: workspaceId))
+    }
+
+    @Test @MainActor func nonFocusedWorkspacePlanDoesNotClearFocusedBorder() async throws {
+        let fixture = makeTwoMonitorLayoutPlanTestController()
+        let controller = fixture.controller
+        controller.setBordersEnabled(true)
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let primaryToken = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: fixture.primaryWorkspaceId,
+            windowId: 601
+        )
+        _ = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: fixture.secondaryWorkspaceId,
+            windowId: 602
+        )
+        _ = controller.workspaceManager.setManagedFocus(
+            primaryToken,
+            in: fixture.primaryWorkspaceId,
+            onMonitor: fixture.primaryMonitor.id
+        )
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [fixture.primaryWorkspaceId, fixture.secondaryWorkspaceId],
+            useScrollAnimationPath: true
+        )
+        controller.layoutRefreshController.executeLayoutPlans(plans)
+
+        #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 601)
+    }
+
+    @Test @MainActor func staleScrollAnimationStopsBeforeRestoringInactiveWorkspaceWindows() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let originalWorkspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id,
+              let replacementWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        else {
+            Issue.record("Missing monitor or workspaces for stale Niri animation test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: originalWorkspaceId, windowId: 603)
+        _ = controller.workspaceManager.setManagedFocus(token, in: originalWorkspaceId, onMonitor: monitor.id)
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [originalWorkspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(plans)
+
+        setWorkspaceInactiveHiddenStateForLayoutPlanTests(on: controller, token: token, monitor: monitor)
+        controller.layoutRefreshController.stopAllScrollAnimations()
+        #expect(controller.niriLayoutHandler.registerScrollAnimation(originalWorkspaceId, on: monitor.displayId))
+        _ = controller.workspaceManager.setActiveWorkspace(replacementWorkspaceId, on: monitor.id)
+
+        controller.niriLayoutHandler.tickScrollAnimation(targetTime: 1, displayId: monitor.displayId)
+
+        #expect(controller.niriLayoutHandler.scrollAnimationByDisplay[monitor.displayId] == nil)
+        #expect(controller.workspaceManager.hiddenState(for: token)?.workspaceInactive == true)
     }
 }

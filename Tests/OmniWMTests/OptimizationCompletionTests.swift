@@ -237,6 +237,17 @@ private func makeOverviewWindowItem(
             "focusManager.isNonManagedFocusActive",
             "focusManager.isAppFullscreenActive",
         ]
+        let forbiddenControllerPatterns = [
+            "workspaceManager.rememberFocus(",
+            "workspaceManager.applyNiriViewportTransfer(",
+            "workspaceManager.syncWorkspaceSelection(",
+            "workspaceManager.updateNiriViewportState(",
+        ]
+        let withViewportStateAllowedFiles: Set<String> = [
+            "MouseEventHandler.swift",
+            "NiriLayoutHandler.swift",
+            "WorkspaceManager.swift",
+        ]
 
         let enumerator = FileManager.default.enumerator(
             at: sourcesRoot,
@@ -249,6 +260,17 @@ private func makeOverviewWindowItem(
             let contents = try String(contentsOf: fileURL, encoding: .utf8)
             for pattern in forbiddenPatterns where contents.contains(pattern) {
                 violations.append("\(fileURL.lastPathComponent): \(pattern)")
+            }
+            if fileURL.path.contains("/Controller/") {
+                for pattern in forbiddenControllerPatterns where contents.contains(pattern) {
+                    violations.append("\(fileURL.lastPathComponent): \(pattern)")
+                }
+            }
+            if !withViewportStateAllowedFiles.contains(fileURL.lastPathComponent),
+               fileURL.path.contains("/Controller/"),
+               contents.contains("workspaceManager.withNiriViewportState(")
+            {
+                violations.append("\(fileURL.lastPathComponent): workspaceManager.withNiriViewportState(")
             }
         }
 

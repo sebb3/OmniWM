@@ -303,24 +303,30 @@ final class CommandHandler {
         guard let wsId = controller.activeWorkspace()?.id else { return }
         guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return }
 
-        controller.workspaceManager.withNiriViewportState(for: wsId) { state in
-            guard let currentId = state.selectedNodeId,
-                  let currentNode = engine.findNode(by: currentId)
-            else {
-                return
-            }
-
-            let gap = CGFloat(controller.workspaceManager.gaps)
-            let workingFrame = controller.insetWorkingFrame(for: monitor)
-            guard let newNode = navigationAction(engine, currentNode, wsId, &state, workingFrame, gap) else {
-                return
-            }
-
-            controller.niriLayoutHandler.activateNode(
-                newNode, in: wsId, state: &state,
-                options: .init(activateWindow: false, ensureVisible: false)
-            )
+        var state = controller.workspaceManager.niriViewportState(for: wsId)
+        guard let currentId = state.selectedNodeId,
+              let currentNode = engine.findNode(by: currentId)
+        else {
+            return
         }
+
+        let gap = CGFloat(controller.workspaceManager.gaps)
+        let workingFrame = controller.insetWorkingFrame(for: monitor)
+        guard let newNode = navigationAction(engine, currentNode, wsId, &state, workingFrame, gap) else {
+            return
+        }
+
+        controller.niriLayoutHandler.activateNode(
+            newNode, in: wsId, state: &state,
+            options: .init(activateWindow: false, ensureVisible: false)
+        )
+        _ = controller.workspaceManager.applySessionPatch(
+            .init(
+                workspaceId: wsId,
+                viewportState: state,
+                rememberedFocusToken: nil
+            )
+        )
     }
 
     private func moveWindowInNiri(direction: Direction) {

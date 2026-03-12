@@ -23,48 +23,91 @@ import QuartzCore
         dwindleAnimationByDisplay.values.contains { $0.0 == workspaceId }
     }
 
+    func syncWorkspaceState(workspaceId wsId: WorkspaceDescriptor.ID, monitor: Monitor) {
+        guard let controller,
+              let engine = controller.dwindleEngine,
+              let snapshot = makeWorkspaceSnapshot(
+                  workspaceId: wsId,
+                  monitor: monitor,
+                  resolveConstraints: true
+              )
+        else {
+            return
+        }
+
+        applyResolvedSettings(snapshot.settings, to: engine)
+        _ = engine.syncWindows(
+            snapshot.windows.map(\.token),
+            in: snapshot.workspaceId,
+            focusedToken: snapshot.preferredFocusToken
+        )
+        for window in snapshot.windows {
+            engine.updateWindowConstraints(for: window.token, constraints: window.constraints)
+        }
+    }
+
+    func applyFramesOnDemand(workspaceId wsId: WorkspaceDescriptor.ID, monitor: Monitor) {
+        guard let controller,
+              let engine = controller.dwindleEngine,
+              let snapshot = makeWorkspaceSnapshot(
+                  workspaceId: wsId,
+                  monitor: monitor,
+                  resolveConstraints: false
+              )
+        else {
+            return
+        }
+
+        let plan = buildOnDemandLayoutPlan(
+            snapshot: snapshot,
+            engine: engine
+        )
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+    }
+
     func tickDwindleAnimation(targetTime: CFTimeInterval, displayId: CGDirectDisplayID) {
-        guard let (wsId, monitor) = dwindleAnimationByDisplay[displayId] else { return }
+        guard let (wsId, _) = dwindleAnimationByDisplay[displayId] else { return }
         guard let controller, let engine = controller.dwindleEngine else {
             controller?.layoutRefreshController.stopDwindleAnimation(for: displayId)
             return
         }
 
-        engine.tickAnimations(at: targetTime, in: wsId)
-
-        let insetFrame = controller.insetWorkingFrame(for: monitor)
-        let baseFrames = engine.calculateLayout(for: wsId, screen: insetFrame)
-        let animatedFrames = engine.calculateAnimatedFrames(
-            baseFrames: baseFrames,
-            in: wsId,
-            at: targetTime
-        )
-
-        var frameUpdates: [(pid: pid_t, windowId: Int, frame: CGRect)] = []
-
-        for (token, frame) in animatedFrames {
-            if let entry = controller.workspaceManager.entry(for: token) {
-                frameUpdates.append((entry.pid, entry.windowId, frame))
-            }
+        guard let monitor = controller.workspaceManager.monitors.first(where: { $0.displayId == displayId }) else {
+            controller.layoutRefreshController.stopDwindleAnimation(for: displayId)
+            return
         }
 
-        controller.axManager.applyFramesParallel(frameUpdates)
+        guard controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id == wsId else {
+            controller.layoutRefreshController.stopDwindleAnimation(for: displayId)
+            return
+        }
+
+        engine.tickAnimations(at: targetTime, in: wsId)
+        guard let snapshot = makeWorkspaceSnapshot(
+            workspaceId: wsId,
+            monitor: monitor,
+            resolveConstraints: false
+        ) else {
+            return
+        }
+
+        let plan = buildAnimationPlan(
+            snapshot: snapshot,
+            engine: engine,
+            targetTime: targetTime
+        )
+        controller.layoutRefreshController.executeLayoutPlan(plan)
 
         if !engine.hasActiveAnimations(in: wsId, at: targetTime) {
-            if let focusedToken = controller.workspaceManager.focusedToken,
-               let frame = animatedFrames[focusedToken],
-               let entry = controller.workspaceManager.entry(for: focusedToken) {
-                controller.borderCoordinator.updateBorderIfAllowed(token: focusedToken, frame: frame, windowId: entry.windowId)
-            }
             controller.layoutRefreshController.stopDwindleAnimation(for: displayId)
         }
     }
 
-    func layoutWithDwindleEngine(activeWorkspaces: Set<WorkspaceDescriptor.ID>) async {
-        guard let controller, let engine = controller.dwindleEngine else { return }
-        let lrc = controller.layoutRefreshController
-
+    func layoutWithDwindleEngine(activeWorkspaces: Set<WorkspaceDescriptor.ID>) async throws -> [WorkspaceLayoutPlan] {
+        guard let controller, let engine = controller.dwindleEngine else { return [] }
+        var plans: [WorkspaceLayoutPlan] = []
         for monitor in controller.workspaceManager.monitors {
+            try Task.checkCancellation()
             guard let workspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id) else { continue }
             let wsId = workspace.id
 
@@ -74,68 +117,25 @@ import QuartzCore
             let layoutType = controller.settings.layoutType(for: wsName)
             guard layoutType == .dwindle else { continue }
 
-            let oldFrames = engine.currentFrames(in: wsId)
+            guard let snapshot = makeWorkspaceSnapshot(
+                workspaceId: wsId,
+                monitor: monitor,
+                resolveConstraints: true
+            ) else { continue }
 
-            let windowTokens = controller.workspaceManager.entries(in: wsId).map(\.token)
-            let currentFocusedToken = controller.workspaceManager.preferredFocusToken(in: wsId)
-
-            _ = engine.syncWindows(windowTokens, in: wsId, focusedToken: currentFocusedToken)
-
-            lrc.updateWindowConstraints(in: wsId) { engine.updateWindowConstraints(for: $0, constraints: $1) }
-
-            let insetFrame = controller.insetWorkingFrame(for: monitor)
-
-            let newFrames = engine.calculateLayout(for: wsId, screen: insetFrame)
-
-            for entry in controller.workspaceManager.entries(in: wsId) {
-                if newFrames[entry.token] != nil {
-                    lrc.unhideWindow(entry, monitor: monitor)
-                }
-            }
-
-            if let selected = engine.selectedNode(in: wsId),
-               case let .leaf(handle, _) = selected.kind,
-               let handle {
-                _ = controller.workspaceManager.syncWorkspaceFocus(
-                    handle,
-                    in: wsId,
-                    onMonitor: monitor.id
+            plans.append(
+                buildRelayoutPlan(
+                    snapshot: snapshot,
+                    engine: engine
                 )
-            }
+            )
 
-            engine.animateWindowMovements(oldFrames: oldFrames, newFrames: newFrames)
-
-            let now = CACurrentMediaTime()
-            if engine.hasActiveAnimations(in: wsId, at: now) {
-                lrc.startDwindleAnimation(for: wsId, monitor: monitor)
-
-                if let focusedToken = controller.workspaceManager.focusedToken,
-                   let frame = newFrames[focusedToken],
-                   let entry = controller.workspaceManager.entry(for: focusedToken) {
-                    controller.borderManager.updateFocusedWindow(frame: frame, windowId: entry.windowId)
-                }
-            } else {
-                var frameUpdates: [(pid: pid_t, windowId: Int, frame: CGRect)] = []
-
-                for (token, frame) in newFrames {
-                    if let entry = controller.workspaceManager.entry(for: token) {
-                        frameUpdates.append((entry.pid, entry.windowId, frame))
-                    }
-                }
-
-                controller.axManager.applyFramesParallel(frameUpdates)
-
-                if let focusedToken = controller.workspaceManager.focusedToken,
-                   let frame = newFrames[focusedToken],
-                   let entry = controller.workspaceManager.entry(for: focusedToken) {
-                    controller.borderCoordinator.updateBorderIfAllowed(token: focusedToken, frame: frame, windowId: entry.windowId)
-                }
-            }
-
+            try Task.checkCancellation()
             await Task.yield()
         }
 
-        controller.updateWorkspaceBar()
+        try Task.checkCancellation()
+        return plans
     }
 
     // MARK: - Layout Capability Commands
@@ -144,9 +144,12 @@ import QuartzCore
         guard let controller else { return }
         withDwindleContext { engine, wsId in
             if let token = engine.moveFocus(direction: direction, in: wsId) {
-                _ = controller.workspaceManager.rememberFocus(
-                    token,
-                    in: wsId
+                _ = controller.workspaceManager.applySessionPatch(
+                    .init(
+                        workspaceId: wsId,
+                        viewportState: nil,
+                        rememberedFocusToken: token
+                    )
                 )
                 controller.layoutRefreshController.requestImmediateRelayout(
                     reason: .layoutCommand
@@ -170,9 +173,12 @@ import QuartzCore
         guard let controller else { return }
         withDwindleContext { engine, wsId in
             if let token = engine.toggleFullscreen(in: wsId) {
-                _ = controller.workspaceManager.rememberFocus(
-                    token,
-                    in: wsId
+                _ = controller.workspaceManager.applySessionPatch(
+                    .init(
+                        workspaceId: wsId,
+                        viewportState: nil,
+                        rememberedFocusToken: token
+                    )
                 )
                 controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
             }
@@ -237,6 +243,223 @@ import QuartzCore
               let wsId = controller.activeWorkspace()?.id
         else { return }
         perform(engine, wsId)
+    }
+
+    private func makeWorkspaceSnapshot(
+        workspaceId wsId: WorkspaceDescriptor.ID,
+        monitor: Monitor,
+        resolveConstraints: Bool
+    ) -> DwindleWorkspaceSnapshot? {
+        guard let controller else { return nil }
+
+        let entries = controller.workspaceManager.entries(in: wsId)
+        let windows = controller.layoutRefreshController.buildWindowSnapshots(
+            for: entries,
+            resolveConstraints: resolveConstraints
+        )
+        let monitorSnapshot = controller.layoutRefreshController.buildMonitorSnapshot(for: monitor)
+        let selectedToken: WindowToken?
+        if let selected = controller.dwindleEngine?.selectedNode(in: wsId),
+           case let .leaf(handle, _) = selected.kind
+        {
+            selectedToken = handle
+        } else {
+            selectedToken = nil
+        }
+
+        return DwindleWorkspaceSnapshot(
+            workspaceId: wsId,
+            monitor: monitorSnapshot,
+            windows: windows,
+            preferredFocusToken: controller.workspaceManager.preferredFocusToken(in: wsId),
+            confirmedFocusedToken: controller.workspaceManager.focusedToken,
+            selectedToken: selectedToken,
+            settings: controller.settings.resolvedDwindleSettings(for: monitor),
+            isActiveWorkspace: controller.activeWorkspace()?.id == wsId
+        )
+    }
+
+    private func buildRelayoutPlan(
+        snapshot: DwindleWorkspaceSnapshot,
+        engine: DwindleLayoutEngine
+    ) -> WorkspaceLayoutPlan {
+        applyResolvedSettings(snapshot.settings, to: engine)
+
+        let oldFrames = engine.currentFrames(in: snapshot.workspaceId)
+        let windowTokens = snapshot.windows.map(\.token)
+        _ = engine.syncWindows(
+            windowTokens,
+            in: snapshot.workspaceId,
+            focusedToken: snapshot.preferredFocusToken
+        )
+
+        for window in snapshot.windows {
+            engine.updateWindowConstraints(for: window.token, constraints: window.constraints)
+        }
+
+        let newFrames = engine.calculateLayout(
+            for: snapshot.workspaceId,
+            screen: snapshot.monitor.workingFrame
+        )
+
+        let rememberedFocusToken: WindowToken?
+        if let selected = engine.selectedNode(in: snapshot.workspaceId),
+           case let .leaf(handle, _) = selected.kind
+        {
+            rememberedFocusToken = handle
+        } else {
+            rememberedFocusToken = nil
+        }
+
+        engine.animateWindowMovements(oldFrames: oldFrames, newFrames: newFrames)
+
+        let now = CACurrentMediaTime()
+        let animationsActive = engine.hasActiveAnimations(in: snapshot.workspaceId, at: now)
+        let diff = layoutDiff(
+            windows: snapshot.windows,
+            frames: newFrames,
+            confirmedFocusedToken: snapshot.confirmedFocusedToken,
+            directBorderUpdate: animationsActive,
+            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
+        )
+        let directives: [AnimationDirective] = animationsActive
+            ? [.startDwindleAnimation(workspaceId: snapshot.workspaceId, monitorId: snapshot.monitor.monitorId)]
+            : []
+
+        return WorkspaceLayoutPlan(
+            workspaceId: snapshot.workspaceId,
+            monitor: snapshot.monitor,
+            sessionPatch: WorkspaceSessionPatch(
+                workspaceId: snapshot.workspaceId,
+                rememberedFocusToken: rememberedFocusToken
+            ),
+            diff: diff,
+            animationDirectives: directives
+        )
+    }
+
+    private func buildOnDemandLayoutPlan(
+        snapshot: DwindleWorkspaceSnapshot,
+        engine: DwindleLayoutEngine
+    ) -> WorkspaceLayoutPlan {
+        applyResolvedSettings(snapshot.settings, to: engine)
+
+        let frames = engine.calculateLayout(
+            for: snapshot.workspaceId,
+            screen: snapshot.monitor.workingFrame
+        )
+        let diff = layoutDiff(
+            windows: snapshot.windows,
+            frames: frames,
+            confirmedFocusedToken: snapshot.confirmedFocusedToken,
+            directBorderUpdate: true,
+            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
+        )
+
+        return WorkspaceLayoutPlan(
+            workspaceId: snapshot.workspaceId,
+            monitor: snapshot.monitor,
+            sessionPatch: WorkspaceSessionPatch(workspaceId: snapshot.workspaceId),
+            diff: diff
+        )
+    }
+
+    private func buildAnimationPlan(
+        snapshot: DwindleWorkspaceSnapshot,
+        engine: DwindleLayoutEngine,
+        targetTime: TimeInterval
+    ) -> WorkspaceLayoutPlan {
+        applyResolvedSettings(snapshot.settings, to: engine)
+
+        let baseFrames = engine.calculateLayout(
+            for: snapshot.workspaceId,
+            screen: snapshot.monitor.workingFrame
+        )
+        let animatedFrames = engine.calculateAnimatedFrames(
+            baseFrames: baseFrames,
+            in: snapshot.workspaceId,
+            at: targetTime
+        )
+        let animationsActive = engine.hasActiveAnimations(in: snapshot.workspaceId, at: targetTime)
+        let diff = layoutDiff(
+            windows: snapshot.windows,
+            frames: animatedFrames,
+            confirmedFocusedToken: animationsActive ? nil : snapshot.confirmedFocusedToken,
+            directBorderUpdate: false,
+            borderMode: animationsActive ? BorderUpdateMode.none : .coordinated,
+            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
+        )
+
+        return WorkspaceLayoutPlan(
+            workspaceId: snapshot.workspaceId,
+            monitor: snapshot.monitor,
+            sessionPatch: WorkspaceSessionPatch(workspaceId: snapshot.workspaceId),
+            diff: diff
+        )
+    }
+
+    private func layoutDiff(
+        windows: [LayoutWindowSnapshot],
+        frames: [WindowToken: CGRect],
+        confirmedFocusedToken: WindowToken?,
+        directBorderUpdate: Bool,
+        borderMode: BorderUpdateMode? = nil,
+        canRestoreHiddenWorkspaceWindows: Bool
+    ) -> WorkspaceLayoutDiff {
+        var diff = WorkspaceLayoutDiff()
+        if let confirmedFocusedToken {
+            let ownsFocusedToken = windows.contains(where: { $0.token == confirmedFocusedToken })
+            diff.borderMode = ownsFocusedToken
+                ? (borderMode ?? (directBorderUpdate ? .direct : .coordinated))
+                : .none
+        } else {
+            diff.borderMode = borderMode ?? (directBorderUpdate ? .direct : .coordinated)
+        }
+
+        for window in windows {
+            if canRestoreHiddenWorkspaceWindows,
+               let hiddenState = window.hiddenState,
+               hiddenState.workspaceInactive
+            {
+                diff.restoreChanges.append(
+                    .init(token: window.token, hiddenState: hiddenState)
+                )
+            }
+            guard let frame = frames[window.token] else { continue }
+            diff.frameChanges.append(
+                LayoutFrameChange(
+                    token: window.token,
+                    frame: frame,
+                    forceApply: false
+                )
+            )
+        }
+
+        if let confirmedFocusedToken,
+           let frame = frames[confirmedFocusedToken]
+        {
+            diff.focusedFrame = LayoutFocusedFrame(
+                token: confirmedFocusedToken,
+                frame: frame
+            )
+        }
+
+        return diff
+    }
+
+    private func applyResolvedSettings(
+        _ settings: ResolvedDwindleSettings,
+        to engine: DwindleLayoutEngine
+    ) {
+        engine.settings.smartSplit = settings.smartSplit
+        engine.settings.defaultSplitRatio = settings.defaultSplitRatio
+        engine.settings.splitWidthMultiplier = settings.splitWidthMultiplier
+        engine.settings.singleWindowAspectRatio = settings.singleWindowAspectRatio.size
+        engine.settings.innerGap = settings.innerGap
+        engine.settings.outerGapTop = settings.outerGapTop
+        engine.settings.outerGapBottom = settings.outerGapBottom
+        engine.settings.outerGapLeft = settings.outerGapLeft
+        engine.settings.outerGapRight = settings.outerGapRight
     }
 }
 

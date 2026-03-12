@@ -269,7 +269,7 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    func syncWorkspaceSelection(
+    func commitWorkspaceSelection(
         nodeId: NodeId?,
         focusedToken: WindowToken?,
         in workspaceId: WorkspaceDescriptor.ID,
@@ -296,6 +296,52 @@ final class WorkspaceManager {
         return changed
     }
 
+    @discardableResult
+    func syncWorkspaceSelection(
+        nodeId: NodeId?,
+        focusedToken: WindowToken?,
+        in workspaceId: WorkspaceDescriptor.ID,
+        onMonitor monitorId: Monitor.ID? = nil
+    ) -> Bool {
+        commitWorkspaceSelection(
+            nodeId: nodeId,
+            focusedToken: focusedToken,
+            in: workspaceId,
+            onMonitor: monitorId
+        )
+    }
+
+    @discardableResult
+    func applySessionPatch(_ patch: WorkspaceSessionPatch) -> Bool {
+        var changed = false
+
+        if let viewportState = patch.viewportState {
+            updateNiriViewportState(viewportState, for: patch.workspaceId)
+            changed = true
+        }
+
+        if let rememberedFocusToken = patch.rememberedFocusToken {
+            changed = rememberFocus(rememberedFocusToken, in: patch.workspaceId) || changed
+        }
+
+        return changed
+    }
+
+    @discardableResult
+    func applySessionTransfer(_ transfer: WorkspaceSessionTransfer) -> Bool {
+        var changed = false
+
+        if let sourcePatch = transfer.sourcePatch {
+            changed = applySessionPatch(sourcePatch) || changed
+        }
+
+        if let targetPatch = transfer.targetPatch {
+            changed = applySessionPatch(targetPatch) || changed
+        }
+
+        return changed
+    }
+
     func applyNiriViewportTransfer(
         sourceWorkspaceId: WorkspaceDescriptor.ID?,
         sourceState: ViewportState?,
@@ -304,19 +350,24 @@ final class WorkspaceManager {
         targetState: ViewportState?,
         targetFocusedToken: WindowToken?
     ) {
-        if let sourceWorkspaceId, let sourceState {
-            updateNiriViewportState(sourceState, for: sourceWorkspaceId)
-            if let sourceFocusedToken {
-                _ = rememberFocus(sourceFocusedToken, in: sourceWorkspaceId)
-            }
-        }
-
-        if let targetWorkspaceId, let targetState {
-            updateNiriViewportState(targetState, for: targetWorkspaceId)
-            if let targetFocusedToken {
-                _ = rememberFocus(targetFocusedToken, in: targetWorkspaceId)
-            }
-        }
+        _ = applySessionTransfer(
+            .init(
+                sourcePatch: sourceWorkspaceId.map {
+                    WorkspaceSessionPatch(
+                        workspaceId: $0,
+                        viewportState: sourceState,
+                        rememberedFocusToken: sourceFocusedToken
+                    )
+                },
+                targetPatch: targetWorkspaceId.map {
+                    WorkspaceSessionPatch(
+                        workspaceId: $0,
+                        viewportState: targetState,
+                        rememberedFocusToken: targetFocusedToken
+                    )
+                }
+            )
+        )
     }
 
     func lastFocusedToken(in workspaceId: WorkspaceDescriptor.ID) -> WindowToken? {

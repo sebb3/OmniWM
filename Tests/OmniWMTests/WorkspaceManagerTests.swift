@@ -680,4 +680,128 @@ private func addWorkspaceManagerTestHandle(
         #expect(manager.interactionMonitorId == left.id)
         #expect(manager.previousInteractionMonitorId == nil)
     }
+
+    @Test @MainActor func applySessionPatchCommitsViewportAndRememberedFocusAtomically() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = [
+            WorkspaceConfiguration(name: "1", monitorAssignment: .any, isPersistent: true)
+        ]
+
+        let manager = WorkspaceManager(settings: settings)
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 300, name: "Main", x: 0, y: 0)
+        manager.applyMonitorConfigurationChange([monitor])
+
+        guard let workspaceId = manager.workspaceId(for: "1", createIfMissing: true) else {
+            Issue.record("Failed to create workspace")
+            return
+        }
+
+        let handle = addWorkspaceManagerTestHandle(manager: manager, windowId: 3201, workspaceId: workspaceId)
+        let selectedNodeId = NodeId()
+        var viewportState = manager.niriViewportState(for: workspaceId)
+        viewportState.selectedNodeId = selectedNodeId
+        viewportState.activeColumnIndex = 2
+
+        #expect(
+            manager.applySessionPatch(
+                .init(
+                    workspaceId: workspaceId,
+                    viewportState: viewportState,
+                    rememberedFocusToken: handle.id
+                )
+            )
+        )
+        #expect(manager.niriViewportState(for: workspaceId).selectedNodeId == selectedNodeId)
+        #expect(manager.niriViewportState(for: workspaceId).activeColumnIndex == 2)
+        #expect(manager.lastFocusedToken(in: workspaceId) == handle.id)
+    }
+
+    @Test @MainActor func applySessionTransferMovesViewportAndFocusMemoryTogether() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = [
+            WorkspaceConfiguration(name: "1", monitorAssignment: .any, isPersistent: true),
+            WorkspaceConfiguration(name: "2", monitorAssignment: .any, isPersistent: true)
+        ]
+
+        let manager = WorkspaceManager(settings: settings)
+        let left = makeWorkspaceManagerTestMonitor(displayId: 310, name: "Left", x: 0, y: 0)
+        let right = makeWorkspaceManagerTestMonitor(displayId: 320, name: "Right", x: 1920, y: 0)
+        manager.applyMonitorConfigurationChange([left, right])
+
+        guard let sourceWorkspaceId = manager.workspaceId(for: "1", createIfMissing: true),
+              let targetWorkspaceId = manager.workspaceId(for: "2", createIfMissing: true) else {
+            Issue.record("Failed to create workspaces")
+            return
+        }
+
+        let sourceHandle = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 3301,
+            workspaceId: sourceWorkspaceId
+        )
+        let targetHandle = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 3302,
+            workspaceId: targetWorkspaceId
+        )
+
+        var sourceState = manager.niriViewportState(for: sourceWorkspaceId)
+        sourceState.selectedNodeId = NodeId()
+        var targetState = manager.niriViewportState(for: targetWorkspaceId)
+        targetState.selectedNodeId = NodeId()
+
+        #expect(
+            manager.applySessionTransfer(
+                .init(
+                    sourcePatch: .init(
+                        workspaceId: sourceWorkspaceId,
+                        viewportState: sourceState,
+                        rememberedFocusToken: sourceHandle.id
+                    ),
+                    targetPatch: .init(
+                        workspaceId: targetWorkspaceId,
+                        viewportState: targetState,
+                        rememberedFocusToken: targetHandle.id
+                    )
+                )
+            )
+        )
+        #expect(manager.niriViewportState(for: sourceWorkspaceId).selectedNodeId == sourceState.selectedNodeId)
+        #expect(manager.niriViewportState(for: targetWorkspaceId).selectedNodeId == targetState.selectedNodeId)
+        #expect(manager.lastFocusedToken(in: sourceWorkspaceId) == sourceHandle.id)
+        #expect(manager.lastFocusedToken(in: targetWorkspaceId) == targetHandle.id)
+    }
+
+    @Test @MainActor func commitWorkspaceSelectionUpdatesSelectedNodeAndRememberedFocusAtomically() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = [
+            WorkspaceConfiguration(name: "1", monitorAssignment: .any, isPersistent: true)
+        ]
+
+        let manager = WorkspaceManager(settings: settings)
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 330, name: "Main", x: 0, y: 0)
+        manager.applyMonitorConfigurationChange([monitor])
+
+        guard let workspaceId = manager.workspaceId(for: "1", createIfMissing: true) else {
+            Issue.record("Failed to create workspace")
+            return
+        }
+
+        let handle = addWorkspaceManagerTestHandle(manager: manager, windowId: 3401, workspaceId: workspaceId)
+        let selectedNodeId = NodeId()
+
+        #expect(
+            manager.commitWorkspaceSelection(
+                nodeId: selectedNodeId,
+                focusedToken: handle.id,
+                in: workspaceId,
+                onMonitor: monitor.id
+            )
+        )
+        #expect(manager.niriViewportState(for: workspaceId).selectedNodeId == selectedNodeId)
+        #expect(manager.lastFocusedToken(in: workspaceId) == handle.id)
+    }
 }

@@ -469,7 +469,7 @@ final class WMController {
            let preferredNodeId,
            let node = engine.findNode(by: preferredNodeId) as? NiriWindow
         {
-            _ = workspaceManager.syncWorkspaceSelection(
+            _ = workspaceManager.commitWorkspaceSelection(
                 nodeId: node.id,
                 focusedToken: node.token,
                 in: workspaceId,
@@ -488,14 +488,20 @@ final class WMController {
             if let engine = niriEngine,
                let node = engine.findNode(for: focusedToken)
             {
-                _ = workspaceManager.syncWorkspaceSelection(
+                _ = workspaceManager.commitWorkspaceSelection(
                     nodeId: node.id,
                     focusedToken: focusedToken,
                     in: workspaceId,
                     onMonitor: workspaceManager.monitorId(for: workspaceId)
                 )
             } else {
-                _ = workspaceManager.rememberFocus(focusedToken, in: workspaceId)
+                _ = workspaceManager.applySessionPatch(
+                    .init(
+                        workspaceId: workspaceId,
+                        viewportState: nil,
+                        rememberedFocusToken: focusedToken
+                    )
+                )
             }
             return
         }
@@ -510,7 +516,7 @@ final class WMController {
         if let engine = niriEngine,
            let node = engine.findNode(for: nextFocusToken)
         {
-            _ = workspaceManager.syncWorkspaceSelection(
+            _ = workspaceManager.commitWorkspaceSelection(
                 nodeId: node.id,
                 focusedToken: nextFocusToken,
                 in: workspaceId

@@ -1002,7 +1002,13 @@ final class MouseEventHandler {
                     vstate.selectedNodeId = newNode.id
 
                     if let windowNode = newNode as? NiriWindow {
-                        _ = controller.workspaceManager.rememberFocus(windowNode.token, in: wsId)
+                        _ = controller.workspaceManager.applySessionPatch(
+                            .init(
+                                workspaceId: wsId,
+                                viewportState: nil,
+                                rememberedFocusToken: windowNode.token
+                            )
+                        )
                         engine.updateFocusTimestamp(for: windowNode.id)
                         targetWindowHandle = controller.workspaceManager.handle(for: windowNode.token)
                     }

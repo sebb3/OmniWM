@@ -42,17 +42,22 @@ import QuartzCore
             return
         }
 
+        guard let monitor = controller.workspaceManager.monitors.first(where: { $0.displayId == displayId }) else {
+            controller.layoutRefreshController.stopScrollAnimation(for: displayId)
+            return
+        }
+
+        guard controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id == wsId else {
+            controller.layoutRefreshController.stopScrollAnimation(for: displayId)
+            return
+        }
+
         let windowAnimationsRunning = engine.tickAllWindowAnimations(in: wsId, at: targetTime)
         let columnAnimationsRunning = engine.tickAllColumnAnimations(in: wsId, at: targetTime)
         let workspaceSwitchRunning = engine.tickWorkspaceSwitchAnimation(for: wsId, at: targetTime)
 
         controller.workspaceManager.withNiriViewportState(for: wsId) { state in
             let viewportAnimationRunning = state.advanceAnimations(at: targetTime)
-
-            guard let monitor = controller.workspaceManager.monitors.first(where: { $0.displayId == displayId }) else {
-                controller.layoutRefreshController.stopScrollAnimation(for: displayId)
-                return
-            }
 
             self.applyFramesOnDemand(
                 wsId: wsId,
@@ -88,85 +93,25 @@ import QuartzCore
         monitor: Monitor,
         animationTime: TimeInterval? = nil
     ) {
-        guard let controller else { return }
-        let lrc = controller.layoutRefreshController
+        guard let controller,
+              let snapshot = makeWorkspaceSnapshot(
+                  workspaceId: wsId,
+                  monitor: monitor,
+                  viewportState: state,
+                  useScrollAnimationPath: true,
+                  removalSeed: nil
+              )
+        else {
+            return
+        }
 
-        let gaps = LayoutGaps(
-            horizontal: CGFloat(controller.workspaceManager.gaps),
-            vertical: CGFloat(controller.workspaceManager.gaps),
-            outer: controller.workspaceManager.outerGaps
-        )
-
-        let insetFrame = controller.insetWorkingFrame(for: monitor)
-        let area = WorkingAreaContext(
-            workingFrame: insetFrame,
-            viewFrame: monitor.frame,
-            scale: lrc.backingScale(for: monitor)
-        )
-        let edgeFrame = monitor.visibleFrame
-        let monitors = controller.workspaceManager.monitors
-
-        let (frames, hiddenHandles) = engine.calculateCombinedLayoutUsingPools(
-            in: wsId,
+        let plan = buildOnDemandLayoutPlan(
+            snapshot: snapshot,
+            engine: engine,
             monitor: monitor,
-            gaps: gaps,
-            state: state,
-            workingArea: area,
             animationTime: animationTime
         )
-
-        var positionUpdates: [(windowId: Int, origin: CGPoint)] = []
-        var frameUpdates: [(pid: pid_t, windowId: Int, frame: CGRect)] = []
-        var hiddenWindowJobs: [(pid: pid_t, windowId: Int)] = []
-        var visibleWindowJobs: [(pid: pid_t, windowId: Int)] = []
-
-        for (token, frame) in frames {
-            guard let entry = controller.workspaceManager.entry(for: token) else { continue }
-            let handle = entry.handle
-
-            if let node = engine.findNode(for: token),
-               node.sizingMode == .fullscreen {
-                controller.axManager.forceApplyNextFrame(for: entry.windowId)
-            }
-
-            if let side = hiddenHandles[token] {
-                let actualSize = AXWindowService.framePreferFast(entry.axRef)?.size ?? frame.size
-                let hiddenOrigin = lrc.hiddenOrigin(
-                    for: actualSize,
-                    edgeFrame: edgeFrame,
-                    scale: area.scale,
-                    side: side,
-                    pid: handle.pid,
-                    targetY: frame.origin.y,
-                    monitor: monitor,
-                    monitors: monitors
-                )
-                positionUpdates.append((entry.windowId, hiddenOrigin))
-                hiddenWindowJobs.append((handle.pid, entry.windowId))
-                continue
-            }
-
-            visibleWindowJobs.append((handle.pid, entry.windowId))
-            frameUpdates.append((handle.pid, entry.windowId, frame))
-        }
-
-        if !hiddenWindowJobs.isEmpty {
-            controller.axManager.suppressFrameWrites(hiddenWindowJobs)
-            controller.axManager.cancelPendingFrameJobs(hiddenWindowJobs)
-        }
-        if !positionUpdates.isEmpty {
-        controller.axManager.applyPositionsViaSkyLight(positionUpdates)
-        }
-        if !visibleWindowJobs.isEmpty {
-            let activeJobs = visibleWindowJobs.filter { !controller.axManager.inactiveWorkspaceWindowIds.contains($0.windowId) }
-            if !activeJobs.isEmpty {
-                controller.axManager.unsuppressFrameWrites(activeJobs)
-            }
-        }
-        if !frameUpdates.isEmpty {
-            controller.axManager.applyFramesParallel(frameUpdates)
-        }
-        updateBorderDuringLayout(frames: frames, hiddenHandles: hiddenHandles, direct: true)
+        controller.layoutRefreshController.executeLayoutPlan(plan)
     }
 
     private func finalizeAnimation() {
@@ -218,83 +163,220 @@ import QuartzCore
         }
     }
 
-    func layoutWithNiriEngine(activeWorkspaces: Set<WorkspaceDescriptor.ID>, useScrollAnimationPath: Bool = false, removedNodeId: NodeId? = nil) async {
-        guard let controller, let engine = controller.niriEngine else { return }
-        let lrc = controller.layoutRefreshController
-
-        for monitor in controller.workspaceManager.monitors {
-            guard let workspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id) else { continue }
-            lrc.unhideWorkspace(workspace.id, monitor: monitor)
+    func syncWorkspaceState(workspaceId wsId: WorkspaceDescriptor.ID, monitor: Monitor) {
+        guard let controller,
+              let engine = controller.niriEngine,
+              let snapshot = makeWorkspaceSnapshot(
+                  workspaceId: wsId,
+                  monitor: monitor,
+                  viewportState: nil,
+                  useScrollAnimationPath: false,
+                  removalSeed: nil
+              )
+        else {
+            return
         }
 
+        _ = engine.syncWindows(
+            snapshot.windows.map(\.token),
+            in: snapshot.workspaceId,
+            selectedNodeId: snapshot.viewportState.selectedNodeId,
+            focusedToken: snapshot.preferredFocusToken
+        )
+
+        for window in snapshot.windows {
+            engine.updateWindowConstraints(for: window.token, constraints: window.constraints)
+        }
+    }
+
+    func layoutWithNiriEngine(
+        activeWorkspaces: Set<WorkspaceDescriptor.ID>,
+        useScrollAnimationPath: Bool = false,
+        removalSeeds: [WorkspaceDescriptor.ID: NiriWindowRemovalSeed] = [:]
+    ) async throws -> [WorkspaceLayoutPlan] {
+        guard let controller, let engine = controller.niriEngine else { return [] }
+        var plans: [WorkspaceLayoutPlan] = []
         var processedWorkspaces: Set<WorkspaceDescriptor.ID> = []
         for monitor in controller.workspaceManager.monitors {
+            try Task.checkCancellation()
             guard let workspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id) else { continue }
             let wsId = workspace.id
+            guard activeWorkspaces.contains(wsId) else { continue }
             guard !processedWorkspaces.contains(wsId) else { continue }
             processedWorkspaces.insert(wsId)
 
             let layoutType = controller.settings.layoutType(for: workspace.name)
             if layoutType == .dwindle { continue }
 
-            let windowTokens = controller.workspaceManager.entries(in: wsId).map(\.token)
+            guard let snapshot = makeWorkspaceSnapshot(
+                workspaceId: wsId,
+                monitor: monitor,
+                viewportState: nil,
+                useScrollAnimationPath: useScrollAnimationPath,
+                removalSeed: removalSeeds[wsId]
+            ) else { continue }
 
-            controller.workspaceManager.withNiriViewportState(for: wsId) { state in
-                let currentSelection = state.selectedNodeId
-
-                let pass = NiriLayoutPass(
-                    wsId: wsId,
+            plans.append(
+                buildRelayoutPlan(
+                    snapshot: snapshot,
                     engine: engine,
-                    monitor: monitor,
-                    insetFrame: controller.insetWorkingFrame(for: monitor),
-                    gap: CGFloat(controller.workspaceManager.gaps)
+                    monitor: monitor
                 )
+            )
 
-                let removal = self.processWindowRemovals(
-                    pass: pass,
-                    state: &state,
-                    windowTokens: windowTokens,
-                    currentSelection: currentSelection,
-                    removedNodeId: removedNodeId
-                )
-
-                let newHandles = self.syncAndInsert(
-                    pass: pass,
-                    state: &state,
-                    windowTokens: windowTokens,
-                    removal: removal
-                )
-
-                lrc.updateWindowConstraints(in: wsId) { engine.updateWindowConstraints(for: $0, constraints: $1) }
-
-                let viewportNeedsRecalc = self.resolveSelection(
-                    pass: pass,
-                    state: &state,
-                    windowTokens: windowTokens,
-                    removal: removal
-                )
-
-                let newWindowToken = self.handleNewWindowArrival(
-                    pass: pass,
-                    state: &state,
-                    newTokens: newHandles,
-                    existingHandleIds: removal.existingHandleIds
-                )
-
-                self.computeAndApplyLayout(
-                    pass: pass,
-                    state: state,
-                    newWindowToken: newWindowToken,
-                    viewportNeedsRecalc: viewportNeedsRecalc,
-                    useScrollAnimationPath: useScrollAnimationPath
-                )
-            }
-
+            try Task.checkCancellation()
             await Task.yield()
         }
 
-        updateTabbedColumnOverlays()
-        controller.updateWorkspaceBar()
+        try Task.checkCancellation()
+        return plans
+    }
+
+    private func makeWorkspaceSnapshot(
+        workspaceId wsId: WorkspaceDescriptor.ID,
+        monitor: Monitor,
+        viewportState: ViewportState?,
+        useScrollAnimationPath: Bool,
+        removalSeed: NiriWindowRemovalSeed?
+    ) -> NiriWorkspaceSnapshot? {
+        guard let controller else { return nil }
+
+        let entries = controller.workspaceManager.entries(in: wsId)
+        let shouldResolveConstraints = viewportState == nil
+        let windows = controller.layoutRefreshController.buildWindowSnapshots(
+            for: entries,
+            resolveConstraints: shouldResolveConstraints
+        )
+        let effectiveViewportState = viewportState ?? controller.workspaceManager.niriViewportState(for: wsId)
+        let orientation = controller.niriEngine?.monitor(for: monitor.id)?.orientation
+            ?? controller.settings.effectiveOrientation(for: monitor)
+        let monitorSnapshot = controller.layoutRefreshController.buildMonitorSnapshot(
+            for: monitor,
+            orientation: orientation
+        )
+
+        return NiriWorkspaceSnapshot(
+            workspaceId: wsId,
+            monitor: monitorSnapshot,
+            windows: windows,
+            viewportState: effectiveViewportState,
+            preferredFocusToken: controller.workspaceManager.preferredFocusToken(in: wsId),
+            confirmedFocusedToken: controller.workspaceManager.focusedToken,
+            hasCompletedInitialRefresh: controller.layoutRefreshController.layoutState.hasCompletedInitialRefresh,
+            useScrollAnimationPath: useScrollAnimationPath,
+            removalSeed: removalSeed,
+            gap: CGFloat(controller.workspaceManager.gaps),
+            outerGaps: controller.workspaceManager.outerGaps,
+            displayRefreshRate: controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitor.displayId] ?? 60.0,
+            isActiveWorkspace: controller.activeWorkspace()?.id == wsId
+        )
+    }
+
+    private func buildOnDemandLayoutPlan(
+        snapshot: NiriWorkspaceSnapshot,
+        engine: NiriLayoutEngine,
+        monitor: Monitor,
+        animationTime: TimeInterval?
+    ) -> WorkspaceLayoutPlan {
+        let gaps = LayoutGaps(
+            horizontal: snapshot.gap,
+            vertical: snapshot.gap,
+            outer: snapshot.outerGaps
+        )
+
+        let area = WorkingAreaContext(
+            workingFrame: snapshot.monitor.workingFrame,
+            viewFrame: snapshot.monitor.frame,
+            scale: snapshot.monitor.scale
+        )
+
+        let (frames, hiddenHandles) = engine.calculateCombinedLayoutUsingPools(
+            in: snapshot.workspaceId,
+            monitor: monitor,
+            gaps: gaps,
+            state: snapshot.viewportState,
+            workingArea: area,
+            animationTime: animationTime
+        )
+
+        let diff = layoutDiff(
+            windows: snapshot.windows,
+            frames: frames,
+            hiddenHandles: hiddenHandles,
+            confirmedFocusedToken: snapshot.confirmedFocusedToken,
+            engine: engine,
+            directBorderUpdate: true,
+            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
+        )
+
+        return WorkspaceLayoutPlan(
+            workspaceId: snapshot.workspaceId,
+            monitor: snapshot.monitor,
+            sessionPatch: WorkspaceSessionPatch(workspaceId: snapshot.workspaceId),
+            diff: diff
+        )
+    }
+
+    private func buildRelayoutPlan(
+        snapshot: NiriWorkspaceSnapshot,
+        engine: NiriLayoutEngine,
+        monitor: Monitor
+    ) -> WorkspaceLayoutPlan {
+        var state = snapshot.viewportState
+        let pass = NiriLayoutPass(
+            wsId: snapshot.workspaceId,
+            engine: engine,
+            monitor: monitor,
+            insetFrame: snapshot.monitor.workingFrame,
+            gap: snapshot.gap
+        )
+        let windowTokens = snapshot.windows.map(\.token)
+        let currentSelection = state.selectedNodeId
+
+        let removal = processWindowRemovals(
+            pass: pass,
+            state: &state,
+            windowTokens: windowTokens,
+            currentSelection: currentSelection,
+            removedNodeId: snapshot.removalSeed?.removedNodeId
+        )
+
+        let newTokens = syncAndInsert(
+            pass: pass,
+            state: &state,
+            windowTokens: windowTokens,
+            removal: removal,
+            preferredFocusToken: snapshot.preferredFocusToken
+        )
+
+        for window in snapshot.windows {
+            engine.updateWindowConstraints(for: window.token, constraints: window.constraints)
+        }
+
+        let selection = resolveSelection(
+            pass: pass,
+            state: &state,
+            windowTokens: windowTokens,
+            removal: removal,
+            snapshot: snapshot
+        )
+
+        let arrival = handleNewWindowArrival(
+            pass: pass,
+            state: &state,
+            newTokens: newTokens,
+            existingHandleIds: removal.existingHandleIds,
+            snapshot: snapshot
+        )
+
+        return computeLayoutPlan(
+            pass: pass,
+            state: state,
+            rememberedFocusToken: arrival.rememberedFocusToken ?? selection.rememberedFocusToken,
+            newWindowToken: arrival.newWindowToken,
+            viewportNeedsRecalc: selection.viewportNeedsRecalc,
+            snapshot: snapshot
+        )
     }
 
     private func processWindowRemovals(
@@ -355,16 +437,15 @@ import QuartzCore
         pass: NiriLayoutPass,
         state: inout ViewportState,
         windowTokens: [WindowToken],
-        removal: RemovalContext
+        removal: RemovalContext,
+        preferredFocusToken: WindowToken?
     ) -> [WindowToken] {
-        guard let controller else { return [] }
-
         let currentSelection = state.selectedNodeId
         _ = pass.engine.syncWindows(
             windowTokens,
             in: pass.wsId,
             selectedNodeId: currentSelection,
-            focusedToken: controller.workspaceManager.preferredFocusToken(in: pass.wsId)
+            focusedToken: preferredFocusToken
         )
         let newTokens = windowTokens.filter { !removal.existingHandleIds.contains($0) }
 
@@ -416,12 +497,10 @@ import QuartzCore
         pass: NiriLayoutPass,
         state: inout ViewportState,
         windowTokens: [WindowToken],
-        removal: RemovalContext
-    ) -> Bool {
-        guard let controller else { return false }
-        let lrc = controller.layoutRefreshController
-
-        state.displayRefreshRate = lrc.layoutState.refreshRateByDisplay[pass.monitor.displayId] ?? 60.0
+        removal: RemovalContext,
+        snapshot: NiriWorkspaceSnapshot
+    ) -> (viewportNeedsRecalc: Bool, rememberedFocusToken: WindowToken?) {
+        state.displayRefreshRate = snapshot.displayRefreshRate
 
         if let result = removal.columnRemovalResult {
             if let prevOffset = state.activatePrevColumnOnRemoval {
@@ -464,7 +543,7 @@ import QuartzCore
         }
 
         if !isGestureOrAnimation,
-           pass.wsId == controller.activeWorkspace()?.id,
+           snapshot.isActiveWorkspace,
            let selectedId = state.selectedNodeId,
            let selectedNode = pass.engine.findNode(by: selectedId)
         {
@@ -486,36 +565,33 @@ import QuartzCore
             }
         }
 
+        let rememberedFocusToken: WindowToken?
         if let selectedId = state.selectedNodeId,
            let selectedNode = pass.engine.findNode(by: selectedId) as? NiriWindow
         {
-            _ = controller.workspaceManager.syncWorkspaceSelection(
-                nodeId: selectedNode.id,
-                focusedToken: selectedNode.token,
-                in: pass.wsId,
-                onMonitor: controller.workspaceManager.monitorId(for: pass.wsId)
-            )
+            rememberedFocusToken = selectedNode.token
+        } else {
+            rememberedFocusToken = nil
         }
 
-        return viewportNeedsRecalc
+        return (viewportNeedsRecalc, rememberedFocusToken)
     }
 
     private func handleNewWindowArrival(
         pass: NiriLayoutPass,
         state: inout ViewportState,
         newTokens: [WindowToken],
-        existingHandleIds: Set<WindowToken>
-    ) -> WindowToken? {
-        guard let controller else { return nil }
-        let lrc = controller.layoutRefreshController
-
+        existingHandleIds: Set<WindowToken>,
+        snapshot: NiriWorkspaceSnapshot
+    ) -> (newWindowToken: WindowToken?, rememberedFocusToken: WindowToken?) {
         let wasEmpty = existingHandleIds.isEmpty
 
         var newWindowToken: WindowToken?
-        if lrc.layoutState.hasCompletedInitialRefresh,
+        var rememberedFocusToken: WindowToken?
+        if snapshot.hasCompletedInitialRefresh,
            let newToken = newTokens.last,
            let newNode = pass.engine.findNode(for: newToken),
-           pass.wsId == controller.activeWorkspace()?.id
+           snapshot.isActiveWorkspace
         {
             state.selectedNodeId = newNode.id
 
@@ -552,16 +628,13 @@ import QuartzCore
                     state.activatePrevColumnOnRemoval = offsetBeforeActivation
                 }
             }
-            _ = controller.workspaceManager.rememberFocus(
-                newToken,
-                in: pass.wsId
-            )
+            rememberedFocusToken = newToken
             pass.engine.updateFocusTimestamp(for: newNode.id)
             newWindowToken = newToken
         }
 
-        if lrc.layoutState.hasCompletedInitialRefresh,
-           pass.wsId == controller.activeWorkspace()?.id,
+        if snapshot.hasCompletedInitialRefresh,
+           snapshot.isActiveWorkspace,
            !newTokens.isEmpty
         {
             let reduceMotionScale: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.25 : 1.0
@@ -582,29 +655,27 @@ import QuartzCore
             }
         }
 
-        return newWindowToken
+        return (newWindowToken, rememberedFocusToken)
     }
 
-    private func computeAndApplyLayout(
+    private func computeLayoutPlan(
         pass: NiriLayoutPass,
         state: ViewportState,
+        rememberedFocusToken: WindowToken?,
         newWindowToken: WindowToken?,
         viewportNeedsRecalc: Bool,
-        useScrollAnimationPath: Bool
-    ) {
-        guard let controller else { return }
-        let lrc = controller.layoutRefreshController
-
+        snapshot: NiriWorkspaceSnapshot
+    ) -> WorkspaceLayoutPlan {
         let gaps = LayoutGaps(
             horizontal: pass.gap,
             vertical: pass.gap,
-            outer: controller.workspaceManager.outerGaps
+            outer: snapshot.outerGaps
         )
 
         let area = WorkingAreaContext(
             workingFrame: pass.insetFrame,
-            viewFrame: pass.monitor.frame,
-            scale: lrc.backingScale(for: pass.monitor)
+            viewFrame: snapshot.monitor.frame,
+            scale: snapshot.monitor.scale
         )
 
         let (frames, hiddenHandles) = pass.engine.calculateCombinedLayoutUsingPools(
@@ -617,70 +688,123 @@ import QuartzCore
         )
 
         let hasColumnAnimations = pass.engine.hasAnyColumnAnimationsRunning(in: pass.wsId)
+        var directives: [AnimationDirective] = []
 
-        if !useScrollAnimationPath {
+        if !snapshot.useScrollAnimationPath {
             if viewportNeedsRecalc, newWindowToken == nil {
-                lrc.startScrollAnimation(for: pass.wsId)
+                directives.append(.startNiriScroll(workspaceId: pass.wsId))
             } else if hasColumnAnimations {
-                lrc.startScrollAnimation(for: pass.wsId)
+                directives.append(.startNiriScroll(workspaceId: pass.wsId))
             }
         }
 
         if let newWindowToken {
-            lrc.startScrollAnimation(for: pass.wsId)
-            controller.focusWindow(newWindowToken)
+            directives.append(.startNiriScroll(workspaceId: pass.wsId))
+            directives.append(.activateWindow(token: newWindowToken))
         }
 
-        let workspaceEntries = controller.workspaceManager.entries(in: pass.wsId)
-        var hiddenWindowJobs: [(pid: pid_t, windowId: Int)] = []
-        var visibleWindowJobs: [(pid: pid_t, windowId: Int)] = []
-        for entry in workspaceEntries {
-            if hiddenHandles[entry.token] != nil {
-                hiddenWindowJobs.append((entry.handle.pid, entry.windowId))
-            } else {
-                visibleWindowJobs.append((entry.handle.pid, entry.windowId))
-            }
-        }
-        if !hiddenWindowJobs.isEmpty {
-            controller.axManager.suppressFrameWrites(hiddenWindowJobs)
-            controller.axManager.cancelPendingFrameJobs(hiddenWindowJobs)
-        }
-
-        for entry in workspaceEntries {
-            if let side = hiddenHandles[entry.token] {
-                let targetY = frames[entry.token]?.origin.y
-                lrc.hideWindow(entry, monitor: pass.monitor, side: side, targetY: targetY, reason: .layoutTransient)
-            } else {
-                lrc.unhideWindow(entry, monitor: pass.monitor)
+        if let removalSeed = snapshot.removalSeed, !removalSeed.oldFrames.isEmpty {
+            let newFrames = pass.engine.captureWindowFrames(in: pass.wsId)
+            let animationsTriggered = pass.engine.triggerMoveAnimations(
+                in: pass.wsId,
+                oldFrames: removalSeed.oldFrames,
+                newFrames: newFrames
+            )
+            let hasWindowAnimations = pass.engine.hasAnyWindowAnimationsRunning(in: pass.wsId)
+            let hasColumnAnimations = pass.engine.hasAnyColumnAnimationsRunning(in: pass.wsId)
+            if animationsTriggered || hasWindowAnimations || hasColumnAnimations {
+                directives.append(.startNiriScroll(workspaceId: pass.wsId))
             }
         }
 
-        var frameUpdates: [(pid: pid_t, windowId: Int, frame: CGRect)] = []
-
-        for (token, frame) in frames {
-            if hiddenHandles[token] != nil { continue }
-            if let entry = controller.workspaceManager.entry(for: token) {
-                if let node = pass.engine.findNode(for: token),
-                   node.sizingMode == .fullscreen {
-                    controller.axManager.forceApplyNextFrame(for: entry.windowId)
-                }
-                frameUpdates.append((entry.pid, entry.windowId, frame))
-            }
-        }
-
-        if !visibleWindowJobs.isEmpty {
-            let activeJobs = visibleWindowJobs.filter { !controller.axManager.inactiveWorkspaceWindowIds.contains($0.windowId) }
-            if !activeJobs.isEmpty {
-                controller.axManager.unsuppressFrameWrites(activeJobs)
-            }
-        }
-        controller.axManager.applyFramesParallel(frameUpdates)
-
-        updateBorderDuringLayout(
+        let diff = layoutDiff(
+            windows: snapshot.windows,
             frames: frames,
             hiddenHandles: hiddenHandles,
-            direct: useScrollAnimationPath
+            confirmedFocusedToken: snapshot.confirmedFocusedToken,
+            engine: pass.engine,
+            directBorderUpdate: snapshot.useScrollAnimationPath,
+            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
         )
+
+        return WorkspaceLayoutPlan(
+            workspaceId: pass.wsId,
+            monitor: snapshot.monitor,
+            sessionPatch: WorkspaceSessionPatch(
+                workspaceId: pass.wsId,
+                viewportState: state,
+                rememberedFocusToken: rememberedFocusToken
+            ),
+            diff: diff,
+            animationDirectives: directives
+        )
+    }
+
+    private func layoutDiff(
+        windows: [LayoutWindowSnapshot],
+        frames: [WindowToken: CGRect],
+        hiddenHandles: [WindowToken: HideSide],
+        confirmedFocusedToken: WindowToken?,
+        engine: NiriLayoutEngine,
+        directBorderUpdate: Bool,
+        canRestoreHiddenWorkspaceWindows: Bool
+    ) -> WorkspaceLayoutDiff {
+        var diff = WorkspaceLayoutDiff()
+        if let confirmedFocusedToken {
+            let ownsFocusedToken = windows.contains(where: { $0.token == confirmedFocusedToken })
+            diff.borderMode = ownsFocusedToken ? (directBorderUpdate ? .direct : .coordinated) : .none
+        } else {
+            diff.borderMode = directBorderUpdate ? .direct : .coordinated
+        }
+
+        for window in windows {
+            let token = window.token
+            if let side = hiddenHandles[token] {
+                diff.visibilityChanges.append(
+                    .hide(token, side: side, targetY: frames[token]?.origin.y)
+                )
+                continue
+            }
+
+            diff.visibilityChanges.append(.show(token))
+
+            if canRestoreHiddenWorkspaceWindows,
+               let hiddenState = window.hiddenState,
+               hiddenState.workspaceInactive
+            {
+                diff.restoreChanges.append(
+                    .init(token: token, hiddenState: hiddenState)
+                )
+            }
+
+            guard let frame = frames[token] else { continue }
+            let forceApply = if let node = engine.findNode(for: token) {
+                node.sizingMode == .fullscreen
+            } else {
+                false
+            }
+            diff.frameChanges.append(
+                LayoutFrameChange(
+                    token: token,
+                    frame: frame,
+                    forceApply: forceApply
+                )
+            )
+        }
+
+        if let confirmedFocusedToken,
+           hiddenHandles[confirmedFocusedToken] == nil,
+           let frame = frames[confirmedFocusedToken]
+        {
+            diff.focusedFrame = LayoutFocusedFrame(
+                token: confirmedFocusedToken,
+                frame: frame
+            )
+        } else {
+            diff.focusedFrame = nil
+        }
+
+        return diff
     }
 
     func updateTabbedColumnOverlays() {
@@ -736,23 +860,29 @@ import QuartzCore
         engine.updateTabbedColumnVisibility(column: column)
 
         let target = windows[index]
-        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
-            if let monitor = controller.workspaceManager.monitor(for: workspaceId) {
-                let gap = CGFloat(controller.workspaceManager.gaps)
-                engine.ensureSelectionVisible(
-                    node: target,
-                    in: workspaceId,
-                    state: &state,
-                    workingFrame: monitor.visibleFrame,
-                    gaps: gap,
-                    alwaysCenterSingleColumn: engine.alwaysCenterSingleColumn
-                )
-            }
-            activateNode(
-                target, in: workspaceId, state: &state,
-                options: .init(activateWindow: false, ensureVisible: false, startAnimation: false)
+        var state = controller.workspaceManager.niriViewportState(for: workspaceId)
+        if let monitor = controller.workspaceManager.monitor(for: workspaceId) {
+            let gap = CGFloat(controller.workspaceManager.gaps)
+            engine.ensureSelectionVisible(
+                node: target,
+                in: workspaceId,
+                state: &state,
+                workingFrame: monitor.visibleFrame,
+                gaps: gap,
+                alwaysCenterSingleColumn: engine.alwaysCenterSingleColumn
             )
         }
+        activateNode(
+            target, in: workspaceId, state: &state,
+            options: .init(activateWindow: false, ensureVisible: false, startAnimation: false)
+        )
+        _ = controller.workspaceManager.applySessionPatch(
+            .init(
+                workspaceId: workspaceId,
+                viewportState: state,
+                rememberedFocusToken: nil
+            )
+        )
         let updatedState = controller.workspaceManager.niriViewportState(for: workspaceId)
         if updatedState.viewOffsetPixels.isAnimating || engine.hasAnyWindowAnimationsRunning(in: workspaceId) {
             controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
@@ -767,50 +897,63 @@ import QuartzCore
         guard let engine = controller.niriEngine else { return }
         guard let wsId = controller.activeWorkspace()?.id else { return }
 
-        controller.workspaceManager.withNiriViewportState(for: wsId) { state in
-            guard let currentId = state.selectedNodeId,
-                  let currentNode = engine.findNode(by: currentId)
-            else {
-                if let lastFocused = controller.workspaceManager.lastFocusedToken(in: wsId),
-                   let lastNode = engine.findNode(for: lastFocused)
-                {
-                    self.activateNode(
-                        lastNode, in: wsId, state: &state,
-                        options: .init(activateWindow: false, ensureVisible: false, layoutRefresh: false, startAnimation: false)
-                    )
-                } else if let firstToken = controller.workspaceManager.entries(in: wsId).first?.token,
-                          let firstNode = engine.findNode(for: firstToken)
-                {
-                    self.activateNode(
-                        firstNode, in: wsId, state: &state,
-                        options: .init(activateWindow: false, ensureVisible: false, layoutRefresh: false, startAnimation: false)
-                    )
-                }
-                return
-            }
-
-            guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return }
-            let gap = CGFloat(controller.workspaceManager.gaps)
-            let workingFrame = controller.insetWorkingFrame(for: monitor)
-
-            for col in engine.columns(in: wsId) where col.cachedWidth <= 0 {
-                col.resolveAndCacheWidth(workingAreaWidth: workingFrame.width, gaps: gap)
-            }
-
-            if let newNode = engine.focusTarget(
-                direction: direction,
-                currentSelection: currentNode,
-                in: wsId,
-                state: &state,
-                workingFrame: workingFrame,
-                gaps: gap
-            ) {
-                self.activateNode(
-                    newNode, in: wsId, state: &state,
-                    options: .init(activateWindow: false, ensureVisible: false)
+        var state = controller.workspaceManager.niriViewportState(for: wsId)
+        guard let currentId = state.selectedNodeId,
+              let currentNode = engine.findNode(by: currentId)
+        else {
+            if let lastFocused = controller.workspaceManager.lastFocusedToken(in: wsId),
+               let lastNode = engine.findNode(for: lastFocused)
+            {
+                activateNode(
+                    lastNode, in: wsId, state: &state,
+                    options: .init(activateWindow: false, ensureVisible: false, layoutRefresh: false, startAnimation: false)
+                )
+            } else if let firstToken = controller.workspaceManager.entries(in: wsId).first?.token,
+                      let firstNode = engine.findNode(for: firstToken)
+            {
+                activateNode(
+                    firstNode, in: wsId, state: &state,
+                    options: .init(activateWindow: false, ensureVisible: false, layoutRefresh: false, startAnimation: false)
                 )
             }
+            _ = controller.workspaceManager.applySessionPatch(
+                .init(
+                    workspaceId: wsId,
+                    viewportState: state,
+                    rememberedFocusToken: nil
+                )
+            )
+            return
         }
+
+        guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return }
+        let gap = CGFloat(controller.workspaceManager.gaps)
+        let workingFrame = controller.insetWorkingFrame(for: monitor)
+
+        for col in engine.columns(in: wsId) where col.cachedWidth <= 0 {
+            col.resolveAndCacheWidth(workingAreaWidth: workingFrame.width, gaps: gap)
+        }
+
+        if let newNode = engine.focusTarget(
+            direction: direction,
+            currentSelection: currentNode,
+            in: wsId,
+            state: &state,
+            workingFrame: workingFrame,
+            gaps: gap
+        ) {
+            activateNode(
+                newNode, in: wsId, state: &state,
+                options: .init(activateWindow: false, ensureVisible: false)
+            )
+        }
+        _ = controller.workspaceManager.applySessionPatch(
+            .init(
+                workspaceId: wsId,
+                viewportState: state,
+                rememberedFocusToken: nil
+            )
+        )
     }
 
     func swapWindow(direction: Direction) {
@@ -968,11 +1111,18 @@ import QuartzCore
             )
         }
 
+        let focusedToken = (node as? NiriWindow)?.token
+        _ = controller.workspaceManager.commitWorkspaceSelection(
+            nodeId: node.id,
+            focusedToken: focusedToken,
+            in: workspaceId,
+            onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+        )
+
         if let windowNode = node as? NiriWindow {
             if options.updateTimestamp {
                 engine.updateFocusTimestamp(for: windowNode.id)
             }
-            _ = controller.workspaceManager.rememberFocus(windowNode.token, in: workspaceId)
         }
 
         if options.layoutRefresh {
