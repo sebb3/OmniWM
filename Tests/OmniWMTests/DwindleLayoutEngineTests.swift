@@ -64,6 +64,27 @@ private func configureWorkspacesAsDwindle(
         #expect(engine.findNode(for: refreshed.id)?.id == originalNodeId)
     }
 
+    @Test func rekeyWindowKeepsLeafStableAcrossSync() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+
+        let handle1 = makeTestHandle(pid: 73)
+        let handle2 = makeTestHandle(pid: 74)
+
+        _ = engine.syncWindows([handle1, handle2], in: wsId, focusedHandle: handle1)
+        let originalNodeId = engine.findNode(for: handle2.id)?.id
+        let replacementToken = WindowToken(pid: handle2.pid, windowId: handle2.windowId + 1000)
+
+        #expect(engine.rekeyWindow(from: handle2.id, to: replacementToken, in: wsId))
+
+        let removed = engine.syncWindows([handle1.id, replacementToken], in: wsId, focusedToken: handle1.id)
+
+        #expect(removed.isEmpty)
+        #expect(engine.windowCount(in: wsId) == 2)
+        #expect(engine.findNode(for: handle2.id) == nil)
+        #expect(engine.findNode(for: replacementToken)?.id == originalNodeId)
+    }
+
     @Test func layoutAndFrameCachesUseStableTokens() {
         let engine = DwindleLayoutEngine()
         let wsId = UUID()

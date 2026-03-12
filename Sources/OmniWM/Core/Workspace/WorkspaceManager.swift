@@ -715,6 +715,42 @@ final class WorkspaceManager {
         windows.upsert(window: ax, pid: pid, windowId: windowId, workspace: workspace)
     }
 
+    @discardableResult
+    func rekeyWindow(from oldToken: WindowToken, to newToken: WindowToken, newAXRef: AXWindowRef) -> WindowModel.Entry? {
+        guard let entry = windows.rekeyWindow(from: oldToken, to: newToken, newAXRef: newAXRef) else {
+            return nil
+        }
+
+        let focusChanged = updateFocusSession(notify: false) { focus in
+            var changed = false
+
+            if focus.focusedToken == oldToken {
+                focus.focusedToken = newToken
+                changed = true
+            }
+
+            if focus.pendingManagedFocus.token == oldToken {
+                focus.pendingManagedFocus.token = newToken
+                changed = true
+            }
+
+            if !focus.lastFocusedByWorkspace.isEmpty {
+                for (workspaceId, token) in focus.lastFocusedByWorkspace where token == oldToken {
+                    focus.lastFocusedByWorkspace[workspaceId] = newToken
+                    changed = true
+                }
+            }
+
+            return changed
+        }
+
+        if focusChanged {
+            notifySessionStateChanged()
+        }
+
+        return entry
+    }
+
     func entries(in workspace: WorkspaceDescriptor.ID) -> [WindowModel.Entry] {
         windows.windows(in: workspace)
     }

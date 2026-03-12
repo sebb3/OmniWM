@@ -17,6 +17,15 @@ final class FocusOperationCoordinator {
         }
     }
 
+    func rekeyPendingFocus(from oldToken: WindowToken, to newToken: WindowToken) {
+        if pendingFocusToken == oldToken {
+            pendingFocusToken = newToken
+        }
+        if deferredFocusToken == oldToken {
+            deferredFocusToken = newToken
+        }
+    }
+
     func focusWindow(
         _ token: WindowToken,
         performFocus: () -> Void,

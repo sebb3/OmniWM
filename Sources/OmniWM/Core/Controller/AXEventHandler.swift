@@ -8,18 +8,92 @@ final class AXEventHandler: CGSEventDelegate {
         var geometryRelayoutsSuppressedDuringGesture = 0
     }
 
+    private struct PreparedCreate {
+        let windowId: UInt32
+        let token: WindowToken
+        let bundleId: String?
+        let axRef: AXWindowRef
+        let workspaceId: WorkspaceDescriptor.ID
+    }
+
+    private struct PreparedDestroy {
+        let token: WindowToken
+        let bundleId: String?
+        let workspaceId: WorkspaceDescriptor.ID
+    }
+
+    private struct GhosttyReplacementKey: Hashable {
+        let pid: pid_t
+        let workspaceId: WorkspaceDescriptor.ID
+    }
+
+    private struct PendingGhosttyCreate {
+        let sequence: UInt64
+        let candidate: PreparedCreate
+    }
+
+    private struct PendingGhosttyDestroy {
+        let sequence: UInt64
+        let candidate: PreparedDestroy
+    }
+
+    private enum PendingGhosttyEvent {
+        case create(PendingGhosttyCreate)
+        case destroy(PendingGhosttyDestroy)
+
+        var sequence: UInt64 {
+            switch self {
+            case let .create(create): create.sequence
+            case let .destroy(destroy): destroy.sequence
+            }
+        }
+    }
+
+    private struct PendingGhosttyReplacementBurst {
+        var creates: [PendingGhosttyCreate] = []
+        var destroys: [PendingGhosttyDestroy] = []
+
+        mutating func append(create: PendingGhosttyCreate) {
+            guard !creates.contains(where: { $0.candidate.token == create.candidate.token }) else { return }
+            creates.append(create)
+        }
+
+        mutating func append(destroy: PendingGhosttyDestroy) {
+            guard !destroys.contains(where: { $0.candidate.token == destroy.candidate.token }) else { return }
+            destroys.append(destroy)
+        }
+
+        var orderedEvents: [PendingGhosttyEvent] {
+            let events = creates.map(PendingGhosttyEvent.create) + destroys.map(PendingGhosttyEvent.destroy)
+            return events.sorted { $0.sequence < $1.sequence }
+        }
+
+        var hasSingleReplacementPair: Bool {
+            creates.count == 1 && destroys.count == 1
+        }
+    }
+
+    private static let ghosttyBundleId = "com.mitchellh.ghostty"
+    private static let ghosttyReplacementGraceDelay: Duration = .milliseconds(150)
+
     weak var controller: WMController?
     private var deferredCreatedWindowIds: Set<UInt32> = []
     private var deferredCreatedWindowOrder: [UInt32] = []
+    private var pendingGhosttyReplacementBursts: [GhosttyReplacementKey: PendingGhosttyReplacementBurst] = [:]
+    private var pendingGhosttyReplacementTasks: [GhosttyReplacementKey: Task<Void, Never>] = [:]
+    private var nextGhosttyEventSequence: UInt64 = 0
     var windowInfoProvider: ((UInt32) -> WindowServerInfo?)?
     var axWindowRefProvider: ((UInt32, pid_t) -> AXWindowRef?)?
+    var bundleIdProvider: ((pid_t) -> String?)?
     var windowSubscriptionHandler: (([UInt32]) -> Void)?
     var focusedWindowValueProvider: ((pid_t) -> CFTypeRef?)?
     var windowTypeProvider: ((AXWindowRef, pid_t) -> AXWindowType)?
     var frameProvider: ((AXWindowRef) -> CGRect?)?
     private(set) var debugCounters = DebugCounters()
 
-    init(controller: WMController) {
+    init(
+        controller: WMController
+    ) {
         self.controller = controller
     }
 
@@ -29,6 +103,7 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     func cleanup() {
+        resetGhosttyReplacementState()
         CGSEventObserver.shared.delegate = nil
         CGSEventObserver.shared.stop()
     }
@@ -67,30 +142,29 @@ final class AXEventHandler: CGSEventDelegate {
 
     private func handleCGSWindowCreated(windowId: UInt32) {
         guard let controller else { return }
-
         if controller.isDiscoveryInProgress {
             deferCreatedWindow(windowId)
             return
         }
 
-        guard let token = resolveWindowToken(windowId) else {
+        guard let candidate = prepareCreateCandidate(
+            windowId: windowId,
+            windowInfo: resolveWindowInfo(windowId)
+        ) else {
             return
         }
 
-        if controller.workspaceManager.entry(for: token) != nil {
+        if shouldDelayGhosttyLifecycle(for: candidate.token.pid, bundleId: candidate.bundleId) {
+            enqueueGhosttyCreate(candidate)
             return
         }
 
-        let pid = token.pid
-        subscribeToWindows([windowId])
-
-        if let axRef = resolveAXWindowRef(windowId: windowId, pid: pid) {
-            handleCreated(ref: axRef, pid: pid, winId: Int(windowId))
-        }
+        trackPreparedCreate(candidate)
     }
 
     func resetDebugStateForTests() {
         debugCounters = .init()
+        resetGhosttyReplacementState()
     }
 
     private func handleFrameChanged(windowId: UInt32) {
@@ -124,14 +198,8 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     private func handleCGSWindowDestroyed(windowId: UInt32) {
-        guard let controller else { return }
         removeDeferredCreatedWindow(windowId)
-        guard let token = resolveTrackedToken(windowId),
-              controller.workspaceManager.entry(for: token) != nil else {
-            return
-        }
-
-        handleRemoved(token: token)
+        handleWindowDestroyed(windowId: windowId, pidHint: nil)
     }
 
     func subscribeToManagedWindows() {
@@ -157,49 +225,39 @@ final class AXEventHandler: CGSEventDelegate {
             if controller.workspaceManager.entry(for: token) != nil {
                 continue
             }
-            let pid = token.pid
-            guard let axRef = resolveAXWindowRef(windowId: windowId, pid: pid) else {
+            guard let candidate = prepareCreateCandidate(
+                windowId: windowId,
+                windowInfo: resolveWindowInfo(windowId)
+            ) else {
                 continue
             }
-            handleCreated(ref: axRef, pid: pid, winId: Int(windowId))
+            trackPreparedCreate(candidate)
         }
     }
 
-    private func handleCreated(ref: AXWindowRef, pid: pid_t, winId: Int) {
+    private func trackPreparedCreate(_ candidate: PreparedCreate) {
         guard let controller else { return }
-        let app = NSRunningApplication(processIdentifier: pid)
-        let bundleId = app?.bundleIdentifier
-        let appPolicy = app?.activationPolicy
-        let windowType = windowTypeProvider?(ref, pid)
-            ?? AXWindowService.windowType(ref, appPolicy: appPolicy, bundleId: bundleId)
-        guard windowType == .tiling else { return }
 
-        if let bundleId, controller.appRulesByBundleId[bundleId]?.alwaysFloat == true {
-            return
-        }
-
-        let workspaceId = controller.resolveWorkspaceForNewWindow(
-            axRef: ref,
-            pid: pid,
-            fallbackWorkspaceId: controller.activeWorkspace()?.id
-        )
-
-        if workspaceId != controller.activeWorkspace()?.id {
-            if let monitor = controller.workspaceManager.monitor(for: workspaceId),
+        if candidate.workspaceId != controller.activeWorkspace()?.id {
+            if let monitor = controller.workspaceManager.monitor(for: candidate.workspaceId),
                controller.workspaceManager.workspaces(on: monitor.id)
-               .contains(where: { $0.id == workspaceId })
+               .contains(where: { $0.id == candidate.workspaceId })
             {
-                _ = controller.workspaceManager.setActiveWorkspace(workspaceId, on: monitor.id)
+                _ = controller.workspaceManager.setActiveWorkspace(candidate.workspaceId, on: monitor.id)
             }
         }
 
-        _ = controller.workspaceManager.addWindow(ref, pid: pid, windowId: winId, to: workspaceId)
-        subscribeToWindows([UInt32(winId)])
+        _ = controller.workspaceManager.addWindow(
+            candidate.axRef,
+            pid: candidate.token.pid,
+            windowId: candidate.token.windowId,
+            to: candidate.workspaceId
+        )
         controller.updateWorkspaceBar()
 
         Task { @MainActor [weak self] in
             guard let self, let controller = self.controller else { return }
-            if let app = NSRunningApplication(processIdentifier: pid) {
+            if let app = NSRunningApplication(processIdentifier: candidate.token.pid) {
                 _ = await controller.axManager.windowsForApp(app)
             }
         }
@@ -208,7 +266,9 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     func handleRemoved(pid: pid_t, winId: Int) {
-        handleRemoved(token: .init(pid: pid, windowId: winId))
+        guard let windowId = UInt32(exactly: winId) else { return }
+        removeDeferredCreatedWindow(windowId)
+        handleWindowDestroyed(windowId: windowId, pidHint: pid)
     }
 
     func handleRemoved(token: WindowToken) {
@@ -387,6 +447,288 @@ final class AXEventHandler: CGSEventDelegate {
         controller.layoutRefreshController.requestVisibilityRefresh(reason: .appUnhidden)
     }
 
+    func resetGhosttyReplacementState() {
+        for (_, task) in pendingGhosttyReplacementTasks {
+            task.cancel()
+        }
+        pendingGhosttyReplacementTasks.removeAll()
+        pendingGhosttyReplacementBursts.removeAll()
+        nextGhosttyEventSequence = 0
+    }
+
+    func flushPendingGhosttyReplacementEventsForTests() {
+        let keys = pendingGhosttyReplacementBursts.keys.sorted {
+            ($0.pid, $0.workspaceId.uuidString) < ($1.pid, $1.workspaceId.uuidString)
+        }
+        for key in keys {
+            pendingGhosttyReplacementTasks.removeValue(forKey: key)?.cancel()
+            flushGhosttyReplacementBurst(for: key)
+        }
+    }
+
+    private func prepareCreateCandidate(
+        windowId: UInt32,
+        windowInfo: WindowServerInfo?
+    ) -> PreparedCreate? {
+        guard let controller else { return nil }
+        guard let token = windowInfo.map({ WindowToken(pid: pid_t($0.pid), windowId: Int(windowId)) }) else { return nil }
+        if controller.workspaceManager.entry(for: token) != nil { return nil }
+
+        subscribeToWindows([windowId])
+
+        guard let axRef = resolveAXWindowRef(windowId: windowId, pid: token.pid) else { return nil }
+
+        let app = NSRunningApplication(processIdentifier: token.pid)
+        let bundleId = resolveBundleId(token.pid) ?? app?.bundleIdentifier
+        let appPolicy = app?.activationPolicy
+        let windowType = windowTypeProvider?(axRef, token.pid)
+            ?? AXWindowService.windowType(axRef, appPolicy: appPolicy, bundleId: bundleId)
+
+        guard windowType == .tiling else { return nil }
+
+        if let bundleId, controller.appRulesByBundleId[bundleId]?.alwaysFloat == true { return nil }
+
+        let workspaceId = controller.resolveWorkspaceForNewWindow(
+            axRef: axRef,
+            pid: token.pid,
+            fallbackWorkspaceId: controller.activeWorkspace()?.id
+        )
+
+        return PreparedCreate(
+            windowId: windowId,
+            token: token,
+            bundleId: bundleId,
+            axRef: axRef,
+            workspaceId: workspaceId
+        )
+    }
+
+    private func prepareDestroyCandidate(
+        windowId: UInt32,
+        pidHint: pid_t?
+    ) -> PreparedDestroy? {
+        guard let controller else { return nil }
+
+        let hintedToken = pidHint.flatMap { hintedPid -> WindowToken? in
+            let token = WindowToken(pid: hintedPid, windowId: Int(windowId))
+            return controller.workspaceManager.entry(for: token) != nil ? token : nil
+        }
+        let resolvedToken = hintedToken
+            ?? resolveTrackedToken(windowId)
+            ?? pidHint.map { WindowToken(pid: $0, windowId: Int(windowId)) }
+
+        guard let token = resolvedToken,
+              let trackedWorkspaceId = controller.workspaceManager.workspace(for: token) else { return nil }
+
+        return PreparedDestroy(
+            token: token,
+            bundleId: resolveBundleId(token.pid),
+            workspaceId: trackedWorkspaceId
+        )
+    }
+
+    private func handleWindowDestroyed(
+        windowId: UInt32,
+        pidHint: pid_t?
+    ) {
+        guard let candidate = prepareDestroyCandidate(windowId: windowId, pidHint: pidHint) else { return }
+
+        if shouldDelayGhosttyLifecycle(for: candidate.token.pid, bundleId: candidate.bundleId) {
+            enqueueGhosttyDestroy(candidate)
+            return
+        }
+
+        processPreparedDestroy(candidate)
+    }
+
+    private func processPreparedDestroy(_ candidate: PreparedDestroy) {
+        handleRemoved(token: candidate.token)
+    }
+
+    private func shouldDelayGhosttyLifecycle(for pid: pid_t, bundleId: String?) -> Bool {
+        let resolvedBundleId = bundleId ?? resolveBundleId(pid)
+        return resolvedBundleId == Self.ghosttyBundleId
+    }
+
+    private func enqueueGhosttyCreate(_ candidate: PreparedCreate) {
+        let key = GhosttyReplacementKey(pid: candidate.token.pid, workspaceId: candidate.workspaceId)
+        var burst = pendingGhosttyReplacementBursts[key] ?? PendingGhosttyReplacementBurst()
+        let pendingCreate = PendingGhosttyCreate(sequence: nextGhosttySequence(), candidate: candidate)
+        burst.append(create: pendingCreate)
+        pendingGhosttyReplacementBursts[key] = burst
+
+        if let matchedDestroy = matchedDestroyCandidate(in: burst, for: candidate.token) {
+            completeGhosttyReplacement(for: key, destroy: matchedDestroy, create: pendingCreate)
+            return
+        }
+
+        scheduleGhosttyReplacementFlush(for: key)
+    }
+
+    private func enqueueGhosttyDestroy(_ candidate: PreparedDestroy) {
+        let key = GhosttyReplacementKey(pid: candidate.token.pid, workspaceId: candidate.workspaceId)
+        var burst = pendingGhosttyReplacementBursts[key] ?? PendingGhosttyReplacementBurst()
+        let pendingDestroy = PendingGhosttyDestroy(sequence: nextGhosttySequence(), candidate: candidate)
+        burst.append(destroy: pendingDestroy)
+        pendingGhosttyReplacementBursts[key] = burst
+
+        if let matchedCreate = matchedCreateCandidate(in: burst, for: candidate.token) {
+            completeGhosttyReplacement(for: key, destroy: pendingDestroy, create: matchedCreate)
+            return
+        }
+
+        scheduleGhosttyReplacementFlush(for: key)
+    }
+
+    private func matchedCreateCandidate(
+        in burst: PendingGhosttyReplacementBurst,
+        for oldToken: WindowToken
+    ) -> PendingGhosttyCreate? {
+        guard burst.hasSingleReplacementPair,
+              let create = burst.creates.first,
+              create.candidate.token != oldToken
+        else {
+            return nil
+        }
+        return create
+    }
+
+    private func matchedDestroyCandidate(
+        in burst: PendingGhosttyReplacementBurst,
+        for newToken: WindowToken
+    ) -> PendingGhosttyDestroy? {
+        guard burst.hasSingleReplacementPair,
+              let destroy = burst.destroys.first,
+              destroy.candidate.token != newToken
+        else {
+            return nil
+        }
+        return destroy
+    }
+
+    private func completeGhosttyReplacement(
+        for key: GhosttyReplacementKey,
+        destroy: PendingGhosttyDestroy,
+        create: PendingGhosttyCreate
+    ) {
+        pendingGhosttyReplacementTasks.removeValue(forKey: key)?.cancel()
+        pendingGhosttyReplacementBursts.removeValue(forKey: key)
+
+        let destroyCandidate = destroy.candidate
+        let createCandidate = create.candidate
+
+        guard destroyCandidate.workspaceId == createCandidate.workspaceId else {
+            replayGhosttyReplacementEvents([.destroy(destroy), .create(create)])
+            return
+        }
+
+        if !rekeyGhosttyReplacement(from: destroyCandidate.token, to: createCandidate) {
+            replayGhosttyReplacementEvents([.destroy(destroy), .create(create)])
+        }
+    }
+
+    private func replayGhosttyReplacementEvents(_ events: [PendingGhosttyEvent]) {
+        for event in events.sorted(by: { $0.sequence < $1.sequence }) {
+            switch event {
+            case let .create(create):
+                trackPreparedCreate(create.candidate)
+            case let .destroy(destroy):
+                processPreparedDestroy(destroy.candidate)
+            }
+        }
+    }
+
+    @discardableResult
+    private func rekeyGhosttyReplacement(from oldToken: WindowToken, to create: PreparedCreate) -> Bool {
+        guard let controller,
+              let entry = controller.workspaceManager.rekeyWindow(
+                  from: oldToken,
+                  to: create.token,
+                  newAXRef: create.axRef
+              )
+        else {
+            return false
+        }
+
+        _ = controller.niriEngine?.rekeyWindow(from: oldToken, to: create.token)
+        if let workspaceId = controller.workspaceManager.workspace(for: create.token) {
+            _ = controller.dwindleEngine?.rekeyWindow(from: oldToken, to: create.token, in: workspaceId)
+        }
+
+        controller.focusCoordinator.rekeyPendingFocus(from: oldToken, to: create.token)
+        controller.axManager.rekeyWindowState(
+            pid: create.token.pid,
+            oldWindowId: oldToken.windowId,
+            newWindow: create.axRef
+        )
+        subscribeToWindows([create.windowId])
+        controller.updateWorkspaceBar()
+        controller.niriLayoutHandler.updateTabbedColumnOverlays()
+        refreshBorderAfterGhosttyReplacement(entry: entry)
+
+        Task { @MainActor [weak self] in
+            guard let self, let controller = self.controller else { return }
+            if let app = NSRunningApplication(processIdentifier: create.token.pid) {
+                _ = await controller.axManager.windowsForApp(app)
+            }
+        }
+
+        return true
+    }
+
+    private func refreshBorderAfterGhosttyReplacement(entry: WindowModel.Entry) {
+        guard let controller else { return }
+        guard controller.workspaceManager.focusedToken == entry.token else { return }
+
+        if let engine = controller.niriEngine,
+           let node = engine.findNode(for: entry.token),
+           let frame = node.renderedFrame ?? node.frame
+        {
+            controller.borderCoordinator.updateBorderIfAllowed(
+                token: entry.token,
+                frame: frame,
+                windowId: entry.windowId
+            )
+            return
+        }
+
+        if let frame = frameProvider?(entry.axRef) ?? (try? AXWindowService.frame(entry.axRef)) {
+            controller.borderCoordinator.updateBorderIfAllowed(
+                token: entry.token,
+                frame: frame,
+                windowId: entry.windowId
+            )
+        }
+    }
+
+    private func scheduleGhosttyReplacementFlush(for key: GhosttyReplacementKey) {
+        pendingGhosttyReplacementTasks.removeValue(forKey: key)?.cancel()
+        pendingGhosttyReplacementTasks[key] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.ghosttyReplacementGraceDelay)
+            guard !Task.isCancelled else { return }
+            self?.flushGhosttyReplacementBurst(for: key)
+        }
+    }
+
+    private func flushGhosttyReplacementBurst(for key: GhosttyReplacementKey) {
+        pendingGhosttyReplacementTasks.removeValue(forKey: key)?.cancel()
+        guard let burst = pendingGhosttyReplacementBursts.removeValue(forKey: key) else { return }
+
+        for event in burst.orderedEvents {
+            switch event {
+            case let .create(create):
+                trackPreparedCreate(create.candidate)
+            case let .destroy(destroy):
+                processPreparedDestroy(destroy.candidate)
+            }
+        }
+    }
+
+    private func nextGhosttySequence() -> UInt64 {
+        defer { nextGhosttyEventSequence += 1 }
+        return nextGhosttyEventSequence
+    }
+
     private func deferCreatedWindow(_ windowId: UInt32) {
         guard deferredCreatedWindowIds.insert(windowId).inserted else { return }
         deferredCreatedWindowOrder.append(windowId)
@@ -438,5 +780,13 @@ final class AXEventHandler: CGSEventDelegate {
         let result = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow)
         guard result == .success else { return nil }
         return focusedWindow
+    }
+
+    private func resolveBundleId(_ pid: pid_t) -> String? {
+        guard let controller else { return nil }
+        if let bundleIdProvider {
+            return bundleIdProvider(pid)
+        }
+        return controller.appInfoCache.bundleId(for: pid) ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
     }
 }

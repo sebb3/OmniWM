@@ -787,6 +787,7 @@ import QuartzCore
         defer { layoutState.isFullEnumerationInProgress = false }
 
         guard let controller else { return false }
+        controller.axEventHandler.resetGhosttyReplacementState()
 
         if controller.isFrontmostAppLockScreen() || controller.isLockScreenActive {
             return false
@@ -938,7 +939,9 @@ import QuartzCore
         let focusedWorkspaceId = controller.activeWorkspace()?.id
 
         for (ax, pid, winId) in windows {
-            if let bundleId = controller.appInfoCache.bundleId(for: pid) {
+            let bundleId = controller.appInfoCache.bundleId(for: pid)
+                ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+            if let bundleId {
                 if bundleId == LockScreenObserver.lockScreenAppBundleId {
                     continue
                 }

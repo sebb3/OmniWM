@@ -116,6 +116,41 @@ final class WindowModel {
         return token
     }
 
+    @discardableResult
+    func rekeyWindow(from oldToken: WindowToken, to newToken: WindowToken, newAXRef: AXWindowRef) -> Entry? {
+        if oldToken == newToken {
+            guard let entry = entries[oldToken] else { return nil }
+            entry.axRef = newAXRef
+            return entry
+        }
+
+        guard entries[newToken] == nil,
+              let entry = entries.removeValue(forKey: oldToken)
+        else {
+            return nil
+        }
+
+        entry.handle.id = newToken
+        entry.axRef = newAXRef
+        entries[newToken] = entry
+
+        if var tokens = tokensByWorkspace[entry.workspaceId],
+           var indexByToken = tokenIndexByWorkspace[entry.workspaceId],
+           let index = indexByToken.removeValue(forKey: oldToken)
+        {
+            tokens[index] = newToken
+            indexByToken[newToken] = index
+            tokensByWorkspace[entry.workspaceId] = tokens
+            tokenIndexByWorkspace[entry.workspaceId] = indexByToken
+        }
+
+        if let missingCount = missingDetectionCountByToken.removeValue(forKey: oldToken) {
+            missingDetectionCountByToken[newToken] = missingCount
+        }
+
+        return entry
+    }
+
     func handle(for token: WindowToken) -> WindowHandle? {
         entries[token]?.handle
     }

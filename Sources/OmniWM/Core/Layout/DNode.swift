@@ -8,7 +8,7 @@ struct WindowToken: Hashable, Sendable {
 }
 
 final class WindowHandle: Hashable {
-    let id: WindowToken
+    var id: WindowToken
 
     var token: WindowToken { id }
     var pid: pid_t { id.pid }

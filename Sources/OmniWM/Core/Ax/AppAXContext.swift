@@ -291,6 +291,40 @@ final class AppAXContext {
         setFrameJobs.removeValue(forKey: windowId)?.cancel()
     }
 
+    func rekeyWindow(oldWindowId: Int, newWindow: AXWindowRef) {
+        guard oldWindowId != newWindow.windowId else { return }
+        setFrameJobs.removeValue(forKey: oldWindowId)?.cancel()
+
+        if suppressedFrameWindowIds.contains(oldWindowId) {
+            suppressedFrameWindowIds.remove(oldWindowId)
+            suppressedFrameWindowIds.insert(newWindow.windowId)
+        }
+
+        guard let thread else { return }
+        nonisolated(unsafe) let appThread = thread
+
+        appThread.runInLoopAsync { [windows, axObserver, subscribedWindowIds] _ in
+            windows.value.removeValue(forKey: oldWindowId)
+            windows.value[newWindow.windowId] = newWindow.element
+
+            subscribedWindowIds.remove(oldWindowId)
+            if !subscribedWindowIds.contains(newWindow.windowId),
+               let observer = axObserver.value,
+               let destroyRefcon = AppAXContext.destroyNotificationRefcon(for: newWindow.windowId)
+            {
+                let result = AXObserverAddNotification(
+                    observer,
+                    newWindow.element,
+                    kAXUIElementDestroyedNotification as CFString,
+                    destroyRefcon
+                )
+                if result == .success {
+                    subscribedWindowIds.insert(newWindow.windowId)
+                }
+            }
+        }
+    }
+
     func suppressFrameWrites(for windowIds: [Int]) {
         guard !windowIds.isEmpty else { return }
         for windowId in windowIds {

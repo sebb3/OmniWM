@@ -361,6 +361,37 @@ private func hasAnyVisibilityChange(
         #expect(engine.findNode(for: refreshed.id)?.id == originalNodeId)
     }
 
+    @Test func rekeyWindowKeepsNodeAndSelectionStableAcrossSync() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 1)
+        let wsId = UUID()
+
+        let handle1 = makeTestHandle(pid: 61)
+        let handle2 = makeTestHandle(pid: 62)
+        let handle3 = makeTestHandle(pid: 63)
+
+        let firstWindow = engine.addWindow(handle: handle1, to: wsId, afterSelection: nil)
+        let rekeyedWindow = engine.addWindow(handle: handle2, to: wsId, afterSelection: firstWindow.id)
+        let _ = engine.addWindow(handle: handle3, to: wsId, afterSelection: rekeyedWindow.id)
+
+        let replacementToken = WindowToken(pid: handle2.pid, windowId: handle2.windowId + 1000)
+        let originalNodeId = rekeyedWindow.id
+
+        #expect(engine.rekeyWindow(from: handle2.id, to: replacementToken))
+
+        let removed = engine.syncWindows(
+            [handle1.id, replacementToken, handle3.id],
+            in: wsId,
+            selectedNodeId: originalNodeId,
+            focusedToken: handle3.id
+        )
+
+        #expect(removed.isEmpty)
+        #expect(engine.findNode(for: handle2.id) == nil)
+        #expect(engine.findNode(for: replacementToken)?.id == originalNodeId)
+        #expect(engine.validateSelection(originalNodeId, in: wsId) == originalNodeId)
+        #expect(engine.root(for: wsId)?.windowIdSet == Set([handle1.id, replacementToken, handle3.id]))
+    }
+
     @Test func ensureSelectionVisibleMovesViewport() {
         let engine = NiriLayoutEngine(maxWindowsPerColumn: 1)
         let wsId = UUID()

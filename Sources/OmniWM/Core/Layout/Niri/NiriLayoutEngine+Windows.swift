@@ -144,6 +144,32 @@ extension NiriLayoutEngine {
     }
 
     @discardableResult
+    func rekeyWindow(from oldToken: WindowToken, to newToken: WindowToken) -> Bool {
+        guard oldToken != newToken,
+              tokenToNode[newToken] == nil,
+              let node = tokenToNode.removeValue(forKey: oldToken)
+        else {
+            return false
+        }
+
+        node.token = newToken
+        tokenToNode[newToken] = node
+
+        if let frame = framePool.removeValue(forKey: oldToken) {
+            framePool[newToken] = frame
+        }
+        if let hiddenSide = hiddenPool.removeValue(forKey: oldToken) {
+            hiddenPool[newToken] = hiddenSide
+        }
+        if closingTokens.remove(oldToken) != nil {
+            closingTokens.insert(newToken)
+        }
+
+        node.invalidateChildrenCache()
+        return true
+    }
+
+    @discardableResult
     func syncWindows(
         _ tokens: [WindowToken],
         in workspaceId: WorkspaceDescriptor.ID,

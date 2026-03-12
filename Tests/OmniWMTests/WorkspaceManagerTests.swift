@@ -327,6 +327,80 @@ private func addWorkspaceManagerTestHandle(
         #expect(manager.lastFocusedHandle(in: workspaceId) === handle1)
     }
 
+    @Test @MainActor func rekeyWindowPreservesHandleAndFocusState() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = [
+            WorkspaceConfiguration(name: "1", monitorAssignment: .any, isPersistent: true)
+        ]
+
+        let manager = WorkspaceManager(settings: settings)
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 11, name: "Main", x: 0, y: 0)
+        manager.applyMonitorConfigurationChange([monitor])
+
+        guard let workspaceId = manager.workspaceId(for: "1", createIfMissing: true) else {
+            Issue.record("Failed to create workspace")
+            return
+        }
+
+        let handle = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 2192,
+            pid: 2192,
+            workspaceId: workspaceId
+        )
+        let oldToken = handle.id
+        let hiddenState = WindowModel.HiddenState(
+            proportionalPosition: CGPoint(x: 0.25, y: 0.75),
+            referenceMonitorId: monitor.id,
+            workspaceInactive: true,
+            offscreenSide: .left
+        )
+        let constraints = WindowSizeConstraints(
+            minSize: CGSize(width: 320, height: 240),
+            maxSize: CGSize(width: 960, height: 720),
+            isFixed: false
+        )
+
+        _ = manager.setManagedFocus(handle, in: workspaceId, onMonitor: monitor.id)
+        _ = manager.beginManagedFocusRequest(handle, in: workspaceId, onMonitor: monitor.id)
+        _ = manager.rememberFocus(handle, in: workspaceId)
+        manager.setHiddenState(hiddenState, for: handle)
+        manager.setLayoutReason(.macosHiddenApp, for: handle)
+        manager.setCachedConstraints(constraints, for: handle.id)
+
+        let newToken = WindowToken(pid: oldToken.pid, windowId: 2193)
+        let newAXRef = makeWorkspaceManagerTestWindow(windowId: 2193)
+        guard let rekeyedEntry = manager.rekeyWindow(from: oldToken, to: newToken, newAXRef: newAXRef) else {
+            Issue.record("Failed to rekey window")
+            return
+        }
+
+        #expect(rekeyedEntry.handle === handle)
+        #expect(handle.id == newToken)
+        #expect(rekeyedEntry.token == newToken)
+        #expect(rekeyedEntry.axRef.windowId == 2193)
+        #expect(rekeyedEntry.workspaceId == workspaceId)
+        #expect(manager.entry(for: oldToken) == nil)
+        #expect(manager.entry(for: newToken) === rekeyedEntry)
+        #expect(manager.focusedHandle === handle)
+        #expect(manager.focusedToken == newToken)
+        #expect(manager.pendingFocusedHandle === handle)
+        #expect(manager.pendingFocusedToken == newToken)
+        #expect(manager.lastFocusedHandle(in: workspaceId) === handle)
+
+        guard let rekeyedHiddenState = manager.hiddenState(for: newToken) else {
+            Issue.record("Missing hidden state after rekey")
+            return
+        }
+        #expect(rekeyedHiddenState.proportionalPosition == hiddenState.proportionalPosition)
+        #expect(rekeyedHiddenState.referenceMonitorId == hiddenState.referenceMonitorId)
+        #expect(rekeyedHiddenState.workspaceInactive == hiddenState.workspaceInactive)
+        #expect(rekeyedHiddenState.offscreenSide == hiddenState.offscreenSide)
+        #expect(manager.layoutReason(for: newToken) == .macosHiddenApp)
+        #expect(manager.cachedConstraints(for: newToken) == constraints)
+    }
+
     @Test @MainActor func resolveWorkspaceFocusIgnoresDeadRememberedHandles() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)

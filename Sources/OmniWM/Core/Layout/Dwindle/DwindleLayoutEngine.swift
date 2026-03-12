@@ -256,6 +256,33 @@ final class DwindleLayoutEngine {
         cleanupAfterRemoval(node, in: workspaceId)
     }
 
+    @discardableResult
+    func rekeyWindow(
+        from oldToken: WindowToken,
+        to newToken: WindowToken,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) -> Bool {
+        guard oldToken != newToken,
+              tokenToNode[newToken] == nil,
+              let node = tokenToNode.removeValue(forKey: oldToken),
+              roots[workspaceId] != nil
+        else {
+            return false
+        }
+
+        guard case let .leaf(handle, fullscreen) = node.kind, handle == oldToken else {
+            tokenToNode[oldToken] = node
+            return false
+        }
+
+        if let constraints = windowConstraints.removeValue(forKey: oldToken) {
+            windowConstraints[newToken] = constraints
+        }
+        tokenToNode[newToken] = node
+        node.kind = .leaf(handle: newToken, fullscreen: fullscreen)
+        return true
+    }
+
     private func cleanupAfterRemoval(_ node: DwindleNode, in workspaceId: WorkspaceDescriptor.ID) {
         guard let parent = node.parent else {
             if let root = roots[workspaceId], root.id == node.id {

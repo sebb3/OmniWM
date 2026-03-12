@@ -535,7 +535,7 @@ class NiriContainer: NiriNode {
 }
 
 class NiriWindow: NiriNode {
-    let token: WindowToken
+    var token: WindowToken
 
     var sizingMode: SizingMode = .normal
 

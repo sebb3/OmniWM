@@ -94,6 +94,25 @@ final class AXManager {
         inactiveWorkspaceWindowIds.removeAll()
     }
 
+    func rekeyWindowState(pid: pid_t, oldWindowId: Int, newWindow: AXWindowRef) {
+        let newWindowId = newWindow.windowId
+        guard oldWindowId != newWindowId else { return }
+
+        if inactiveWorkspaceWindowIds.remove(oldWindowId) != nil {
+            inactiveWorkspaceWindowIds.insert(newWindowId)
+        }
+
+        if let frame = lastAppliedFrames.removeValue(forKey: oldWindowId) {
+            lastAppliedFrames[newWindowId] = frame
+        }
+
+        if forceApplyWindowIds.remove(oldWindowId) != nil {
+            forceApplyWindowIds.insert(newWindowId)
+        }
+
+        AppAXContext.contexts[pid]?.rekeyWindow(oldWindowId: oldWindowId, newWindow: newWindow)
+    }
+
     func cleanup() {
         if let observer = appTerminationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
