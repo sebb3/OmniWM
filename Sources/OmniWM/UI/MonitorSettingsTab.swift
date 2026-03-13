@@ -1,63 +1,305 @@
+import AppKit
 import SwiftUI
 
 struct MonitorSettingsTab: View {
     @Bindable var settings: SettingsStore
     @Bindable var controller: WMController
+
     @State private var selectedMonitor: Monitor.ID?
-    @State private var connectedMonitors: [Monitor] = Monitor.current()
+    @State private var connectedMonitors: [Monitor] = MonitorSettingsTabModel.sortedMonitors(Monitor.current())
+
+    private var sortedMonitors: [Monitor] {
+        MonitorSettingsTabModel.sortedMonitors(connectedMonitors)
+    }
+
+    private var displayLabels: [Monitor.ID: MonitorDisplayLabel] {
+        MonitorSettingsTabModel.displayLabels(for: sortedMonitors)
+    }
+
+    private var warpOrderEntries: [MonitorOrderEntry] {
+        MonitorSettingsTabModel.orderEntries(
+            for: sortedMonitors,
+            orderedNames: settings.effectiveMouseWarpMonitorOrder(for: sortedMonitors)
+        )
+    }
+
+    private var effectiveSelectedMonitorID: Monitor.ID? {
+        MonitorSettingsTabModel.normalizedSelection(selectedMonitor, entries: warpOrderEntries)
+    }
+
+    private var selectedConnectedMonitor: Monitor? {
+        guard let monitorID = effectiveSelectedMonitorID else { return nil }
+        return sortedMonitors.first(where: { $0.id == monitorID })
+    }
 
     var body: some View {
-        Form {
-            MouseWarpSection(settings: settings, connectedMonitors: connectedMonitors)
+        VStack(alignment: .leading, spacing: 16) {
+            SectionHeader("Monitor Order")
 
-            Section {
-                Picker("Monitor:", selection: $selectedMonitor) {
-                    if connectedMonitors.isEmpty {
-                        Text("No monitors detected").tag(nil as Monitor.ID?)
-                    } else {
-                        ForEach(connectedMonitors, id: \.id) { monitor in
-                            HStack {
-                                Text(monitor.name)
-                                if monitor.isMain {
-                                    Text("(Main)").foregroundColor(.secondary)
-                                }
-                            }
-                            .tag(monitor.id as Monitor.ID?)
-                        }
-                    }
-                }
-                .pickerStyle(.menu)
-            }
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Click a monitor, then use the arrows beside it to move it left or right. This strip is the left-to-right order OmniWM uses for mouse warp.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
 
-            if let monitorId = selectedMonitor,
-               let monitor = connectedMonitors.first(where: { $0.id == monitorId })
-            {
-                MonitorOrientationSection(
-                    settings: settings,
-                    controller: controller,
-                    monitor: monitor
+                MonitorOrderStrip(
+                    entries: warpOrderEntries,
+                    selectedMonitor: effectiveSelectedMonitorID,
+                    onSelect: { selectedMonitor = $0 },
+                    onMove: moveSelectedMonitor
                 )
-            } else {
-                Section {
-                    Text("Select a monitor to configure its orientation.")
+
+                if sortedMonitors.count <= 1 {
+                    Text("Mouse warp ordering becomes relevant automatically when more than one monitor is connected.")
+                        .font(.caption)
                         .foregroundColor(.secondary)
                 }
+
+                Stepper(value: Binding(
+                    get: { settings.mouseWarpMargin },
+                    set: { settings.mouseWarpMargin = $0 }
+                ), in: 1 ... 10) {
+                    HStack {
+                        Text("Warp Trigger Margin")
+                        Spacer()
+                        Text("\(settings.mouseWarpMargin) px")
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Text("Mouse warp keeps pointer travel consistent across OmniWM's multi-monitor workspace model.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Divider()
+
+            SectionHeader("Selected Monitor")
+
+            if let monitor = selectedConnectedMonitor,
+               let displayLabel = displayLabels[monitor.id]
+            {
+                SelectedMonitorDetails(
+                    settings: settings,
+                    controller: controller,
+                    monitor: monitor,
+                    displayLabel: displayLabel
+                )
+            } else if sortedMonitors.isEmpty {
+                Text("No monitors detected.")
+                    .foregroundColor(.secondary)
+            } else {
+                Text("Select a monitor from the strip above to configure its orientation.")
+                    .foregroundColor(.secondary)
             }
         }
-        .formStyle(.grouped)
-        .onAppear {
-            connectedMonitors = Monitor.current()
-            if selectedMonitor == nil, let first = connectedMonitors.first {
-                selectedMonitor = first.id
+        .onAppear(perform: refreshConnectedMonitors)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            refreshConnectedMonitors()
+        }
+    }
+
+    private func refreshConnectedMonitors() {
+        let monitors = MonitorSettingsTabModel.sortedMonitors(Monitor.current())
+        connectedMonitors = monitors
+        selectedMonitor = MonitorSettingsTabModel.normalizedSelection(
+            selectedMonitor,
+            entries: MonitorSettingsTabModel.orderEntries(
+                for: monitors,
+                orderedNames: settings.effectiveMouseWarpMonitorOrder(for: monitors)
+            )
+        )
+    }
+
+    private func moveSelectedMonitor(_ direction: MonitorOrderMoveDirection) {
+        guard let reordered = MonitorSettingsTabModel.reorderedNames(
+            entries: warpOrderEntries,
+            moving: effectiveSelectedMonitorID,
+            direction: direction
+        ) else {
+            return
+        }
+        settings.mouseWarpMonitorOrder = reordered
+    }
+}
+
+private struct MonitorOrderStrip: View {
+    let entries: [MonitorOrderEntry]
+    let selectedMonitor: Monitor.ID?
+    let onSelect: (Monitor.ID) -> Void
+    let onMove: (MonitorOrderMoveDirection) -> Void
+
+    var body: some View {
+        if entries.isEmpty {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.secondary.opacity(0.08))
+                .overlay {
+                    Text("No monitors detected")
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 132)
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .center, spacing: 14) {
+                    ForEach(entries) { entry in
+                        MonitorOrderSlot(
+                            entry: entry,
+                            isSelected: selectedMonitor == entry.id,
+                            showsMoveControls: entries.count > 1 && selectedMonitor == entry.id,
+                            canMoveLeft: MonitorSettingsTabModel.canMove(
+                                entries: entries,
+                                moving: entry.id,
+                                direction: .left
+                            ),
+                            canMoveRight: MonitorSettingsTabModel.canMove(
+                                entries: entries,
+                                moving: entry.id,
+                                direction: .right
+                            ),
+                            onSelect: { onSelect(entry.id) },
+                            onMoveLeft: { onMove(.left) },
+                            onMoveRight: { onMove(.right) }
+                        )
+                    }
+                }
+                .padding(.vertical, 4)
             }
         }
     }
 }
 
-private struct MonitorOrientationSection: View {
+private struct MonitorOrderSlot: View {
+    let entry: MonitorOrderEntry
+    let isSelected: Bool
+    let showsMoveControls: Bool
+    let canMoveLeft: Bool
+    let canMoveRight: Bool
+    let onSelect: () -> Void
+    let onMoveLeft: () -> Void
+    let onMoveRight: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if showsMoveControls {
+                MonitorMoveButton(
+                    symbolName: "chevron.left",
+                    isEnabled: canMoveLeft,
+                    action: onMoveLeft
+                )
+            }
+
+            Button(action: onSelect) {
+                MonitorOrderCard(
+                    entry: entry,
+                    isSelected: isSelected
+                )
+            }
+            .buttonStyle(.plain)
+
+            if showsMoveControls {
+                MonitorMoveButton(
+                    symbolName: "chevron.right",
+                    isEnabled: canMoveRight,
+                    action: onMoveRight
+                )
+            }
+        }
+    }
+}
+
+private struct MonitorMoveButton: View {
+    let symbolName: String
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbolName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(isEnabled ? .primary : .secondary.opacity(0.55))
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.secondary.opacity(0.10))
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+}
+
+private struct MonitorOrderCard: View {
+    let entry: MonitorOrderEntry
+    let isSelected: Bool
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Spacer(minLength: 0)
+
+            Image(systemName: "display")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(isSelected ? .accentColor : .secondary)
+
+            Spacer(minLength: 0)
+
+            Text(entry.displayLabel.name)
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(.primary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.75)
+
+            MonitorBadgeRow(displayLabel: entry.displayLabel, isMain: entry.isMain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(width: 150, height: 122)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.22), lineWidth: isSelected ? 2 : 1)
+        )
+    }
+}
+
+private struct MonitorBadgeRow: View {
+    let displayLabel: MonitorDisplayLabel
+    let isMain: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let duplicateBadge = displayLabel.badgeText {
+                MonitorBadge(text: duplicateBadge)
+            }
+
+            if isMain {
+                MonitorBadge(text: "Main")
+            }
+        }
+    }
+}
+
+private struct MonitorBadge: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium, design: .rounded))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+    }
+}
+
+private struct SelectedMonitorDetails: View {
     @Bindable var settings: SettingsStore
     @Bindable var controller: WMController
     let monitor: Monitor
+    let displayLabel: MonitorDisplayLabel
 
     private var orientationOverride: Monitor.Orientation? {
         settings.orientationSettings(for: monitor)?.orientation
@@ -68,24 +310,33 @@ private struct MonitorOrientationSection: View {
     }
 
     var body: some View {
-        Section("Orientation") {
-            HStack {
-                Text("Auto-detected:")
-                Spacer()
-                Text(monitor.autoOrientation.displayName)
-                    .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text(displayLabel.name)
+                    .font(.title3.weight(.semibold))
+
+                if let duplicateBadge = displayLabel.badgeText {
+                    MonitorBadge(text: duplicateBadge)
+                }
+
+                if monitor.isMain {
+                    MonitorBadge(text: "Main")
+                }
             }
 
-            HStack {
-                Text("Current:")
-                Spacer()
-                Text(effectiveOrientation.displayName)
-                    .fontWeight(.medium)
+            VStack(alignment: .leading, spacing: 8) {
+                LabeledContent("Auto-detected") {
+                    Text(monitor.autoOrientation.displayName)
+                        .foregroundColor(.secondary)
+                }
+
+                LabeledContent("Current") {
+                    Text(effectiveOrientation.displayName)
+                        .fontWeight(.medium)
+                }
             }
 
-            Divider()
-
-            Picker("Override:", selection: Binding(
+            Picker("Orientation Override", selection: Binding(
                 get: { orientationOverride },
                 set: { newValue in
                     updateOrientation(newValue)
@@ -98,21 +349,15 @@ private struct MonitorOrientationSection: View {
             .pickerStyle(.segmented)
 
             if orientationOverride != nil {
-                HStack {
-                    Spacer()
-                    Button("Reset to Auto") {
-                        updateOrientation(nil)
-                    }
-                    .buttonStyle(.borderless)
-                    Spacer()
+                Button("Reset to Auto") {
+                    updateOrientation(nil)
                 }
+                .buttonStyle(.borderless)
             }
 
-            Text(
-                "Override the auto-detected orientation for this monitor. Vertical monitors scroll windows top-to-bottom instead of left-to-right."
-            )
-            .font(.caption)
-            .foregroundColor(.secondary)
+            Text("Override the auto-detected orientation for this monitor. Vertical monitors scroll windows top-to-bottom instead of left-to-right.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 
@@ -122,12 +367,136 @@ private struct MonitorOrientationSection: View {
             monitorDisplayId: monitor.displayId,
             orientation: orientation
         )
+
         if orientation == nil {
             settings.removeOrientationSettings(for: monitor)
         } else {
             settings.updateOrientationSettings(newSettings)
         }
+
         controller.updateMonitorOrientations()
+    }
+}
+
+struct MonitorDisplayLabel: Equatable {
+    let name: String
+    let duplicateIndex: Int?
+
+    var badgeText: String? {
+        duplicateIndex.map { "#\($0)" }
+    }
+}
+
+struct MonitorOrderEntry: Identifiable, Equatable {
+    let monitor: Monitor
+    let displayLabel: MonitorDisplayLabel
+
+    var id: Monitor.ID { monitor.id }
+    var name: String { monitor.name }
+    var isMain: Bool { monitor.isMain }
+}
+
+enum MonitorOrderMoveDirection {
+    case left
+    case right
+}
+
+enum MonitorSettingsTabModel {
+    static func sortedMonitors(_ monitors: [Monitor]) -> [Monitor] {
+        Monitor.sortedByPosition(monitors)
+    }
+
+    static func normalizedSelection(_ selectedMonitor: Monitor.ID?, entries: [MonitorOrderEntry]) -> Monitor.ID? {
+        guard !entries.isEmpty else { return nil }
+
+        if let selectedMonitor,
+           entries.contains(where: { $0.id == selectedMonitor })
+        {
+            return selectedMonitor
+        }
+
+        return entries.first?.id
+    }
+
+    static func displayLabels(for monitors: [Monitor]) -> [Monitor.ID: MonitorDisplayLabel] {
+        let sorted = sortedMonitors(monitors)
+        let totals = sorted.reduce(into: [String: Int]()) { counts, monitor in
+            counts[monitor.name, default: 0] += 1
+        }
+        var nextIndexByName: [String: Int] = [:]
+        var labels: [Monitor.ID: MonitorDisplayLabel] = [:]
+
+        for monitor in sorted {
+            nextIndexByName[monitor.name, default: 0] += 1
+            let total = totals[monitor.name, default: 0]
+            let duplicateIndex = total > 1 ? nextIndexByName[monitor.name] : nil
+            labels[monitor.id] = MonitorDisplayLabel(name: monitor.name, duplicateIndex: duplicateIndex)
+        }
+
+        return labels
+    }
+
+    static func orderEntries(for monitors: [Monitor], orderedNames: [String]) -> [MonitorOrderEntry] {
+        let sorted = sortedMonitors(monitors)
+        let labels = displayLabels(for: sorted)
+        let monitorsByName = Dictionary(grouping: sorted, by: \.name)
+        var usedCounts: [String: Int] = [:]
+        var entries: [MonitorOrderEntry] = []
+
+        for name in orderedNames {
+            let usedCount = usedCounts[name, default: 0]
+            guard let monitor = monitorsByName[name]?[usedCount],
+                  let displayLabel = labels[monitor.id]
+            else {
+                continue
+            }
+
+            entries.append(MonitorOrderEntry(monitor: monitor, displayLabel: displayLabel))
+            usedCounts[name] = usedCount + 1
+        }
+
+        return entries
+    }
+
+    static func canMove(
+        entries: [MonitorOrderEntry],
+        moving selectedMonitor: Monitor.ID?,
+        direction: MonitorOrderMoveDirection
+    ) -> Bool {
+        guard let currentIndex = entries.firstIndex(where: { $0.id == selectedMonitor }) else {
+            return false
+        }
+
+        switch direction {
+        case .left:
+            return currentIndex > 0
+        case .right:
+            return currentIndex < entries.count - 1
+        }
+    }
+
+    static func reorderedNames(
+        entries: [MonitorOrderEntry],
+        moving selectedMonitor: Monitor.ID?,
+        direction: MonitorOrderMoveDirection
+    ) -> [String]? {
+        guard let currentIndex = entries.firstIndex(where: { $0.id == selectedMonitor }) else {
+            return nil
+        }
+
+        let targetIndex: Int
+        switch direction {
+        case .left:
+            targetIndex = currentIndex - 1
+        case .right:
+            targetIndex = currentIndex + 1
+        }
+
+        guard entries.indices.contains(targetIndex) else { return nil }
+
+        var reorderedEntries = entries
+        reorderedEntries.swapAt(currentIndex, targetIndex)
+        return reorderedEntries.map(\.name)
     }
 }
 
@@ -137,102 +506,5 @@ extension Monitor.Orientation {
         case .horizontal: "Horizontal"
         case .vertical: "Vertical"
         }
-    }
-}
-
-private struct MouseWarpSection: View {
-    @Bindable var settings: SettingsStore
-    let connectedMonitors: [Monitor]
-
-    private var orderedMonitors: [String] {
-        settings.effectiveMouseWarpMonitorOrder(for: connectedMonitors)
-    }
-
-    var body: some View {
-        Section("Mouse Warp") {
-            if connectedMonitors.count > 1 {
-                Text("Mouse warp is active while more than one monitor is connected.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Text("Drag monitors to arrange in physical left-to-right order:")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                VStack(spacing: 4) {
-                    ForEach(Array(orderedMonitors.enumerated()), id: \.element) { index, name in
-                        HStack {
-                            Text("\(index + 1).")
-                                .foregroundColor(.secondary)
-                                .frame(width: 20, alignment: .trailing)
-                            Text(name)
-                            Spacer()
-                            if connectedMonitors.first(where: { $0.name == name })?.isMain == true {
-                                Text("Main")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            HStack(spacing: 4) {
-                                Button {
-                                    moveUp(index)
-                                } label: {
-                                    Image(systemName: "chevron.up")
-                                }
-                                .disabled(index == 0)
-                                .buttonStyle(.borderless)
-
-                                Button {
-                                    moveDown(index)
-                                } label: {
-                                    Image(systemName: "chevron.down")
-                                }
-                                .disabled(index == orderedMonitors.count - 1)
-                                .buttonStyle(.borderless)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 8)
-                        .background(Color.secondary.opacity(0.1))
-                        .cornerRadius(4)
-                    }
-                }
-
-                Stepper(value: Binding(
-                    get: { settings.mouseWarpMargin },
-                    set: { settings.mouseWarpMargin = $0 }
-                ), in: 1...10) {
-                    HStack {
-                        Text("Edge Margin:")
-                        Spacer()
-                        Text("\(settings.mouseWarpMargin) px")
-                            .foregroundColor(.secondary)
-                    }
-                }
-            } else {
-                Text("Mouse warp turns on automatically when more than one monitor is connected.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Text(
-                "Mouse warp keeps pointer travel consistent across OmniWM's multi-monitor workspace model."
-            )
-            .font(.caption)
-            .foregroundColor(.secondary)
-        }
-    }
-
-    private func moveUp(_ index: Int) {
-        guard index > 0 else { return }
-        var order = orderedMonitors
-        order.swapAt(index, index - 1)
-        settings.mouseWarpMonitorOrder = order
-    }
-
-    private func moveDown(_ index: Int) {
-        guard index < orderedMonitors.count - 1 else { return }
-        var order = orderedMonitors
-        order.swapAt(index, index + 1)
-        settings.mouseWarpMonitorOrder = order
     }
 }
