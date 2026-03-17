@@ -341,7 +341,8 @@ final class OverviewController {
         let filter = SCContentFilter(desktopIndependentWindow: scWindow)
         let config = SCStreamConfiguration()
 
-        let maxDimension: CGFloat = 400
+        let scaleFactor = screenScaleFactor(for: scWindow.frame)
+        let maxDimension = max(scWindow.frame.width, scWindow.frame.height) * scaleFactor
         let aspectRatio = scWindow.frame.width / max(1, scWindow.frame.height)
         if aspectRatio > 1 {
             config.width = Int(maxDimension)
@@ -364,6 +365,13 @@ final class OverviewController {
         } catch {
             return nil
         }
+    }
+
+    private func screenScaleFactor(for windowFrame: CGRect) -> CGFloat {
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(windowFrame) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        return screen?.backingScaleFactor ?? 2.0
     }
 
     func updateAnimationProgress(_ progress: Double, state: OverviewState) {
