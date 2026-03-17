@@ -110,6 +110,7 @@ struct AppRule: Codable, Identifiable, Equatable {
     var hasAnyRule: Bool {
         effectiveManageAction != .auto || effectiveLayoutAction != .auto ||
             assignToWorkspace != nil ||
-            minWidth != nil || minHeight != nil
+            minWidth != nil || minHeight != nil ||
+            hasAdvancedMatchers
     }
 }

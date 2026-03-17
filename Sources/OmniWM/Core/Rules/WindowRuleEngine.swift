@@ -111,11 +111,6 @@ struct WindowDecisionDebugSnapshot: Equatable, Sendable {
         return lines.joined(separator: "\n")
     }
 
-    func structuredLogLine(event: String) -> String {
-        let tokenValue = token.map { "\($0.pid):\($0.windowId)" } ?? "nil"
-        let reasons = heuristicReasons.map(\.rawValue).joined(separator: ",")
-        return "[WindowDecision] event=\(event) token=\(tokenValue) disposition=\(String(describing: disposition)) source=\(sourceDescription) override=\(manualOverride?.rawValue ?? "nil") workspace=\(workspaceName ?? "nil") minWidth=\(stringValue(minWidth)) minHeight=\(stringValue(minHeight)) bundleId=\(bundleId ?? "nil") title=\(title ?? "nil") role=\(axRole ?? "nil") subrole=\(axSubrole ?? "nil") fullscreen=\(appFullscreen) factsOk=\(attributeFetchSucceeded) reasons=\(reasons)"
-    }
 }
 
 @MainActor

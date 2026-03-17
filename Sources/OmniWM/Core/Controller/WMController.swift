@@ -700,10 +700,6 @@ final class WMController {
         pasteboard.setString(snapshot.formattedDump(), forType: .string)
     }
 
-    func logWindowDecision(event: String, evaluation: WindowDecisionEvaluation) {
-        print(makeWindowDecisionDebugSnapshot(from: evaluation).structuredLogLine(event: event))
-    }
-
     func clearManualWindowOverride(for token: WindowToken) {
         windowRuleEngine.clearManualOverride(for: token)
     }
@@ -763,7 +759,6 @@ final class WMController {
             guard let axRef else { continue }
 
             let evaluation = evaluateWindowDisposition(axRef: axRef, pid: token.pid)
-            logWindowDecision(event: "reevaluate", evaluation: evaluation)
 
             if let existingEntry, !evaluation.decision.isResolved {
                 _ = workspaceManager.addWindow(
@@ -828,10 +823,6 @@ final class WMController {
             windowRuleEngine.setManualOverride(.forceFloat, for: token)
         } else {
             return
-        }
-
-        if let snapshot = windowDecisionDebugSnapshot(for: token) {
-            print(snapshot.structuredLogLine(event: "toggle"))
         }
 
         Task { @MainActor [weak self] in

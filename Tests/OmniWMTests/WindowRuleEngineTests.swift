@@ -211,4 +211,62 @@ private func makeWindowRuleFacts(
         #expect(decision.disposition == .managed)
         #expect(decision.source == .heuristic)
     }
+
+    @Test func advancedOnlyRuleCompilesAndMatchesWithoutExplicitLayout() {
+        let engine = WindowRuleEngine()
+        let rule = AppRule(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000141")!,
+            bundleId: "com.example.chooser",
+            titleSubstring: "Chooser",
+            axRole: kAXWindowRole as String,
+            axSubrole: kAXStandardWindowSubrole as String
+        )
+        engine.rebuild(rules: [rule])
+
+        #expect(engine.requiresTitle)
+        #expect(engine.requiresTitle(for: "com.example.chooser"))
+        #expect(engine.hasDynamicReevaluationRules)
+        #expect(engine.needsWindowReevaluation)
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(
+                bundleId: "com.example.chooser",
+                appName: "Chooser App",
+                title: "Project Chooser",
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String
+            ),
+            token: nil,
+            appFullscreen: false
+        )
+
+        #expect(decision.disposition == .managed)
+        #expect(decision.source == .userRule(rule.id))
+        #expect(decision.ruleEffects.matchedRuleId == rule.id)
+    }
+
+    @Test func invalidRegexOnlyRuleIsTrackedAndExcludedFromCompiledRules() {
+        let engine = WindowRuleEngine()
+        let rule = AppRule(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000151")!,
+            bundleId: "com.example.invalid-regex-only",
+            titleRegex: "("
+        )
+        engine.rebuild(rules: [rule])
+
+        #expect(engine.invalidRegexMessagesByRuleId[rule.id] != nil)
+        #expect(engine.requiresTitle(for: "com.example.invalid-regex-only") == false)
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(
+                bundleId: "com.example.invalid-regex-only",
+                title: "Anything"
+            ),
+            token: nil,
+            appFullscreen: false
+        )
+
+        #expect(decision.disposition == .managed)
+        #expect(decision.source == .heuristic)
+    }
 }

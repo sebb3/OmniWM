@@ -13,14 +13,14 @@ struct AppRulesView: View {
     @Bindable var controller: WMController
 
     @State private var selectedRuleId: AppRule.ID?
-    @State private var isAddingNew = false
+    @State private var addDraft: AppRuleDraft?
 
     var body: some View {
         NavigationSplitView {
             AppRulesSidebar(
                 rules: settings.appRules,
                 selection: $selectedRuleId,
-                onAdd: { isAddingNew = true },
+                onAdd: { presentNewRule() },
                 onDelete: deleteRule
             )
         } detail: {
@@ -31,6 +31,7 @@ struct AppRulesView: View {
                     rule: $settings.appRules[ruleIndex],
                     workspaceNames: workspaceNames,
                     controller: controller,
+                    onCreateRuleFromSnapshot: presentNewRule(from:),
                     onDelete: {
                         deleteRule(settings.appRules[ruleIndex])
                         selectedRuleId = nil
@@ -41,23 +42,25 @@ struct AppRulesView: View {
             } else {
                 AppRulesEmptyState(
                     controller: controller,
-                    onAdd: { isAddingNew = true }
+                    onAdd: { presentNewRule() },
+                    onCreateRuleFromSnapshot: presentNewRule(from:)
                 )
-                    .omniBackgroundExtensionEffect()
+                .omniBackgroundExtensionEffect()
             }
         }
         .navigationSplitViewStyle(.balanced)
-        .sheet(isPresented: $isAddingNew) {
+        .sheet(item: $addDraft) { draft in
             AppRuleAddSheet(
+                initialDraft: draft,
                 workspaceNames: workspaceNames,
                 controller: controller,
                 onSave: { newRule in
                     settings.appRules.append(newRule)
                     controller.updateAppRules()
                     selectedRuleId = newRule.id
-                    isAddingNew = false
+                    addDraft = nil
                 },
-                onCancel: { isAddingNew = false }
+                onCancel: { addDraft = nil }
             )
         }
         .frame(minWidth: 580, minHeight: 400)
@@ -73,6 +76,15 @@ struct AppRulesView: View {
         if selectedRuleId == rule.id {
             selectedRuleId = nil
         }
+    }
+
+    private func presentNewRule(_ draft: AppRuleDraft = AppRuleDraft()) {
+        addDraft = draft
+    }
+
+    private func presentNewRule(from snapshot: WindowDecisionDebugSnapshot) {
+        guard let draft = AppRuleDraft.guided(from: snapshot) else { return }
+        addDraft = draft
     }
 }
 
@@ -148,6 +160,7 @@ struct AppRuleSidebarRow: View {
 struct AppRulesEmptyState: View {
     let controller: WMController
     let onAdd: () -> Void
+    let onCreateRuleFromSnapshot: (WindowDecisionDebugSnapshot) -> Void
 
     var body: some View {
         ScrollView {
@@ -164,8 +177,11 @@ struct AppRulesEmptyState: View {
                 Button("Add Rule", action: onAdd)
                     .buttonStyle(.borderedProminent)
 
-                FocusedWindowInspectorView(controller: controller)
-                    .frame(maxWidth: 560)
+                FocusedWindowInspectorView(
+                    controller: controller,
+                    onCreateRuleFromSnapshot: onCreateRuleFromSnapshot
+                )
+                .frame(maxWidth: 560)
             }
             .padding()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -177,55 +193,30 @@ struct AppRuleDetailView: View {
     @Binding var rule: AppRule
     let workspaceNames: [String]
     let controller: WMController
+    let onCreateRuleFromSnapshot: (WindowDecisionDebugSnapshot) -> Void
     let onDelete: () -> Void
 
-    @State private var workspaceEnabled: Bool
-    @State private var minWidthEnabled: Bool
-    @State private var minHeightEnabled: Bool
+    @State private var draft: AppRuleDraft
+    @State private var isAdvancedMatchersExpanded: Bool
 
     init(
         rule: Binding<AppRule>,
         workspaceNames: [String],
         controller: WMController,
+        onCreateRuleFromSnapshot: @escaping (WindowDecisionDebugSnapshot) -> Void,
         onDelete: @escaping () -> Void
     ) {
         _rule = rule
         self.workspaceNames = workspaceNames
         self.controller = controller
+        self.onCreateRuleFromSnapshot = onCreateRuleFromSnapshot
         self.onDelete = onDelete
-        _workspaceEnabled = State(initialValue: rule.wrappedValue.assignToWorkspace != nil)
-        _minWidthEnabled = State(initialValue: rule.wrappedValue.minWidth != nil)
-        _minHeightEnabled = State(initialValue: rule.wrappedValue.minHeight != nil)
-    }
 
-    private var manageBinding: Binding<WindowRuleManageAction> {
-        Binding(
-            get: { rule.effectiveManageAction },
-            set: { newValue in
-                rule.manage = newValue == .auto ? nil : newValue
-                controller.updateAppRules()
-            }
-        )
-    }
-
-    private var layoutBinding: Binding<WindowRuleLayoutAction> {
-        Binding(
-            get: { rule.effectiveLayoutAction },
-            set: { newValue in
-                rule.layout = newValue == .auto ? nil : newValue
-                rule.alwaysFloat = nil
-                controller.updateAppRules()
-            }
-        )
-    }
-
-    private func textBinding(_ keyPath: WritableKeyPath<AppRule, String?>) -> Binding<String> {
-        Binding(
-            get: { rule[keyPath: keyPath] ?? "" },
-            set: { newValue in
-                rule[keyPath: keyPath] = newValue.isEmpty ? nil : newValue
-                controller.updateAppRules()
-            }
+        let initialRule = rule.wrappedValue
+        _draft = State(initialValue: AppRuleDraft(rule: initialRule))
+        _isAdvancedMatchersExpanded = State(
+            initialValue: initialRule.hasAdvancedMatchers ||
+                controller.windowRuleEngine.invalidRegexMessagesByRuleId[initialRule.id] != nil
         )
     }
 
@@ -234,44 +225,37 @@ struct AppRuleDetailView: View {
             Form {
                 Section("Application") {
                     LabeledContent("Bundle ID") {
-                        Text(rule.bundleId)
+                        Text(draft.bundleId)
                             .font(.system(.body, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
                 }
 
                 Section("Window Behavior") {
-                    Picker("Manage", selection: manageBinding) {
+                    Picker("Manage", selection: $draft.manageAction) {
                         ForEach(WindowRuleManageAction.allCases) { action in
                             Text(action.displayName).tag(action)
                         }
                     }
 
-                    Picker("Layout", selection: layoutBinding) {
+                    Picker("Layout", selection: $draft.layoutAction) {
                         ForEach(WindowRuleLayoutAction.allCases) { action in
                             Text(action.displayName).tag(action)
                         }
                     }
-                    .disabled(rule.effectiveManageAction == .off)
+                    .disabled(draft.manageAction == .off)
+                    .onChange(of: draft.layoutAction) { _, _ in
+                        draft.usesLegacyAlwaysFloat = false
+                    }
 
-                    Toggle("Assign to Workspace", isOn: $workspaceEnabled)
-                        .onChange(of: workspaceEnabled) { _, enabled in
-                            if !enabled {
-                                rule.assignToWorkspace = nil
-                            } else if rule.assignToWorkspace == nil, let first = workspaceNames.first {
-                                rule.assignToWorkspace = first
-                            }
-                            controller.updateAppRules()
+                    Toggle("Assign to Workspace", isOn: $draft.assignToWorkspaceEnabled)
+                        .onChange(of: draft.assignToWorkspaceEnabled) { _, enabled in
+                            guard enabled else { return }
+                            seedWorkspaceIfNeeded()
                         }
 
-                    if workspaceEnabled {
-                        Picker("Workspace", selection: Binding(
-                            get: { rule.assignToWorkspace ?? "" },
-                            set: {
-                                rule.assignToWorkspace = $0.isEmpty ? nil : $0
-                                controller.updateAppRules()
-                            }
-                        )) {
+                    if draft.assignToWorkspaceEnabled {
+                        Picker("Workspace", selection: $draft.assignToWorkspace) {
                             ForEach(workspaceNames, id: \.self) { name in
                                 Text(name).tag(name)
                             }
@@ -287,21 +271,11 @@ struct AppRuleDetailView: View {
                 }
 
                 Section("Minimum Size (Layout Constraint)") {
-                    Toggle("Minimum Width", isOn: $minWidthEnabled)
-                        .onChange(of: minWidthEnabled) { _, enabled in
-                            rule.minWidth = enabled ? (rule.minWidth ?? 400) : nil
-                            controller.updateAppRules()
-                        }
+                    Toggle("Minimum Width", isOn: $draft.minWidthEnabled)
 
-                    if minWidthEnabled {
+                    if draft.minWidthEnabled {
                         HStack {
-                            TextField("Width", value: Binding(
-                                get: { rule.minWidth ?? 400 },
-                                set: {
-                                    rule.minWidth = $0
-                                    controller.updateAppRules()
-                                }
-                            ), format: .number)
+                            TextField("Width", value: $draft.minWidth, format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 100)
                             Text("px")
@@ -309,21 +283,11 @@ struct AppRuleDetailView: View {
                         }
                     }
 
-                    Toggle("Minimum Height", isOn: $minHeightEnabled)
-                        .onChange(of: minHeightEnabled) { _, enabled in
-                            rule.minHeight = enabled ? (rule.minHeight ?? 300) : nil
-                            controller.updateAppRules()
-                        }
+                    Toggle("Minimum Height", isOn: $draft.minHeightEnabled)
 
-                    if minHeightEnabled {
+                    if draft.minHeightEnabled {
                         HStack {
-                            TextField("Height", value: Binding(
-                                get: { rule.minHeight ?? 300 },
-                                set: {
-                                    rule.minHeight = $0
-                                    controller.updateAppRules()
-                                }
-                            ), format: .number)
+                            TextField("Height", value: $draft.minHeight, format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 100)
                             Text("px")
@@ -336,40 +300,20 @@ struct AppRuleDetailView: View {
                         .foregroundColor(.secondary)
                 }
 
-                if rule.hasAdvancedMatchers || controller.windowRuleEngine.invalidRegexMessagesByRuleId[rule.id] != nil {
-                    Section("Advanced Matchers") {
-                        Text("Advanced matchers are preserved but hidden in this compatibility editor during the admission rewrite rollout.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        if let appNameSubstring = rule.appNameSubstring, !appNameSubstring.isEmpty {
-                            LabeledContent("App Name Contains") { Text(appNameSubstring) }
-                        }
-                        if let titleSubstring = rule.titleSubstring, !titleSubstring.isEmpty {
-                            LabeledContent("Title Contains") { Text(titleSubstring) }
-                        }
-                        if let titleRegex = rule.titleRegex, !titleRegex.isEmpty {
-                            LabeledContent("Title Regex") {
-                                Text(titleRegex)
-                                    .font(.system(.body, design: .monospaced))
-                            }
-                        }
-                        if let axRole = rule.axRole, !axRole.isEmpty {
-                            LabeledContent("AX Role") { Text(axRole) }
-                        }
-                        if let axSubrole = rule.axSubrole, !axSubrole.isEmpty {
-                            LabeledContent("AX Subrole") { Text(axSubrole) }
-                        }
-                        if let regexError = controller.windowRuleEngine.invalidRegexMessagesByRuleId[rule.id] {
-                            Text("Stored title regex is invalid: \(regexError)")
-                                .font(.caption)
-                                .foregroundColor(.red)
-                        }
+                Section {
+                    DisclosureGroup("Advanced Matchers", isExpanded: $isAdvancedMatchersExpanded) {
+                        AdvancedMatchersEditor(
+                            draft: $draft,
+                            regexError: titleRegexError
+                        )
                     }
                 }
 
                 Section {
-                    FocusedWindowInspectorView(controller: controller)
+                    FocusedWindowInspectorView(
+                        controller: controller,
+                        onCreateRuleFromSnapshot: onCreateRuleFromSnapshot
+                    )
                 }
 
                 Section {
@@ -381,6 +325,22 @@ struct AppRuleDetailView: View {
             .formStyle(.grouped)
             .padding()
         }
+        .onChange(of: draft) { _, newValue in
+            rule = newValue.makeRule(id: rule.id)
+            controller.updateAppRules()
+        }
+    }
+
+    private var titleRegexError: String? {
+        guard draft.titleMatcherMode == .regex else { return nil }
+        return controller.windowRuleEngine.invalidRegexMessagesByRuleId[rule.id]
+            ?? AppRuleDraftValidation.titleRegexError(for: draft.titleRegex)
+    }
+
+    private func seedWorkspaceIfNeeded() {
+        if draft.assignToWorkspace.isEmpty, let first = workspaceNames.first {
+            draft.assignToWorkspace = first
+        }
     }
 }
 
@@ -390,41 +350,25 @@ struct AppRuleAddSheet: View {
     let onSave: (AppRule) -> Void
     let onCancel: () -> Void
 
-    @State private var rule = AppRule(bundleId: "")
-    @State private var bundleIdError: String?
-    @State private var workspaceEnabled = false
-    @State private var minWidthEnabled = false
-    @State private var minHeightEnabled = false
+    @State private var draft: AppRuleDraft
     @State private var runningApps: [RunningAppInfo] = []
     @State private var isPickerExpanded = true
+    @State private var isAdvancedMatchersExpanded: Bool
     @State private var selectedAppInfo: RunningAppInfo?
 
-    private var manageBinding: Binding<WindowRuleManageAction> {
-        Binding(
-            get: { rule.effectiveManageAction },
-            set: { newValue in
-                rule.manage = newValue == .auto ? nil : newValue
-            }
-        )
-    }
-
-    private var layoutBinding: Binding<WindowRuleLayoutAction> {
-        Binding(
-            get: { rule.effectiveLayoutAction },
-            set: { newValue in
-                rule.layout = newValue == .auto ? nil : newValue
-                rule.alwaysFloat = nil
-            }
-        )
-    }
-
-    private func textBinding(_ keyPath: WritableKeyPath<AppRule, String?>) -> Binding<String> {
-        Binding(
-            get: { rule[keyPath: keyPath] ?? "" },
-            set: { newValue in
-                rule[keyPath: keyPath] = newValue.isEmpty ? nil : newValue
-            }
-        )
+    init(
+        initialDraft: AppRuleDraft,
+        workspaceNames: [String],
+        controller: WMController,
+        onSave: @escaping (AppRule) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.workspaceNames = workspaceNames
+        self.controller = controller
+        self.onSave = onSave
+        self.onCancel = onCancel
+        _draft = State(initialValue: initialDraft)
+        _isAdvancedMatchersExpanded = State(initialValue: initialDraft.hasActiveAdvancedMatchers)
     }
 
     var body: some View {
@@ -434,11 +378,8 @@ struct AppRuleAddSheet: View {
 
             Form {
                 Section("Application") {
-                    TextField("Bundle ID", text: $rule.bundleId)
+                    TextField("Bundle ID", text: $draft.bundleId)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: rule.bundleId) { _, newValue in
-                            validateBundleId(newValue)
-                        }
                     if let error = bundleIdError {
                         Text(error)
                             .font(.caption)
@@ -456,7 +397,7 @@ struct AppRuleAddSheet: View {
                                     ForEach(runningApps) { app in
                                         RunningAppRow(
                                             app: app,
-                                            isSelected: rule.bundleId == app.bundleId,
+                                            isSelected: draft.bundleId == app.bundleId,
                                             onSelect: { selectApp(app) }
                                         )
                                     }
@@ -487,33 +428,30 @@ struct AppRuleAddSheet: View {
                 }
 
                 Section("Window Behavior") {
-                    Picker("Manage", selection: manageBinding) {
+                    Picker("Manage", selection: $draft.manageAction) {
                         ForEach(WindowRuleManageAction.allCases) { action in
                             Text(action.displayName).tag(action)
                         }
                     }
 
-                    Picker("Layout", selection: layoutBinding) {
+                    Picker("Layout", selection: $draft.layoutAction) {
                         ForEach(WindowRuleLayoutAction.allCases) { action in
                             Text(action.displayName).tag(action)
                         }
                     }
-                    .disabled(rule.effectiveManageAction == .off)
+                    .disabled(draft.manageAction == .off)
+                    .onChange(of: draft.layoutAction) { _, _ in
+                        draft.usesLegacyAlwaysFloat = false
+                    }
 
-                    Toggle("Assign to Workspace", isOn: $workspaceEnabled)
-                        .onChange(of: workspaceEnabled) { _, enabled in
-                            if !enabled {
-                                rule.assignToWorkspace = nil
-                            } else if rule.assignToWorkspace == nil, let first = workspaceNames.first {
-                                rule.assignToWorkspace = first
-                            }
+                    Toggle("Assign to Workspace", isOn: $draft.assignToWorkspaceEnabled)
+                        .onChange(of: draft.assignToWorkspaceEnabled) { _, enabled in
+                            guard enabled else { return }
+                            seedWorkspaceIfNeeded()
                         }
 
-                    if workspaceEnabled {
-                        Picker("Workspace", selection: Binding(
-                            get: { rule.assignToWorkspace ?? "" },
-                            set: { rule.assignToWorkspace = $0.isEmpty ? nil : $0 }
-                        )) {
+                    if draft.assignToWorkspaceEnabled {
+                        Picker("Workspace", selection: $draft.assignToWorkspace) {
                             ForEach(workspaceNames, id: \.self) { name in
                                 Text(name).tag(name)
                             }
@@ -529,17 +467,11 @@ struct AppRuleAddSheet: View {
                 }
 
                 Section("Minimum Size (Layout Constraint)") {
-                    Toggle("Minimum Width", isOn: $minWidthEnabled)
-                        .onChange(of: minWidthEnabled) { _, enabled in
-                            rule.minWidth = enabled ? (rule.minWidth ?? 400) : nil
-                        }
+                    Toggle("Minimum Width", isOn: $draft.minWidthEnabled)
 
-                    if minWidthEnabled {
+                    if draft.minWidthEnabled {
                         HStack {
-                            TextField("Width", value: Binding(
-                                get: { rule.minWidth ?? 400 },
-                                set: { rule.minWidth = $0 }
-                            ), format: .number)
+                            TextField("Width", value: $draft.minWidth, format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 100)
                             Text("px")
@@ -547,17 +479,11 @@ struct AppRuleAddSheet: View {
                         }
                     }
 
-                    Toggle("Minimum Height", isOn: $minHeightEnabled)
-                        .onChange(of: minHeightEnabled) { _, enabled in
-                            rule.minHeight = enabled ? (rule.minHeight ?? 300) : nil
-                        }
+                    Toggle("Minimum Height", isOn: $draft.minHeightEnabled)
 
-                    if minHeightEnabled {
+                    if draft.minHeightEnabled {
                         HStack {
-                            TextField("Height", value: Binding(
-                                get: { rule.minHeight ?? 300 },
-                                set: { rule.minHeight = $0 }
-                            ), format: .number)
+                            TextField("Height", value: $draft.minHeight, format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 100)
                             Text("px")
@@ -569,6 +495,15 @@ struct AppRuleAddSheet: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+
+                Section {
+                    DisclosureGroup("Advanced Matchers", isExpanded: $isAdvancedMatchersExpanded) {
+                        AdvancedMatchersEditor(
+                            draft: $draft,
+                            regexError: titleRegexError
+                        )
+                    }
+                }
             }
             .formStyle(.grouped)
 
@@ -579,53 +514,113 @@ struct AppRuleAddSheet: View {
                 Spacer()
 
                 Button("Add") {
-                    onSave(rule)
+                    onSave(draft.makeRule())
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!isValid)
             }
         }
         .padding()
-        .frame(minWidth: 400)
+        .frame(minWidth: 440)
+    }
+
+    private var bundleIdError: String? {
+        AppRuleDraftValidation.bundleIdError(for: draft.bundleId)
+    }
+
+    private var titleRegexError: String? {
+        guard draft.titleMatcherMode == .regex else { return nil }
+        return AppRuleDraftValidation.titleRegexError(for: draft.titleRegex)
     }
 
     private var isValid: Bool {
-        !rule.bundleId.isEmpty && bundleIdError == nil && rule.hasAnyRule
+        let trimmedBundleId = draft.bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmedBundleId.isEmpty &&
+            bundleIdError == nil &&
+            titleRegexError == nil &&
+            draft.hasAnyRule
     }
 
-    private func validateBundleId(_ bundleId: String) {
-        if bundleId.isEmpty {
-            bundleIdError = nil
-            return
+    private func seedWorkspaceIfNeeded() {
+        if draft.assignToWorkspace.isEmpty, let first = workspaceNames.first {
+            draft.assignToWorkspace = first
         }
-
-        let regex = try? NSRegularExpression(pattern: "^[a-zA-Z][a-zA-Z0-9-]*(\\.[a-zA-Z0-9-]+)+$")
-        let range = NSRange(bundleId.startIndex..., in: bundleId)
-        if regex?.firstMatch(in: bundleId, range: range) == nil {
-            bundleIdError = "Invalid bundle ID format"
-            return
-        }
-
-        bundleIdError = nil
     }
 
     private func selectApp(_ app: RunningAppInfo) {
-        rule.bundleId = app.bundleId
+        draft.bundleId = app.bundleId
         selectedAppInfo = app
         isPickerExpanded = false
-        validateBundleId(app.bundleId)
     }
 
     private func useCurrentWindowSize(_ size: CGSize) {
-        rule.minWidth = size.width
-        rule.minHeight = size.height
-        minWidthEnabled = true
-        minHeightEnabled = true
+        draft.minWidth = size.width
+        draft.minHeight = size.height
+        draft.minWidthEnabled = true
+        draft.minHeightEnabled = true
+    }
+}
+
+struct AdvancedMatchersEditor: View {
+    @Binding var draft: AppRuleDraft
+    let regexError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Use advanced matchers when bundle-level rules are too broad.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Toggle("App Name Contains", isOn: $draft.appNameMatcherEnabled)
+            if draft.appNameMatcherEnabled {
+                TextField("e.g. Preview", text: $draft.appNameSubstring)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            Picker("Title Match", selection: $draft.titleMatcherMode) {
+                ForEach(TitleMatcherMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+
+            switch draft.titleMatcherMode {
+            case .none:
+                EmptyView()
+            case .substring:
+                TextField("Title contains", text: $draft.titleSubstring)
+                    .textFieldStyle(.roundedBorder)
+            case .regex:
+                TextField("Title regex", text: $draft.titleRegex)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                if let regexError {
+                    Text("Title regex is invalid: \(regexError)")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+
+            Toggle("AX Role", isOn: $draft.axRoleEnabled)
+            if draft.axRoleEnabled {
+                TextField("e.g. AXWindow", text: $draft.axRole)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+            }
+
+            Toggle("AX Subrole", isOn: $draft.axSubroleEnabled)
+            if draft.axSubroleEnabled {
+                TextField("e.g. AXStandardWindow", text: $draft.axSubrole)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
 struct FocusedWindowInspectorView: View {
     let controller: WMController
+    let onCreateRuleFromSnapshot: (WindowDecisionDebugSnapshot) -> Void
 
     @State private var snapshot: WindowDecisionDebugSnapshot?
 
@@ -650,10 +645,18 @@ struct FocusedWindowInspectorView: View {
                     }
                     .frame(minHeight: 140, maxHeight: 220)
 
-                    Button("Copy Debug Dump") {
-                        controller.copyDebugDump(snapshot)
+                    HStack {
+                        Button("New Rule from Focused Window") {
+                            onCreateRuleFromSnapshot(snapshot)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(AppRuleDraft.guided(from: snapshot) == nil)
+
+                        Button("Copy Debug Dump") {
+                            controller.copyDebugDump(snapshot)
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
                 } else {
                     Text("No focused window is available for inspection.")
                         .font(.caption)

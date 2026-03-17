@@ -701,10 +701,6 @@ final class AXEventHandler: CGSEventDelegate {
             pid: token.pid,
             appFullscreen: appFullscreen
         )
-        controller.logWindowDecision(
-            event: evaluation.decision.managesWindow ? "create-admit" : "create-reject",
-            evaluation: evaluation
-        )
         guard evaluation.decision.managesWindow else { return nil }
 
         let workspaceId = controller.resolveWorkspaceForNewWindow(
