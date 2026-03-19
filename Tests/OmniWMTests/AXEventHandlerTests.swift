@@ -341,6 +341,46 @@ private func waitUntilAXEventTest(
         #expect(controller.workspaceManager.isAppFullscreenActive == false)
     }
 
+    @Test @MainActor func ownedUtilityWindowCreateIsSkipped() async {
+        let controller = makeAXEventTestController()
+        let registry = OwnedWindowRegistry.shared
+        let ownedWindow = makeAXEventOwnedWindow()
+        var subscriptions: [[UInt32]] = []
+
+        registry.resetForTests()
+        registry.register(ownedWindow)
+        defer {
+            registry.unregister(ownedWindow)
+            ownedWindow.close()
+            registry.resetForTests()
+        }
+
+        let ownedWindowId = UInt32(ownedWindow.windowNumber)
+        controller.axEventHandler.windowInfoProvider = { windowId in
+            WindowServerInfo(id: windowId, pid: getpid(), level: 0, frame: .zero)
+        }
+        controller.axEventHandler.axWindowRefProvider = { windowId, _ in
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: Int(windowId))
+        }
+        controller.axEventHandler.windowFactsProvider = { _, _ in
+            makeAXEventWindowRuleFacts(bundleId: Bundle.main.bundleIdentifier ?? "com.example.omniwm")
+        }
+        controller.axEventHandler.windowSubscriptionHandler = { windowIds in
+            subscriptions.append(windowIds)
+        }
+        controller.layoutRefreshController.resetDebugState()
+
+        controller.axEventHandler.cgsEventObserver(
+            CGSEventObserver.shared,
+            didReceive: .created(windowId: ownedWindowId, spaceId: 0)
+        )
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(controller.workspaceManager.entry(forPid: getpid(), windowId: Int(ownedWindowId)) == nil)
+        #expect(subscriptions.isEmpty)
+        #expect(controller.layoutRefreshController.debugCounters.relayoutExecutions == 0)
+    }
+
     @Test @MainActor func fullscreenManagedActivationSuspendsManagedWindowWithoutRelayout() async {
         let controller = makeAXEventTestController()
         controller.hasStartedServices = true

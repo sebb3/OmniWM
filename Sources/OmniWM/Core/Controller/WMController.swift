@@ -1250,6 +1250,10 @@ extension WMController {
         ownedWindowRegistry.hasVisibleWindow
     }
 
+    func isOwnedWindow(windowNumber: Int) -> Bool {
+        ownedWindowRegistry.contains(windowNumber: windowNumber)
+    }
+
     var shouldSuppressManagedFocusRecovery: Bool {
         workspaceManager.isNonManagedFocusActive && hasFrontmostOwnedWindow
     }

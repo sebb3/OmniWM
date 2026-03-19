@@ -1246,6 +1246,14 @@ final class WorkspaceManager {
         windows.windows(in: workspace, mode: .tiling)
     }
 
+    func barVisibleEntries(in workspace: WorkspaceDescriptor.ID) -> [WindowModel.Entry] {
+        tiledEntries(in: workspace)
+    }
+
+    func hasTiledOccupancy(in workspace: WorkspaceDescriptor.ID) -> Bool {
+        !tiledEntries(in: workspace).isEmpty
+    }
+
     func floatingEntries(in workspace: WorkspaceDescriptor.ID) -> [WindowModel.Entry] {
         windows.windows(in: workspace, mode: .floating)
     }

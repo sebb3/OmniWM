@@ -716,7 +716,10 @@ final class AXEventHandler: CGSEventDelegate {
         guard let token = windowInfo.map({ WindowToken(pid: pid_t($0.pid), windowId: Int(windowId)) }) else { return nil }
         if controller.workspaceManager.entry(for: token) != nil { return nil }
 
-        subscribeToWindows([windowId])
+        let ownedWindow = controller.isOwnedWindow(windowNumber: Int(windowId))
+        if !ownedWindow {
+            subscribeToWindows([windowId])
+        }
 
         guard let axRef = resolveAXWindowRef(windowId: windowId, pid: token.pid) else { return nil }
 
@@ -728,12 +731,14 @@ final class AXEventHandler: CGSEventDelegate {
             pid: token.pid,
             appFullscreen: appFullscreen
         )
-        guard let trackedMode = controller.trackedModeForLifecycle(
+        let trackedMode = controller.trackedModeForLifecycle(
             decision: evaluation.decision,
             existingEntry: nil
-        ) else {
-            return nil
-        }
+        )
+
+        if ownedWindow { return nil }
+
+        guard let trackedMode else { return nil }
 
         let workspaceId = controller.resolveWorkspaceForNewWindow(
             workspaceName: evaluation.decision.workspaceName,

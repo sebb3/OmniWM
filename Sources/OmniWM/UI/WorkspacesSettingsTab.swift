@@ -1,5 +1,36 @@
 import SwiftUI
 
+@MainActor
+enum WorkspaceConfigurationDeletePolicy {
+    static func canDelete(
+        _ config: WorkspaceConfiguration,
+        settings: SettingsStore,
+        workspaceManager: WorkspaceManager
+    ) -> Bool {
+        if settings.workspaceConfigurations.count <= 1 {
+            return false
+        }
+        guard let workspaceId = workspaceManager.workspaceId(named: config.name) else { return true }
+        return workspaceManager.entries(in: workspaceId).isEmpty
+    }
+
+    static func deleteHelp(
+        _ config: WorkspaceConfiguration,
+        settings: SettingsStore,
+        workspaceManager: WorkspaceManager
+    ) -> String {
+        if settings.workspaceConfigurations.count <= 1 {
+            return "OmniWM requires at least one configured workspace"
+        }
+        guard let workspaceId = workspaceManager.workspaceId(named: config.name) else {
+            return "Delete workspace"
+        }
+        return workspaceManager.entries(in: workspaceId).isEmpty ?
+            "Delete workspace" :
+            "Move or close all windows in this workspace before deleting it"
+    }
+}
+
 struct WorkspacesSettingsTab: View {
     @Bindable var settings: SettingsStore
     @Bindable var controller: WMController
@@ -102,23 +133,19 @@ struct WorkspacesSettingsTab: View {
     }
 
     private func canDeleteConfiguration(_ config: WorkspaceConfiguration) -> Bool {
-        if settings.workspaceConfigurations.count <= 1 {
-            return false
-        }
-        guard let workspaceId = controller.workspaceManager.workspaceId(named: config.name) else { return true }
-        return controller.workspaceManager.entries(in: workspaceId).isEmpty
+        WorkspaceConfigurationDeletePolicy.canDelete(
+            config,
+            settings: settings,
+            workspaceManager: controller.workspaceManager
+        )
     }
 
     private func deleteConfigurationHelp(_ config: WorkspaceConfiguration) -> String {
-        if settings.workspaceConfigurations.count <= 1 {
-            return "OmniWM requires at least one configured workspace"
-        }
-        guard let workspaceId = controller.workspaceManager.workspaceId(named: config.name) else {
-            return "Delete workspace"
-        }
-        return controller.workspaceManager.entries(in: workspaceId).isEmpty ?
-            "Delete workspace" :
-            "Move or close all windows in this workspace before deleting it"
+        WorkspaceConfigurationDeletePolicy.deleteHelp(
+            config,
+            settings: settings,
+            workspaceManager: controller.workspaceManager
+        )
     }
 
     private func addConfiguration(_ config: WorkspaceConfiguration) {

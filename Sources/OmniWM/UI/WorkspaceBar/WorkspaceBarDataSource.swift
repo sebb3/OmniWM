@@ -9,6 +9,12 @@ enum WorkspaceBarDataSource {
         let secondary: Int
     }
 
+    private struct WorkspaceSnapshot {
+        let workspace: WorkspaceDescriptor
+        let barEntries: [WindowModel.Entry]
+        let hasTiledOccupancy: Bool
+    }
+
     static func workspaceBarItems(
         for monitor: Monitor,
         deduplicate: Bool,
@@ -19,18 +25,23 @@ enum WorkspaceBarDataSource {
         focusedToken: WindowToken?,
         settings: SettingsStore
     ) -> [WorkspaceBarItem] {
-        var workspaces = workspaceManager.workspaces(on: monitor.id)
+        var workspaces = workspaceManager.workspaces(on: monitor.id).map { workspace in
+            return WorkspaceSnapshot(
+                workspace: workspace,
+                barEntries: workspaceManager.barVisibleEntries(in: workspace.id),
+                hasTiledOccupancy: workspaceManager.hasTiledOccupancy(in: workspace.id)
+            )
+        }
 
         if hideEmpty {
-            workspaces = workspaces.filter { !workspaceManager.entries(in: $0.id).isEmpty }
+            workspaces = workspaces.filter(\.hasTiledOccupancy)
         }
 
         let activeWorkspaceId = workspaceManager.activeWorkspace(on: monitor.id)?.id
 
-        return workspaces.map { workspace in
-            let entries = workspaceManager.entries(in: workspace.id)
-            let orderMap = orderMap(for: workspace.id, engine: niriEngine)
-            let orderedEntries = sortEntries(entries, orderMap: orderMap)
+        return workspaces.map { snapshot in
+            let orderMap = orderMap(for: snapshot.workspace.id, engine: niriEngine)
+            let orderedEntries = sortEntries(snapshot.barEntries, orderMap: orderMap)
             let useLayoutOrder = !(orderMap?.isEmpty ?? true)
             let windows: [WorkspaceBarWindowItem] = if deduplicate {
                 createDedupedWindowItems(
@@ -48,9 +59,9 @@ enum WorkspaceBarDataSource {
             }
 
             return WorkspaceBarItem(
-                id: workspace.id,
-                name: settings.displayName(for: workspace.name),
-                isFocused: workspace.id == activeWorkspaceId,
+                id: snapshot.workspace.id,
+                name: settings.displayName(for: snapshot.workspace.name),
+                isFocused: snapshot.workspace.id == activeWorkspaceId,
                 windows: windows
             )
         }

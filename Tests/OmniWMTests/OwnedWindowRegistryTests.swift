@@ -57,6 +57,9 @@ private func closeOwnedUtilityWindowsForTests() async {
         #expect(registry.contains(window: settingsWindow))
         #expect(registry.contains(window: appRulesWindow))
         #expect(registry.contains(window: sponsorsWindow))
+        #expect(registry.contains(windowNumber: settingsWindow.windowNumber))
+        #expect(registry.contains(windowNumber: appRulesWindow.windowNumber))
+        #expect(registry.contains(windowNumber: sponsorsWindow.windowNumber))
 
         settingsWindow.close()
         appRulesWindow.close()
@@ -66,5 +69,8 @@ private func closeOwnedUtilityWindowsForTests() async {
         #expect(registry.contains(window: settingsWindow) == false)
         #expect(registry.contains(window: appRulesWindow) == false)
         #expect(registry.contains(window: sponsorsWindow) == false)
+        #expect(registry.contains(windowNumber: settingsWindow.windowNumber) == false)
+        #expect(registry.contains(windowNumber: appRulesWindow.windowNumber) == false)
+        #expect(registry.contains(windowNumber: sponsorsWindow.windowNumber) == false)
     }
 }
