@@ -80,7 +80,8 @@ private func makeAXEventWindowRuleFacts(
     hasMinimizeButton: Bool = true,
     appPolicy: NSApplication.ActivationPolicy? = .regular,
     attributeFetchSucceeded: Bool = true,
-    sizeConstraints: WindowSizeConstraints? = nil
+    sizeConstraints: WindowSizeConstraints? = nil,
+    windowServer: WindowServerInfo? = nil
 ) -> WindowRuleFacts {
     WindowRuleFacts(
         appName: appName,
@@ -97,7 +98,8 @@ private func makeAXEventWindowRuleFacts(
             bundleId: bundleId,
             attributeFetchSucceeded: attributeFetchSucceeded
         ),
-        sizeConstraints: sizeConstraints
+        sizeConstraints: sizeConstraints,
+        windowServer: windowServer
     )
 }
 
@@ -1206,6 +1208,100 @@ private func waitUntilAXEventTest(
         #expect(entry.ruleEffects.minWidth == 880)
         #expect(entry.ruleEffects.minHeight == 640)
         #expect(relayoutReasons == [.axWindowCreated])
+    }
+
+    @Test @MainActor func cleanShotCaptureOverlayCreateIsIgnoredAsUnmanaged() async {
+        let controller = makeAXEventTestController()
+        let pid: pid_t = 5821
+        var subscriptions: [[UInt32]] = []
+        var relayoutReasons: [RefreshReason] = []
+
+        controller.appInfoCache.storeInfoForTests(
+            pid: pid,
+            bundleId: WindowRuleEngine.cleanShotBundleId,
+            activationPolicy: .accessory
+        )
+        controller.axEventHandler.bundleIdProvider = { _ in
+            WindowRuleEngine.cleanShotBundleId
+        }
+        controller.axEventHandler.windowInfoProvider = { windowId in
+            guard windowId == 824 else { return nil }
+            return WindowServerInfo(id: windowId, pid: pid, level: 103, frame: .zero)
+        }
+        controller.axEventHandler.axWindowRefProvider = { windowId, _ in
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: Int(windowId))
+        }
+        controller.axEventHandler.windowFactsProvider = { _, _ in
+            makeAXEventWindowRuleFacts(
+                bundleId: WindowRuleEngine.cleanShotBundleId,
+                subrole: kAXStandardWindowSubrole as String,
+                appPolicy: .accessory
+            )
+        }
+        controller.axEventHandler.windowSubscriptionHandler = { windowIds in
+            subscriptions.append(windowIds)
+        }
+        controller.layoutRefreshController.resetDebugState()
+        controller.layoutRefreshController.debugHooks.onRelayout = { reason, _ in
+            relayoutReasons.append(reason)
+            return true
+        }
+
+        controller.axEventHandler.cgsEventObserver(
+            CGSEventObserver.shared,
+            didReceive: .created(windowId: 824, spaceId: 0)
+        )
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(controller.workspaceManager.entry(forPid: pid, windowId: 824) == nil)
+        #expect(relayoutReasons.isEmpty)
+        #expect(subscriptions == [[824]])
+    }
+
+    @Test @MainActor func reevaluateWindowRulesRemovesTrackedCleanShotCaptureOverlay() async {
+        let controller = makeAXEventTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let pid: pid_t = 5822
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 825),
+            pid: pid,
+            windowId: 825,
+            to: workspaceId
+        )
+        var relayoutReasons: [RefreshReason] = []
+
+        controller.appInfoCache.storeInfoForTests(
+            pid: pid,
+            bundleId: WindowRuleEngine.cleanShotBundleId,
+            activationPolicy: .accessory
+        )
+        controller.axEventHandler.windowInfoProvider = { windowId in
+            guard windowId == 825 else { return nil }
+            return WindowServerInfo(id: windowId, pid: pid, level: 103, frame: .zero)
+        }
+        controller.axEventHandler.windowFactsProvider = { _, _ in
+            makeAXEventWindowRuleFacts(
+                bundleId: WindowRuleEngine.cleanShotBundleId,
+                subrole: kAXStandardWindowSubrole as String,
+                appPolicy: .accessory
+            )
+        }
+        controller.layoutRefreshController.resetDebugState()
+        controller.layoutRefreshController.debugHooks.onRelayout = { reason, _ in
+            relayoutReasons.append(reason)
+            return true
+        }
+
+        let changed = await controller.reevaluateWindowRules(for: [.window(token)])
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(changed)
+        #expect(controller.workspaceManager.entry(for: token) == nil)
+        #expect(relayoutReasons == [.windowRuleReevaluation])
     }
 
     @Test @MainActor func appHideAndUnhideUseVisibilityRouteAndPreserveModelState() async {

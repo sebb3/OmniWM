@@ -713,10 +713,10 @@ final class AXEventHandler: CGSEventDelegate {
         windowInfo: WindowServerInfo?
     ) -> PreparedCreate? {
         guard let controller else { return nil }
+        let ownedWindow = controller.isOwnedWindow(windowNumber: Int(windowId))
         guard let token = windowInfo.map({ WindowToken(pid: pid_t($0.pid), windowId: Int(windowId)) }) else { return nil }
         if controller.workspaceManager.entry(for: token) != nil { return nil }
 
-        let ownedWindow = controller.isOwnedWindow(windowNumber: Int(windowId))
         if !ownedWindow {
             subscribeToWindows([windowId])
         }
@@ -729,8 +729,10 @@ final class AXEventHandler: CGSEventDelegate {
         let evaluation = controller.evaluateWindowDisposition(
             axRef: axRef,
             pid: token.pid,
-            appFullscreen: appFullscreen
+            appFullscreen: appFullscreen,
+            windowInfo: windowInfo
         )
+
         let trackedMode = controller.trackedModeForLifecycle(
             decision: evaluation.decision,
             existingEntry: nil

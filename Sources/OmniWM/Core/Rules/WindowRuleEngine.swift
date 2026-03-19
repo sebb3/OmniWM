@@ -63,6 +63,7 @@ struct WindowRuleFacts: Equatable, Sendable {
     let appName: String?
     let ax: AXWindowFacts
     let sizeConstraints: WindowSizeConstraints?
+    let windowServer: WindowServerInfo?
 }
 
 enum WindowRuleReevaluationTarget: Hashable, Sendable {
@@ -131,6 +132,9 @@ struct WindowDecisionDebugSnapshot: Equatable, Sendable {
 
 @MainActor
 final class WindowRuleEngine {
+    static let cleanShotBundleId = "pl.maketheweb.cleanshotx"
+    private static let cleanShotRecordingOverlayRuleName = "cleanShotRecordingOverlay"
+
     private enum RuleSource {
         case user
         case builtIn(String)
@@ -275,6 +279,14 @@ final class WindowRuleEngine {
             return builtInDecision
         }
 
+        if let cleanShotDecision = cleanShotRecordingOverlayDecision(
+            for: facts,
+            workspaceName: workspaceName,
+            effects: effects
+        ) {
+            return cleanShotDecision
+        }
+
         if appFullscreen {
             return WindowDecision(
                 disposition: .managed,
@@ -308,6 +320,27 @@ final class WindowRuleEngine {
             workspaceName: workspaceName,
             ruleEffects: effects,
             heuristicReasons: heuristic.reasons
+        )
+    }
+
+    private func cleanShotRecordingOverlayDecision(
+        for facts: WindowRuleFacts,
+        workspaceName: String?,
+        effects: ManagedWindowRuleEffects
+    ) -> WindowDecision? {
+        guard facts.ax.bundleId == Self.cleanShotBundleId,
+              facts.ax.subrole == (kAXStandardWindowSubrole as String),
+              facts.windowServer?.level == 103
+        else {
+            return nil
+        }
+
+        return WindowDecision(
+            disposition: .unmanaged,
+            source: .builtInRule(Self.cleanShotRecordingOverlayRuleName),
+            workspaceName: workspaceName,
+            ruleEffects: effects,
+            heuristicReasons: []
         )
     }
 

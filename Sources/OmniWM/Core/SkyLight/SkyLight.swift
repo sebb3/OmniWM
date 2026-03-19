@@ -614,7 +614,7 @@ enum CGSEventType: UInt32 {
     case all = 0xFFFF_FFFF
 }
 
-struct WindowServerInfo {
+struct WindowServerInfo: Equatable, Sendable {
     let id: UInt32
     let pid: Int32
     let level: Int32

@@ -1023,12 +1023,13 @@ final class WMController {
         axRef: AXWindowRef,
         pid: pid_t,
         appFullscreen: Bool? = nil,
-        applyingManualOverride: Bool = true
+        applyingManualOverride: Bool = true,
+        windowInfo: WindowServerInfo? = nil
     ) -> WindowDecisionEvaluation {
         let token = WindowToken(pid: pid, windowId: axRef.windowId)
         let sizeConstraints = evaluateSizeConstraints(for: token, axRef: axRef)
         let appInfo = resolvedAppInfo(for: pid)
-        let facts = axEventHandler.windowFactsProvider?(axRef, pid) ?? WindowRuleFacts(
+        let baseFacts = axEventHandler.windowFactsProvider?(axRef, pid) ?? WindowRuleFacts(
             appName: appInfo?.name,
             ax: AXWindowService.collectWindowFacts(
                 axRef,
@@ -1036,7 +1037,19 @@ final class WMController {
                 bundleId: appInfo?.bundleId,
                 includeTitle: windowRuleEngine.requiresTitle(for: appInfo?.bundleId)
             ),
-            sizeConstraints: sizeConstraints
+            sizeConstraints: sizeConstraints,
+            windowServer: nil
+        )
+        let resolvedWindowInfo = baseFacts.windowServer ?? resolveWindowServerInfoForDisposition(
+            token: token,
+            bundleId: baseFacts.ax.bundleId ?? appInfo?.bundleId,
+            preferredWindowInfo: windowInfo
+        )
+        let facts = WindowRuleFacts(
+            appName: baseFacts.appName,
+            ax: baseFacts.ax,
+            sizeConstraints: baseFacts.sizeConstraints,
+            windowServer: resolvedWindowInfo
         )
         let fullscreen = appFullscreen ?? (axEventHandler.isFullscreenProvider?(axRef) ?? AXWindowService.isFullscreen(axRef))
         let manualOverride = workspaceManager.manualLayoutOverride(for: token)
@@ -1055,6 +1068,24 @@ final class WMController {
             appFullscreen: fullscreen,
             manualOverride: manualOverride
         )
+    }
+
+    private func resolveWindowServerInfoForDisposition(
+        token: WindowToken,
+        bundleId: String?,
+        preferredWindowInfo: WindowServerInfo?
+    ) -> WindowServerInfo? {
+        if let preferredWindowInfo {
+            return preferredWindowInfo
+        }
+
+        guard bundleId == WindowRuleEngine.cleanShotBundleId,
+              let windowId = UInt32(exactly: token.windowId)
+        else {
+            return nil
+        }
+
+        return axEventHandler.windowInfoProvider?(windowId) ?? SkyLight.shared.queryWindowInfo(windowId)
     }
 
     func decideWindowDisposition(

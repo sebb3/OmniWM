@@ -37,7 +37,8 @@ private func makeRefreshTestWindowFacts(
     bundleId: String = "com.example.refresh",
     title: String? = nil,
     attributeFetchSucceeded: Bool = true,
-    sizeConstraints: WindowSizeConstraints? = nil
+    sizeConstraints: WindowSizeConstraints? = nil,
+    windowServer: WindowServerInfo? = nil
 ) -> WindowRuleFacts {
     WindowRuleFacts(
         appName: "Refresh Test App",
@@ -54,7 +55,8 @@ private func makeRefreshTestWindowFacts(
             bundleId: bundleId,
             attributeFetchSucceeded: attributeFetchSucceeded
         ),
-        sizeConstraints: sizeConstraints
+        sizeConstraints: sizeConstraints,
+        windowServer: windowServer
     )
 }
 
