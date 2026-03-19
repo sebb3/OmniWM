@@ -105,7 +105,40 @@ private func setScratchpadTestFrame(
 
         #expect(controller.workspaceManager.scratchpadToken() == nil)
         #expect(controller.workspaceManager.hiddenState(for: token) == nil)
-        #expect(controller.workspaceManager.windowMode(for: token) == .floating)
+        #expect(controller.workspaceManager.windowMode(for: token) == .tiling)
+        #expect(controller.workspaceManager.manualLayoutOverride(for: token) == .forceTile)
+    }
+
+    @Test @MainActor func assignFocusedWindowToScratchpadUnassignsVisibleFloatingWindowBackToTiling() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or workspace for floating scratchpad unassign test")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: 725),
+            pid: 725,
+            windowId: 725,
+            to: workspaceId,
+            mode: .floating
+        )
+        let frame = CGRect(x: 260, y: 190, width: 540, height: 360)
+        setScratchpadTestFrame(on: controller, token: token, frame: frame)
+
+        _ = controller.workspaceManager.setManagedFocus(token, in: workspaceId, onMonitor: monitor.id)
+        controller.assignFocusedWindowToScratchpad()
+        controller.toggleScratchpadWindow()
+        _ = controller.workspaceManager.setManagedFocus(token, in: workspaceId, onMonitor: monitor.id)
+
+        controller.assignFocusedWindowToScratchpad()
+
+        #expect(controller.workspaceManager.scratchpadToken() == nil)
+        #expect(controller.workspaceManager.hiddenState(for: token) == nil)
+        #expect(controller.workspaceManager.windowMode(for: token) == .tiling)
+        #expect(controller.workspaceManager.manualLayoutOverride(for: token) == .forceTile)
     }
 
     @Test @MainActor func toggleScratchpadWindowSummonsToCurrentWorkspaceAndMonitor() {

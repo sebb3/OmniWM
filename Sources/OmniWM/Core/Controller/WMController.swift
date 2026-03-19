@@ -1249,27 +1249,7 @@ final class WMController {
             nextOverride = entry.mode == .tiling ? .forceFloat : .forceTile
         }
 
-        workspaceManager.setManualLayoutOverride(nextOverride, for: token)
-        let evaluation = evaluateWindowDisposition(
-            axRef: entry.axRef,
-            pid: token.pid
-        )
-        guard let trackedMode = trackedModeForLifecycle(
-            decision: evaluation.decision,
-            existingEntry: entry
-        ) else {
-            _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
-            layoutRefreshController.requestRelayout(reason: .windowRuleReevaluation)
-            return
-        }
-
-        _ = transitionWindowMode(
-            for: token,
-            to: trackedMode,
-            preferredMonitor: monitorForInteraction(),
-            applyFloatingFrame: true
-        )
-        layoutRefreshController.requestRelayout(reason: .windowRuleReevaluation)
+        applyManagedWindowOverride(nextOverride, for: token, entry: entry)
     }
 
     func assignFocusedWindowToScratchpad() {
@@ -1283,6 +1263,7 @@ final class WMController {
         if workspaceManager.isScratchpadToken(token) {
             guard !workspaceManager.isHiddenInCorner(token) else { return }
             _ = workspaceManager.clearScratchpadIfMatches(token)
+            applyManagedWindowOverride(.forceTile, for: token, entry: entry)
             return
         }
 
@@ -1313,6 +1294,34 @@ final class WMController {
         if transitionedFromTiling {
             layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
         }
+    }
+
+    private func applyManagedWindowOverride(
+        _ override: ManualWindowOverride?,
+        for token: WindowToken,
+        entry: WindowModel.Entry
+    ) {
+        workspaceManager.setManualLayoutOverride(override, for: token)
+        let evaluation = evaluateWindowDisposition(
+            axRef: entry.axRef,
+            pid: token.pid
+        )
+        guard let trackedMode = trackedModeForLifecycle(
+            decision: evaluation.decision,
+            existingEntry: entry
+        ) else {
+            _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+            layoutRefreshController.requestRelayout(reason: .windowRuleReevaluation)
+            return
+        }
+
+        _ = transitionWindowMode(
+            for: token,
+            to: trackedMode,
+            preferredMonitor: monitorForInteraction(),
+            applyFloatingFrame: true
+        )
+        layoutRefreshController.requestRelayout(reason: .windowRuleReevaluation)
     }
 
     func toggleScratchpadWindow() {
