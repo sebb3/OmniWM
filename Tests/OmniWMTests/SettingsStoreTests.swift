@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import ApplicationServices
 import Carbon
@@ -1191,6 +1192,32 @@ private func makeSettingsTestMonitor(
         #expect(imported.quakeTerminalMonitorMode == .focusedWindow)
         #expect(imported.quakeTerminalUseCustomFrame == true)
         #expect(imported.quakeTerminalCustomFrame == CGRect(x: 10, y: 20, width: 1200, height: 700))
+    }
+}
+
+@Suite(.serialized) @MainActor struct SettingsStoreAppearanceImportTests {
+    @Test func importSettingsApplyingToControllerUsesSharedAppearancePath() throws {
+        let exportURL = makeTestSettingsURL()
+        defer { try? FileManager.default.removeItem(at: exportURL) }
+
+        let application = NSApplication.shared
+        let originalAppearance = application.appearance
+        defer { application.appearance = originalAppearance }
+
+        let exportSource = SettingsStore(defaults: makeTestDefaults())
+        exportSource.hotkeysEnabled = false
+        exportSource.workspaceBarEnabled = false
+        exportSource.appearanceMode = .light
+        try exportSource.exportSettings(to: exportURL, incrementalOnly: false)
+
+        let controller = makeLayoutPlanTestController()
+        defer { controller.setEnabled(false) }
+
+        application.appearance = NSAppearance(named: .darkAqua)
+        try controller.settings.importSettings(from: exportURL, applyingTo: controller)
+
+        #expect(controller.settings.appearanceMode == .light)
+        #expect(application.appearance?.name == .aqua)
     }
 }
 

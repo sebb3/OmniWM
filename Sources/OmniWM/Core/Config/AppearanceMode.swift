@@ -17,11 +17,11 @@ enum AppearanceMode: String, CaseIterable, Codable {
     func apply() {
         switch self {
         case .automatic:
-            NSApp.appearance = nil
+            NSApplication.shared.appearance = nil
         case .light:
-            NSApp.appearance = NSAppearance(named: .aqua)
+            NSApplication.shared.appearance = NSAppearance(named: .aqua)
         case .dark:
-            NSApp.appearance = NSAppearance(named: .darkAqua)
+            NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
         }
     }
 }

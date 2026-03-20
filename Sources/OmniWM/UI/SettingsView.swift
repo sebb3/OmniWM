@@ -33,8 +33,8 @@ struct GeneralSettingsTab: View {
                         Text(mode.displayName).tag(mode)
                     }
                 }
-                .onChange(of: settings.appearanceMode) { _, newValue in
-                    newValue.apply()
+                .onChange(of: settings.appearanceMode) { _, _ in
+                    controller.applyCurrentAppearanceMode()
                 }
 
                 Text("Controls the appearance of menus and workspace bar")

@@ -209,6 +209,11 @@ final class WorkspaceBarManager {
         let screen = screenProvider(monitor.displayId)
         panel.targetScreen = screen
         panel.contentView = hostingView
+        applyCurrentAppearance(
+            to: panel,
+            hostingView: hostingView,
+            measurementView: measurementView
+        )
         applySettingsToPanel(panel, resolved: resolved)
 
         let instance = MonitorBarInstance(
@@ -252,6 +257,11 @@ final class WorkspaceBarManager {
         let resolved = settings.resolvedBarSettings(for: monitor)
         let snapshot = makeSnapshot(for: monitor, resolved: resolved)
         instance.model.snapshot = snapshot
+        applyCurrentAppearance(
+            to: instance.panel,
+            hostingView: instance.hostingView,
+            measurementView: instance.measurementView
+        )
         applySettingsToPanel(instance.panel, resolved: resolved)
         updateBarFrameAndPosition(
             for: monitor,
@@ -345,6 +355,17 @@ final class WorkspaceBarManager {
         if #available(macOS 13.0, *) {
             hostingView.sizingOptions = []
         }
+    }
+
+    private func applyCurrentAppearance(
+        to panel: NSPanel,
+        hostingView: NSHostingView<WorkspaceBarView>,
+        measurementView: NSHostingView<WorkspaceBarMeasurementView>
+    ) {
+        let appearance = NSApplication.shared.appearance
+        panel.appearance = appearance
+        hostingView.appearance = appearance
+        measurementView.appearance = appearance
     }
 
     private static func defaultPanel() -> WorkspaceBarPanel {
@@ -488,5 +509,13 @@ extension WorkspaceBarManager {
 
     func lastAppliedFrameForTests(on monitorId: Monitor.ID) -> CGRect? {
         barsByMonitor[monitorId]?.lastAppliedFrame
+    }
+
+    func panelEffectiveAppearanceForTests(on monitorId: Monitor.ID) -> NSAppearance.Name? {
+        barsByMonitor[monitorId]?.panel.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+    }
+
+    func hostingViewEffectiveAppearanceForTests(on monitorId: Monitor.ID) -> NSAppearance.Name? {
+        barsByMonitor[monitorId]?.hostingView.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
     }
 }

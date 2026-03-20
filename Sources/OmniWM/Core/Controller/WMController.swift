@@ -133,7 +133,7 @@ final class WMController {
     }
 
     func applyPersistedSettings(_ settings: SettingsStore) {
-        settings.appearanceMode.apply()
+        applyCurrentAppearanceMode()
 
         updateHotkeyBindings(settings.hotkeyBindings)
         setHotkeysEnabled(settings.hotkeysEnabled)
@@ -191,6 +191,11 @@ final class WMController {
         setQuakeTerminalEnabled(settings.quakeTerminalEnabled)
 
         setEnabled(true)
+    }
+
+    func applyCurrentAppearanceMode() {
+        settings.appearanceMode.apply()
+        workspaceBarManager.updateSettings()
     }
 
     func setEnabled(_ enabled: Bool) {

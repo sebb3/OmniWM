@@ -324,3 +324,36 @@ private func makeRecordingPanelFactory(
         #expect(panelStore.panels.count == 2)
     }
 }
+
+@Suite(.serialized) @MainActor struct WorkspaceBarManagerAppearanceTests {
+    @Test func updateSettingsRefreshesAppearanceWithoutReplacingLiveHost() throws {
+        let application = NSApplication.shared
+        let originalAppearance = application.appearance
+        defer { application.appearance = originalAppearance }
+
+        let monitor = makeLayoutPlanTestMonitor(displayId: 87)
+        let controller = makeLayoutPlanTestController(monitors: [monitor])
+        let manager = WorkspaceBarManager()
+        let panelStore = RecordingPanelStore()
+
+        manager.monitorProvider = { [monitor] }
+        manager.screenProvider = { _ in nil }
+        manager.panelFactory = makeRecordingPanelFactory(store: panelStore)
+
+        application.appearance = NSAppearance(named: .aqua)
+        manager.setup(controller: controller, settings: controller.settings)
+        defer { manager.cleanup() }
+
+        let initialHostingView = try #require(manager.hostingViewIdentifierForTests(on: monitor.id))
+
+        #expect(manager.panelEffectiveAppearanceForTests(on: monitor.id) == .aqua)
+        #expect(manager.hostingViewEffectiveAppearanceForTests(on: monitor.id) == .aqua)
+
+        application.appearance = NSAppearance(named: .darkAqua)
+        manager.updateSettings()
+
+        #expect(manager.hostingViewIdentifierForTests(on: monitor.id) == initialHostingView)
+        #expect(manager.panelEffectiveAppearanceForTests(on: monitor.id) == .darkAqua)
+        #expect(manager.hostingViewEffectiveAppearanceForTests(on: monitor.id) == .darkAqua)
+    }
+}
