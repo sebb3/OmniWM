@@ -18,7 +18,7 @@ struct TabbedColumnOverlayInfo {
     let columnId: NodeId
     let columnFrame: CGRect
     let tabCount: Int
-    let activeIndex: Int
+    let activeVisualIndex: Int
     let activeWindowId: Int?
 }
 
@@ -44,8 +44,8 @@ final class TabbedColumnOverlayManager {
         for info in filtered {
             let overlay = overlays[info.columnId] ?? {
                 let window = TabbedColumnOverlayWindow(columnId: info.columnId, workspaceId: info.workspaceId)
-                window.onSelect = { [weak self] workspaceId, columnId, index in
-                    self?.onSelect?(workspaceId, columnId, index)
+                window.onSelect = { [weak self] workspaceId, columnId, visualIndex in
+                    self?.onSelect?(workspaceId, columnId, visualIndex)
                 }
                 overlays[info.columnId] = window
                 return window
@@ -117,10 +117,10 @@ private final class TabbedColumnOverlayWindow: NSPanel {
         columnId = info.columnId
 
         overlayView.tabCount = info.tabCount
-        overlayView.activeIndex = min(max(0, info.activeIndex), max(0, info.tabCount - 1))
-        overlayView.onSelect = { [weak self] index in
+        overlayView.activeVisualIndex = min(max(0, info.activeVisualIndex), max(0, info.tabCount - 1))
+        overlayView.onSelect = { [weak self] visualIndex in
             guard let self else { return }
-            onSelect?(workspaceId, columnId, index)
+            onSelect?(workspaceId, columnId, visualIndex)
         }
 
         let frame = Self.overlayFrame(for: info.columnFrame)
@@ -154,8 +154,8 @@ private final class TabbedColumnOverlayView: NSView {
         didSet { if oldValue != tabCount { needsDisplay = true } }
     }
 
-    var activeIndex: Int = 0 {
-        didSet { if oldValue != activeIndex { needsDisplay = true } }
+    var activeVisualIndex: Int = 0 {
+        didSet { if oldValue != activeVisualIndex { needsDisplay = true } }
     }
 
     var onSelect: ((Int) -> Void)?
@@ -175,16 +175,16 @@ private final class TabbedColumnOverlayView: NSView {
         )
         backgroundPath.fill()
 
-        let clampedActive = min(max(0, activeIndex), tabCount - 1)
+        let clampedActiveVisualIndex = min(max(0, activeVisualIndex), tabCount - 1)
 
-        for index in 0 ..< tabCount {
-            let segmentRect = rectForSegment(index)
+        for visualIndex in 0 ..< tabCount {
+            let segmentRect = rectForSegment(visualIndex)
             let path = NSBezierPath(
                 roundedRect: segmentRect,
                 xRadius: TabbedOverlayMetrics.cornerRadius,
                 yRadius: TabbedOverlayMetrics.cornerRadius
             )
-            if index == clampedActive {
+            if visualIndex == clampedActiveVisualIndex {
                 TabbedOverlayMetrics.selectedColor.setFill()
             } else {
                 TabbedOverlayMetrics.unselectedColor.setFill()
@@ -195,28 +195,30 @@ private final class TabbedColumnOverlayView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard let index = segmentIndex(at: point) else { return }
-        onSelect?(index)
+        guard let visualIndex = visualIndex(at: point) else { return }
+        onSelect?(visualIndex)
     }
 
-    private func segmentIndex(at point: CGPoint) -> Int? {
+    private func visualIndex(at point: CGPoint) -> Int? {
         guard tabCount > 0 else { return nil }
-        for index in 0 ..< tabCount {
-            if rectForSegment(index).contains(point) {
-                return index
+        for visualIndex in 0 ..< tabCount {
+            if rectForSegment(visualIndex).contains(point) {
+                return visualIndex
             }
         }
         return nil
     }
 
-    private func rectForSegment(_ index: Int) -> CGRect {
+    private func rectForSegment(_ visualIndex: Int) -> CGRect {
         guard tabCount > 0 else { return .zero }
 
         let totalGaps = CGFloat(tabCount - 1) * TabbedOverlayMetrics.segmentGap
         let availableHeight = bounds.height - totalGaps
         let segmentHeight = availableHeight / CGFloat(tabCount)
 
-        let y = bounds.height - CGFloat(index + 1) * segmentHeight - CGFloat(index) * TabbedOverlayMetrics.segmentGap
+        let y = bounds.height
+            - CGFloat(visualIndex + 1) * segmentHeight
+            - CGFloat(visualIndex) * TabbedOverlayMetrics.segmentGap
 
         return CGRect(
             x: 0,

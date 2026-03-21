@@ -830,8 +830,8 @@ import QuartzCore
         niriHandler.updateTabbedColumnOverlays()
     }
 
-    func selectTabInNiri(workspaceId: WorkspaceDescriptor.ID, columnId: NodeId, index: Int) {
-        niriHandler.selectTabInNiri(workspaceId: workspaceId, columnId: columnId, index: index)
+    func selectTabInNiri(workspaceId: WorkspaceDescriptor.ID, columnId: NodeId, visualIndex: Int) {
+        niriHandler.selectTabInNiri(workspaceId: workspaceId, columnId: columnId, visualIndex: visualIndex)
     }
 
     private func applyRefreshMetadata(_ refresh: ScheduledRefresh, to plan: inout RefreshExecutionPlan) {

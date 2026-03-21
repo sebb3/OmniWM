@@ -105,6 +105,104 @@ private func hasAnyVisibilityChange(
 }
 
 @Suite struct NiriLayoutEngineTests {
+    private struct SingleColumnFocusFixture {
+        let controller: WMController
+        let monitor: Monitor
+        let workspaceId: WorkspaceDescriptor.ID
+        let engine: NiriLayoutEngine
+        let column: NiriContainer
+        let bottomToken: WindowToken
+        let middleToken: WindowToken
+        let topToken: WindowToken
+        let bottomWindow: NiriWindow
+        let middleWindow: NiriWindow
+        let topWindow: NiriWindow
+    }
+
+    @MainActor
+    private func makeSingleColumnFocusFixture(displayMode: ColumnDisplay) async -> SingleColumnFocusFixture {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            fatalError("Missing monitor or active workspace for single-column focus fixture")
+        }
+
+        controller.enableNiriLayout(
+            maxWindowsPerColumn: 4,
+            centerFocusedColumn: .never,
+            alwaysCenterSingleColumn: false
+        )
+        controller.updateNiriConfig(
+            maxVisibleColumns: 3,
+            centerFocusedColumn: .never,
+            alwaysCenterSingleColumn: false
+        )
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.layoutRefreshController.stopAllScrollAnimations()
+        controller.syncMonitorsToNiriEngine()
+
+        let bottomToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 901)
+        let middleToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 902)
+        let topToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 903)
+
+        guard let engine = controller.niriEngine else {
+            fatalError("Expected Niri engine for single-column focus fixture")
+        }
+
+        let root = NiriRoot(workspaceId: workspaceId)
+        engine.roots[workspaceId] = root
+        engine.ensureMonitor(for: monitor.id, monitor: monitor).workspaceRoots[workspaceId] = root
+
+        let column = NiriContainer()
+        column.displayMode = displayMode
+        root.appendChild(column)
+        assignFixedWidths(root.columns)
+
+        let bottomWindow = NiriWindow(token: bottomToken)
+        let middleWindow = NiriWindow(token: middleToken)
+        let topWindow = NiriWindow(token: topToken)
+
+        column.appendChild(bottomWindow)
+        column.appendChild(middleWindow)
+        column.appendChild(topWindow)
+        if displayMode == .tabbed {
+            column.setActiveTileIdx(1)
+            engine.updateTabbedColumnVisibility(column: column)
+        }
+
+        engine.tokenToNode[bottomToken] = bottomWindow
+        engine.tokenToNode[middleToken] = middleWindow
+        engine.tokenToNode[topToken] = topWindow
+
+        _ = controller.workspaceManager.setManagedFocus(middleToken, in: workspaceId, onMonitor: monitor.id)
+        _ = controller.workspaceManager.commitWorkspaceSelection(
+            nodeId: middleWindow.id,
+            focusedToken: middleToken,
+            in: workspaceId,
+            onMonitor: monitor.id
+        )
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = middleWindow.id
+            state.activeColumnIndex = 0
+            state.viewOffsetPixels = .static(0)
+        }
+
+        return SingleColumnFocusFixture(
+            controller: controller,
+            monitor: monitor,
+            workspaceId: workspaceId,
+            engine: engine,
+            column: column,
+            bottomToken: bottomToken,
+            middleToken: middleToken,
+            topToken: topToken,
+            bottomWindow: bottomWindow,
+            middleWindow: middleWindow,
+            topWindow: topWindow
+        )
+    }
+
     private func makeVisibleColumnFixture(
         visibleCount: Int,
         extraColumns: Int = 2,
@@ -1844,6 +1942,83 @@ private func hasAnyVisibilityChange(
         #expect(!consumedWindow.isHiddenInTabbedMode)
         #expect(existingBottomWindow.isHiddenInTabbedMode)
         #expect(existingTopWindow.isHiddenInTabbedMode)
+    }
+
+    @Test @MainActor func focusNeighborInTabbedColumnFollowsVisualTabOrder() async {
+        let fixture = await makeSingleColumnFocusFixture(displayMode: .tabbed)
+
+        fixture.controller.niriLayoutHandler.focusNeighbor(direction: .up)
+        await waitForLayoutPlanRefreshWork(on: fixture.controller)
+
+        #expect(fixture.controller.workspaceManager.preferredFocusToken(in: fixture.workspaceId) == fixture.topToken)
+        #expect(fixture.controller.workspaceManager.niriViewportState(for: fixture.workspaceId).selectedNodeId == fixture.topWindow.id)
+        #expect(fixture.column.activeTileIdx == 2)
+        #expect(fixture.column.activeVisualTileIdx == 0)
+        #expect(!fixture.topWindow.isHiddenInTabbedMode)
+        #expect(fixture.bottomWindow.isHiddenInTabbedMode)
+
+        fixture.controller.niriLayoutHandler.focusNeighbor(direction: .down)
+        await waitForLayoutPlanRefreshWork(on: fixture.controller)
+
+        #expect(fixture.controller.workspaceManager.preferredFocusToken(in: fixture.workspaceId) == fixture.middleToken)
+        #expect(fixture.controller.workspaceManager.niriViewportState(for: fixture.workspaceId).selectedNodeId == fixture.middleWindow.id)
+        #expect(fixture.column.activeTileIdx == 1)
+        #expect(fixture.column.activeVisualTileIdx == 1)
+        #expect(!fixture.middleWindow.isHiddenInTabbedMode)
+    }
+
+    @Test @MainActor func focusNeighborInNonTabbedColumnPreservesExistingInColumnOrder() async {
+        let fixture = await makeSingleColumnFocusFixture(displayMode: .normal)
+
+        fixture.controller.niriLayoutHandler.focusNeighbor(direction: .up)
+        await waitForLayoutPlanRefreshWork(on: fixture.controller)
+
+        #expect(fixture.controller.workspaceManager.preferredFocusToken(in: fixture.workspaceId) == fixture.topToken)
+        #expect(fixture.controller.workspaceManager.niriViewportState(for: fixture.workspaceId).selectedNodeId == fixture.topWindow.id)
+
+        fixture.controller.niriLayoutHandler.focusNeighbor(direction: .down)
+        await waitForLayoutPlanRefreshWork(on: fixture.controller)
+
+        #expect(fixture.controller.workspaceManager.preferredFocusToken(in: fixture.workspaceId) == fixture.middleToken)
+        #expect(fixture.controller.workspaceManager.niriViewportState(for: fixture.workspaceId).selectedNodeId == fixture.middleWindow.id)
+    }
+
+    @Test @MainActor func selectTabInNiriMapsVisualOverlayIndicesBackToStorageOrder() async {
+        let fixture = await makeSingleColumnFocusFixture(displayMode: .tabbed)
+
+        fixture.column.setActiveTileIdx(0)
+        fixture.engine.updateTabbedColumnVisibility(column: fixture.column)
+        _ = fixture.controller.workspaceManager.setManagedFocus(
+            fixture.bottomToken,
+            in: fixture.workspaceId,
+            onMonitor: fixture.monitor.id
+        )
+        _ = fixture.controller.workspaceManager.commitWorkspaceSelection(
+            nodeId: fixture.bottomWindow.id,
+            focusedToken: fixture.bottomToken,
+            in: fixture.workspaceId,
+            onMonitor: fixture.monitor.id
+        )
+        fixture.controller.workspaceManager.withNiriViewportState(for: fixture.workspaceId) { state in
+            state.selectedNodeId = fixture.bottomWindow.id
+        }
+
+        #expect(fixture.column.visualTileIndex(forStorageTileIndex: 0) == 2)
+        #expect(fixture.column.storageTileIndex(forVisualTileIndex: 0) == 2)
+        #expect(fixture.column.activeVisualTileIdx == 2)
+
+        fixture.controller.niriLayoutHandler.selectTabInNiri(
+            workspaceId: fixture.workspaceId,
+            columnId: fixture.column.id,
+            visualIndex: 0
+        )
+
+        #expect(fixture.column.activeTileIdx == 2)
+        #expect(fixture.column.activeVisualTileIdx == 0)
+        #expect(fixture.column.activeWindow?.token == fixture.topToken)
+        #expect(fixture.controller.workspaceManager.niriViewportState(for: fixture.workspaceId).selectedNodeId == fixture.topWindow.id)
+        #expect(!fixture.topWindow.isHiddenInTabbedMode)
+        #expect(fixture.bottomWindow.isHiddenInTabbedMode)
     }
 
     @Test func cleanupRemovedMonitorKeepsWorkspaceRootAuthoritativeForReattach() {

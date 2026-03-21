@@ -833,9 +833,8 @@ import QuartzCore
                 let windows = column.windowNodes
                 guard !windows.isEmpty else { continue }
 
-                let activeIndex = min(max(0, column.activeTileIdx), windows.count - 1)
-                let activeHandle = windows[activeIndex].handle
-                let activeWindowId = controller.workspaceManager.entry(for: activeHandle)?.windowId
+                guard let activeWindow = column.activeWindow else { continue }
+                let activeWindowId = controller.workspaceManager.entry(for: activeWindow.handle)?.windowId
 
                 infos.append(
                     TabbedColumnOverlayInfo(
@@ -843,7 +842,7 @@ import QuartzCore
                         columnId: column.id,
                         columnFrame: frame,
                         tabCount: windows.count,
-                        activeIndex: activeIndex,
+                        activeVisualIndex: column.activeVisualTileIdx,
                         activeWindowId: activeWindowId
                     )
                 )
@@ -853,17 +852,21 @@ import QuartzCore
         controller.tabbedOverlayManager.updateOverlays(infos)
     }
 
-    func selectTabInNiri(workspaceId: WorkspaceDescriptor.ID, columnId: NodeId, index: Int) {
+    func selectTabInNiri(workspaceId: WorkspaceDescriptor.ID, columnId: NodeId, visualIndex: Int) {
         guard let controller, let engine = controller.niriEngine else { return }
         guard let column = engine.columns(in: workspaceId).first(where: { $0.id == columnId }) else { return }
 
         let windows = column.windowNodes
-        guard windows.indices.contains(index) else { return }
+        guard let storageIndex = column.storageTileIndex(forVisualTileIndex: visualIndex),
+              windows.indices.contains(storageIndex)
+        else {
+            return
+        }
 
-        column.setActiveTileIdx(index)
+        column.setActiveTileIdx(storageIndex)
         engine.updateTabbedColumnVisibility(column: column)
 
-        let target = windows[index]
+        let target = windows[storageIndex]
         var state = controller.workspaceManager.niriViewportState(for: workspaceId)
         if let monitor = controller.workspaceManager.monitor(for: workspaceId) {
             let gap = CGFloat(controller.workspaceManager.gaps)

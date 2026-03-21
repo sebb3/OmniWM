@@ -126,8 +126,12 @@ final class WMController {
         hotkeys.onCommand = { [weak self] command in
             self?.commandHandler.handleCommand(command)
         }
-        tabbedOverlayManager.onSelect = { [weak self] workspaceId, columnId, index in
-            self?.layoutRefreshController.selectTabInNiri(workspaceId: workspaceId, columnId: columnId, index: index)
+        tabbedOverlayManager.onSelect = { [weak self] workspaceId, columnId, visualIndex in
+            self?.layoutRefreshController.selectTabInNiri(
+                workspaceId: workspaceId,
+                columnId: columnId,
+                visualIndex: visualIndex
+            )
         }
         workspaceManager.onSessionStateChanged = { [weak self] in
             self?.focusNotificationDispatcher.notifyFocusChangesIfNeeded()
