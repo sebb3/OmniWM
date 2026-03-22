@@ -3,6 +3,10 @@ import Testing
 @testable import OmniWM
 
 @Suite @MainActor struct CommandHandlerTests {
+    @Test func commandPaletteDisplayNameReflectsToggleBehavior() {
+        #expect(HotkeyCommand.openCommandPalette.displayName == "Toggle Command Palette")
+    }
+
     @Test func overviewIgnoresNonOverviewHotkeys() {
         #expect(CommandHandler.shouldIgnoreCommand(.switchWorkspace(1), isOverviewOpen: true) == true)
         #expect(CommandHandler.shouldIgnoreCommand(.move(.left), isOverviewOpen: true) == true)

@@ -181,6 +181,14 @@ final class CommandPaletteController: NSObject, ObservableObject, NSWindowDelega
         return Self.unavailableMenuStatusText
     }
 
+    func toggle(wmController: WMController) {
+        if isVisible {
+            dismiss(reason: .cancel)
+        } else {
+            show(wmController: wmController)
+        }
+    }
+
     func show(wmController: WMController) {
         if isVisible {
             dismiss(reason: .superseded)

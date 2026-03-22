@@ -55,7 +55,63 @@ private func makeCommandPaletteAppSnapshot(
     )
 }
 
-@Suite @MainActor struct CommandPaletteControllerTests {
+@Suite(.serialized) @MainActor struct CommandPaletteControllerTests {
+    @Test func toggleShowsPaletteWhenHidden() {
+        var environment = CommandPaletteEnvironment()
+        environment.activateOmniWM = {}
+        let controller = CommandPaletteController(environment: environment)
+        let wmController = makeCommandPaletteTestWMController()
+
+        defer {
+            if controller.isVisible {
+                controller.toggle(wmController: wmController)
+            }
+        }
+
+        controller.toggle(wmController: wmController)
+
+        #expect(controller.isVisible)
+    }
+
+    @Test func toggleHidesVisiblePaletteAndClearsTransientState() {
+        var environment = CommandPaletteEnvironment()
+        environment.activateOmniWM = {}
+        let controller = CommandPaletteController(environment: environment)
+        let wmController = makeCommandPaletteTestWMController()
+
+        guard let workspaceId = wmController.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for command palette toggle test")
+            return
+        }
+
+        _ = wmController.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 707),
+            pid: 4242,
+            windowId: 707,
+            to: workspaceId
+        )
+
+        defer {
+            if controller.isVisible {
+                controller.toggle(wmController: wmController)
+            }
+        }
+
+        controller.toggle(wmController: wmController)
+        controller.searchText = "Unknown"
+
+        #expect(controller.isVisible)
+        #expect(controller.filteredWindowItems.count == 1)
+        #expect(controller.selectedItemID == .window(WindowToken(pid: 4242, windowId: 707)))
+
+        controller.toggle(wmController: wmController)
+
+        #expect(controller.isVisible == false)
+        #expect(controller.searchText.isEmpty)
+        #expect(controller.selectedItemID == nil)
+        #expect(controller.filteredWindowItems.isEmpty)
+    }
+
     @Test func selectCurrentNavigatesSelectedWindowAfterDismiss() {
         var navigatedHandle: WindowHandle?
         var environment = CommandPaletteEnvironment()

@@ -1459,7 +1459,7 @@ final class WMController {
         workspaceManager.entry(forPid: pid, windowId: windowId)?.workspaceId
     }
 
-    func openCommandPalette() { CommandPaletteController.shared.show(wmController: self) }
+    func openCommandPalette() { CommandPaletteController.shared.toggle(wmController: self) }
     func openMenuAnywhere() { windowActionHandler.openMenuAnywhere() }
     func navigateToCommandPaletteWindow(_ handle: WindowHandle) { windowActionHandler.navigateToWindow(handle: handle) }
     func summonCommandPaletteWindowRight(
