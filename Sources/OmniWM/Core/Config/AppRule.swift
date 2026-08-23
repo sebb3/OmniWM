@@ -22,6 +22,29 @@ enum WindowRuleLayoutAction: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Whether a newly created window belonging to this rule may take focus.
+enum WindowRuleFocusPolicy: String, Codable, CaseIterable, Identifiable {
+    /// New windows always take focus (OmniWM's historical behaviour).
+    case always
+    /// New windows take focus only when the owning app was already frontmost,
+    /// or the user activated it moments ago. Background-spawned windows do not.
+    case userInitiated
+    /// New windows never take focus.
+    case never
+
+    var id: String {
+        rawValue
+    }
+
+    var displayName: String {
+        switch self {
+        case .always: "Always"
+        case .userInitiated: "User initiated"
+        case .never: "Never"
+        }
+    }
+}
+
 /// Window server stacking level applied to matching windows.
 ///
 /// Deliberately a closed set of named levels: raw integers would let a rule
@@ -68,6 +91,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         case initialContainerPrimarySpan
         case minWidth
         case minHeight
+        case focus
         case windowLevel
     }
 
@@ -83,6 +107,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
     var initialContainerPrimarySpan: Double?
     var minWidth: Double?
     var minHeight: Double?
+    var focus: WindowRuleFocusPolicy?
     var windowLevel: WindowRuleWindowLevel?
 
     init(
@@ -98,6 +123,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         initialContainerPrimarySpan: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
+        focus: WindowRuleFocusPolicy? = nil,
         windowLevel: WindowRuleWindowLevel? = nil
     ) {
         self.id = id
@@ -112,6 +138,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.minWidth = minWidth
         self.minHeight = minHeight
+        self.focus = focus
         self.windowLevel = windowLevel
         normalizeSingleTitle()
     }
@@ -135,7 +162,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
             assignToWorkspace?.isEmpty == false ||
             validInitialContainerPrimarySpan != nil ||
             minWidth != nil || minHeight != nil ||
-            windowLevel != nil
+            focus != nil || windowLevel != nil
     }
 
     var hasAdvancedMatchers: Bool {
@@ -188,7 +215,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
             assignToWorkspace != nil ||
             initialContainerPrimarySpan != nil ||
             minWidth != nil || minHeight != nil ||
-            windowLevel != nil ||
+            focus != nil || windowLevel != nil ||
             hasAdvancedMatchers
     }
 
@@ -206,6 +233,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
+        focus = try container.decodeIfPresent(WindowRuleFocusPolicy.self, forKey: .focus)
         windowLevel = try container.decodeIfPresent(WindowRuleWindowLevel.self, forKey: .windowLevel)
         normalizeSingleTitle()
     }
@@ -224,6 +252,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         try container.encodeIfPresent(initialContainerPrimarySpan, forKey: .initialContainerPrimarySpan)
         try container.encodeIfPresent(minWidth, forKey: .minWidth)
         try container.encodeIfPresent(minHeight, forKey: .minHeight)
+        try container.encodeIfPresent(focus, forKey: .focus)
         try container.encodeIfPresent(windowLevel, forKey: .windowLevel)
     }
 

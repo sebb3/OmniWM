@@ -985,6 +985,11 @@ public enum IPCAutomationManifest {
             valuePlaceholder: "<points>"
         ),
         .init(
+            flag: "--focus",
+            summary: "Set whether arriving windows may take focus. Omit to cascade to a less specific rule.",
+            valuePlaceholder: "<always|userInitiated|never>"
+        ),
+        .init(
             flag: "--window-level",
             summary: "Set the window stacking level. Omit to cascade to a less specific rule.",
             valuePlaceholder: "<auto|below|normal|floating>"

@@ -336,12 +336,19 @@ final class WindowRuleEngineTests: XCTestCase {
     /// field the projection does not carry is silently dropped on every edit —
     /// the same defect the UI draft had.
     func testProjectionRoundTripsCascadingFields() {
-        let rule = AppRule(bundleId: "*", layout: .float, windowLevel: .floating)
+        let rule = AppRule(
+            bundleId: "*",
+            layout: .float,
+            focus: .userInitiated,
+            windowLevel: .floating
+        )
 
         let definition = IPCRuleProjection.definition(from: rule)
+        XCTAssertEqual(definition.focus, .userInitiated)
         XCTAssertEqual(definition.windowLevel, .floating)
 
         let rebuilt = IPCRuleProjection.appRule(from: definition, id: rule.id)
+        XCTAssertEqual(rebuilt.focus, .userInitiated)
         XCTAssertEqual(rebuilt.windowLevel, .floating)
         XCTAssertEqual(rebuilt, rule)
     }
@@ -351,6 +358,7 @@ final class WindowRuleEngineTests: XCTestCase {
         let rule = AppRule(bundleId: "com.test.app", layout: .float)
 
         let rebuilt = IPCRuleProjection.appRule(from: IPCRuleProjection.definition(from: rule), id: rule.id)
+        XCTAssertNil(rebuilt.focus)
         XCTAssertNil(rebuilt.windowLevel)
     }
 

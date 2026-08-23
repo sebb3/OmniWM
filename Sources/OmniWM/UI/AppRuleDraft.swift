@@ -73,6 +73,7 @@ struct AppRuleDraft: Identifiable, Equatable {
     var axSubroleEnabled: Bool
     var axSubrole: String
     /// `nil` means cascade: inherit from the most specific rule that sets it.
+    var focus: WindowRuleFocusPolicy?
     var windowLevel: WindowRuleWindowLevel?
 
     init(id: UUID = UUID(), bundleId: String = "") {
@@ -96,6 +97,7 @@ struct AppRuleDraft: Identifiable, Equatable {
         axRole = ""
         axSubroleEnabled = false
         axSubrole = ""
+        focus = nil
         windowLevel = nil
     }
 
@@ -126,6 +128,7 @@ struct AppRuleDraft: Identifiable, Equatable {
         axRole = rule.axRole ?? ""
         axSubroleEnabled = rule.axSubrole?.isEmpty == false
         axSubrole = rule.axSubrole ?? ""
+        focus = rule.focus
         windowLevel = rule.windowLevel
     }
 
@@ -150,6 +153,7 @@ struct AppRuleDraft: Identifiable, Equatable {
             lhs.axRole == rhs.axRole &&
             lhs.axSubroleEnabled == rhs.axSubroleEnabled &&
             lhs.axSubrole == rhs.axSubrole &&
+            lhs.focus == rhs.focus &&
             lhs.windowLevel == rhs.windowLevel
     }
 
@@ -219,7 +223,7 @@ struct AppRuleDraft: Identifiable, Equatable {
     var effectHint: String? {
         let rule = makeRule()
         guard rule.hasIdentifyingMatcher, !rule.hasEffect else { return nil }
-        return "This rule matches windows but has no effect — set a layout, window level, workspace, "
+        return "This rule matches windows but has no effect — set a layout, focus policy, window level, workspace, "
             + "initial container primary span, or minimum size."
     }
 
@@ -260,6 +264,7 @@ struct AppRuleDraft: Identifiable, Equatable {
             initialContainerPrimarySpan: initialContainerPrimarySpanEnabled ? initialContainerPrimarySpan : nil,
             minWidth: minWidthEnabled ? minWidth : nil,
             minHeight: minHeightEnabled ? minHeight : nil,
+            focus: focus,
             windowLevel: windowLevel
         )
     }
