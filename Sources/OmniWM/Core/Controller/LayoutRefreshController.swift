@@ -167,6 +167,7 @@ import QuartzCore
     private var closingAnimationIdsByObjectId: [ObjectIdentifier: UUID] = [:]
     /// Last sub-level pushed per window, so a pass only sends on change.
     private var appliedSubLevels: [WindowToken: ScriptingAddition.LevelKey] = [:]
+    private var scriptingAdditionAlertShown = false
     private var lastSubmittedClosingFramesByAnimationId: [UUID: CGRect] = [:]
     var nativeFullscreenRestoredFrameApplyTokens: Set<WindowToken> = []
 
@@ -508,9 +509,9 @@ import QuartzCore
     /// differs from what was last applied. That keeps a reconcile pass free in
     /// the steady state and means z-order never depends on activation.
     private func applyWindowLevels(controller: WMController, activeWorkspaceIds: Set<WorkspaceDescriptor.ID>) {
-        guard ScriptingAddition.isAvailable else { return }
-
         var liveTokens: Set<WindowToken> = []
+        var sendFailed = false
+        var sendSucceeded = false
         for ws in controller.workspaceManager.workspaces where activeWorkspaceIds.contains(ws.id) {
             for entry in controller.workspaceManager.entries(in: ws.id) {
                 liveTokens.insert(entry.token)
@@ -521,11 +522,44 @@ import QuartzCore
                 guard appliedSubLevels[entry.token] != desired else { continue }
                 if ScriptingAddition.setSubLevel(windowId: UInt32(entry.windowId), level: desired) {
                     appliedSubLevels[entry.token] = desired
+                    sendSucceeded = true
+                } else {
+                    sendFailed = true
                 }
             }
         }
 
         appliedSubLevels = appliedSubLevels.filter { liveTokens.contains($0.key) }
+
+        // A window whose level never applied stays out of appliedSubLevels, so
+        // it is retried on the next pass and ordering repairs itself once the
+        // addition is back.
+        if sendFailed {
+            presentScriptingAdditionAlert()
+        } else if sendSucceeded {
+            scriptingAdditionAlertShown = false
+        }
+    }
+
+    /// Dock unloads the scripting addition whenever it restarts, which leaves
+    /// stacking silently following macOS defaults. Say so once per outage
+    /// rather than on every failed window, and re-arm only after a send works
+    /// again so a later outage is still reported.
+    private func presentScriptingAdditionAlert() {
+        guard !scriptingAdditionAlertShown else { return }
+        scriptingAdditionAlertShown = true
+
+        Task { @MainActor in
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Reload the yabai scripting addition"
+            alert.informativeText = "OmniWM keeps floating windows above tiled ones through yabai's "
+                + "scripting addition, which runs inside Dock and is unloaded whenever Dock restarts. "
+                + "Reload it in a terminal with:\n\n    sudo yabai --load-sa\n\n"
+                + "Until then, window stacking follows macOS defaults."
+            alert.addButton(withTitle: "OK")
+            _ = alert.runModal()
+        }
     }
 
     /// Restores WindowServer sub-levels before OmniWM relinquishes ownership.
