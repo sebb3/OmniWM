@@ -74,10 +74,42 @@ enum ScriptingAddition {
         "/tmp/yabai-sa_\(NSUserName()).socket"
     }
 
-    /// The addition is optional: it needs SIP relaxed and an explicit install,
-    /// so every caller has to tolerate it being absent.
-    static var isAvailable: Bool {
-        FileManager.default.fileExists(atPath: socketPath)
+    /// Touched to ask a privileged helper to reload the addition. Updating a
+    /// file's modification time needs no privilege, while loading the addition
+    /// into Dock needs root, so this is the whole interface between the two.
+    ///
+    /// Nothing here depends on a helper existing: without one the file is just
+    /// an unread timestamp and stacking stays at system behaviour.
+    private static var reloadTriggerPath: String {
+        NSHomeDirectory() + "/.local/state/omniwm/reload-scripting-addition"
+    }
+
+    /// Dock restarting takes the addition down with it. A burst of failures is
+    /// one event, not many, so requests are collapsed rather than sent per
+    /// window; a reload takes far less than this to become visible.
+    private static let reloadRequestInterval: TimeInterval = 5
+    @MainActor private static var lastReloadRequest: Date = .distantPast
+
+    /// Note that the socket file is deliberately not consulted to decide
+    /// whether the addition is alive. It is only unlinked when the addition
+    /// loads, so a stale one outlives a Dock crash and would report a dead
+    /// addition as healthy. A failed send is the only honest signal.
+    @MainActor
+    static func requestReload() {
+        let now = Date()
+        guard now.timeIntervalSince(lastReloadRequest) >= reloadRequestInterval else { return }
+        lastReloadRequest = now
+
+        let manager = FileManager.default
+        let path = reloadTriggerPath
+        let directory = (path as NSString).deletingLastPathComponent
+        try? manager.createDirectory(atPath: directory, withIntermediateDirectories: true)
+
+        if manager.fileExists(atPath: path) {
+            try? manager.setAttributes([.modificationDate: now], ofItemAtPath: path)
+        } else {
+            manager.createFile(atPath: path, contents: nil)
+        }
     }
 
     @discardableResult

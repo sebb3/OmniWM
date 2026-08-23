@@ -508,9 +508,8 @@ import QuartzCore
     /// differs from what was last applied. That keeps a reconcile pass free in
     /// the steady state and means z-order never depends on activation.
     private func applyWindowLevels(controller: WMController, activeWorkspaceIds: Set<WorkspaceDescriptor.ID>) {
-        guard ScriptingAddition.isAvailable else { return }
-
         var liveTokens: Set<WindowToken> = []
+        var sendFailed = false
         for ws in controller.workspaceManager.workspaces where activeWorkspaceIds.contains(ws.id) {
             for entry in controller.workspaceManager.entries(in: ws.id) {
                 liveTokens.insert(entry.token)
@@ -521,11 +520,21 @@ import QuartzCore
                 guard appliedSubLevels[entry.token] != desired else { continue }
                 if ScriptingAddition.setSubLevel(windowId: UInt32(entry.windowId), level: desired) {
                     appliedSubLevels[entry.token] = desired
+                } else {
+                    sendFailed = true
                 }
             }
         }
 
         appliedSubLevels = appliedSubLevels.filter { liveTokens.contains($0.key) }
+
+        // Attempting the send is itself the liveness check, so a window whose
+        // level never got applied stays absent from appliedSubLevels and is
+        // retried on the next pass, healing on its own once the addition is
+        // back. Asking for that reload is the only part OmniWM cannot do.
+        if sendFailed {
+            ScriptingAddition.requestReload()
+        }
     }
 
     private func executeLayoutPlans(
