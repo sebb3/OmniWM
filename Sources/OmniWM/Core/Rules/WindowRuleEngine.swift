@@ -423,6 +423,60 @@ final class WindowRuleEngine {
         )
     }
 
+    /// Overlays a matched one-shot rule onto an already-resolved decision. Unlike
+    /// `applyingManualOverride`, this is a per-field overlay, not a full replace:
+    /// a one-shot that sets only `assignToWorkspace` must not discard whatever
+    /// the persistent rules already decided for layout, sizing, focus, or
+    /// window level. `disposition`/`source` are only replaced when the one-shot
+    /// actually names a layout — `effectiveLayoutAction == .auto` means "don't
+    /// touch placement, just apply the other fields", the same convention
+    /// `explicitDecision` already uses for ordinary rules.
+    static func applyingOneShotOverride(_ decision: WindowDecision, oneShot: AppRule) -> WindowDecision {
+        // Matches `applyingManualOverride`: an unmanaged disposition (a help tag,
+        // a system panel, a transient AX surface a real app throws up before its
+        // actual window) is not something a rule should resurrect into managed.
+        // Bailing here also means the caller must not reap the one-shot for this
+        // match — an app's first AX-visible surface being some unmanaged dialog
+        // must not burn the shot before the real window arrives.
+        guard decision.disposition != .unmanaged else {
+            return decision
+        }
+
+        let disposition: WindowDecisionDisposition
+        let source: WindowDecisionSource
+        switch oneShot.effectiveLayoutAction {
+        case .float:
+            disposition = .floating
+            source = .userRule(oneShot.id)
+        case .tile:
+            disposition = .managed
+            source = .userRule(oneShot.id)
+        case .auto:
+            disposition = decision.disposition
+            source = decision.source
+        }
+
+        return WindowDecision(
+            disposition: disposition,
+            source: source,
+            layoutDecisionKind: .explicitLayout,
+            workspaceName: oneShot.assignToWorkspace ?? decision.workspaceName,
+            ruleEffects: ManagedWindowRuleEffects(
+                minWidth: oneShot.minWidth ?? decision.ruleEffects.minWidth,
+                minHeight: oneShot.minHeight ?? decision.ruleEffects.minHeight,
+                matchedRuleId: oneShot.id,
+                focus: oneShot.focus ?? decision.ruleEffects.focus,
+                windowLevel: oneShot.windowLevel ?? decision.ruleEffects.windowLevel
+            ),
+            admissionHints: ManagedWindowAdmissionHints(
+                initialNiriContainerPrimarySpan: oneShot.validInitialContainerPrimarySpan
+                    ?? decision.admissionHints.initialNiriContainerPrimarySpan
+            ),
+            heuristicReasons: decision.heuristicReasons,
+            deferredReason: decision.deferredReason
+        )
+    }
+
     nonisolated static func isTransientWidgetAXCandidate(_ facts: AXWindowFacts) -> Bool {
         facts.attributeFetchSucceeded
             && facts.role == (kAXWindowRole as String)

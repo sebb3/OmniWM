@@ -620,6 +620,99 @@ final class WindowRuleEngineTests: XCTestCase {
         XCTAssertEqual(overridden.disposition, .unmanaged)
     }
 
+    /// A one-shot that only names a workspace must not discard whatever the
+    /// persistent rules already decided for layout, sizing, focus, or window
+    /// level — it overlays per field, unlike `applyingManualOverride`'s full
+    /// replace.
+    func testApplyingOneShotOverridePreservesFieldsTheOneShotDoesNotSet() {
+        let persistentDecision = WindowDecision(
+            disposition: .floating,
+            source: .userRule(UUID()),
+            layoutDecisionKind: .explicitLayout,
+            workspaceName: "1",
+            ruleEffects: ManagedWindowRuleEffects(
+                minWidth: 400,
+                minHeight: 300,
+                matchedRuleId: UUID(),
+                focus: .never,
+                windowLevel: .below
+            ),
+            admissionHints: ManagedWindowAdmissionHints(initialNiriContainerPrimarySpan: 0.4),
+            heuristicReasons: [],
+            deferredReason: nil
+        )
+        let oneShot = AppRule(bundleId: "com.apple.TextEdit", assignToWorkspace: "2")
+
+        let merged = WindowRuleEngine.applyingOneShotOverride(persistentDecision, oneShot: oneShot)
+
+        XCTAssertEqual(merged.workspaceName, "2", "the field the one-shot set")
+        XCTAssertEqual(merged.disposition, .floating, "unset by the one-shot (effectiveLayoutAction .auto)")
+        XCTAssertEqual(merged.source, persistentDecision.source)
+        XCTAssertEqual(merged.ruleEffects.minWidth, 400)
+        XCTAssertEqual(merged.ruleEffects.minHeight, 300)
+        XCTAssertEqual(merged.ruleEffects.focus, .never)
+        XCTAssertEqual(merged.ruleEffects.windowLevel, .below)
+        XCTAssertEqual(merged.ruleEffects.matchedRuleId, oneShot.id, "reap-detection depends on this")
+        XCTAssertEqual(merged.admissionHints.initialNiriContainerPrimarySpan, 0.4)
+    }
+
+    /// A one-shot that sets every field overrides every field, including
+    /// layout/disposition when it names one explicitly.
+    func testApplyingOneShotOverrideAppliesEveryFieldItSets() {
+        let persistentDecision = WindowDecision(
+            disposition: .managed,
+            source: .heuristic,
+            layoutDecisionKind: .explicitLayout,
+            workspaceName: "1",
+            ruleEffects: .none,
+            admissionHints: .none,
+            heuristicReasons: [],
+            deferredReason: nil
+        )
+        let oneShot = AppRule(
+            bundleId: "com.apple.TextEdit",
+            layout: .float,
+            assignToWorkspace: "2",
+            minWidth: 500,
+            minHeight: 350,
+            focus: .userInitiated,
+            windowLevel: .floating
+        )
+
+        let merged = WindowRuleEngine.applyingOneShotOverride(persistentDecision, oneShot: oneShot)
+
+        XCTAssertEqual(merged.disposition, .floating)
+        XCTAssertEqual(merged.source, .userRule(oneShot.id))
+        XCTAssertEqual(merged.workspaceName, "2")
+        XCTAssertEqual(merged.ruleEffects.minWidth, 500)
+        XCTAssertEqual(merged.ruleEffects.minHeight, 350)
+        XCTAssertEqual(merged.ruleEffects.focus, .userInitiated)
+        XCTAssertEqual(merged.ruleEffects.windowLevel, .floating)
+    }
+
+    /// A help tag, a system panel, an app's transient pre-window surface — none
+    /// of these should be resurrected into managed by a one-shot, matching
+    /// `applyingManualOverride`'s identical guard. The unchanged `matchedRuleId`
+    /// is what tells the caller not to reap: the one-shot never actually fired.
+    func testApplyingOneShotOverrideDoesNotResurrectAnUnmanagedDecision() {
+        let unmanagedDecision = WindowDecision(
+            disposition: .unmanaged,
+            source: .builtInRule("helpTagSurface"),
+            layoutDecisionKind: .explicitLayout,
+            workspaceName: nil,
+            ruleEffects: .none,
+            admissionHints: .none,
+            heuristicReasons: [],
+            deferredReason: nil
+        )
+        let oneShot = AppRule(bundleId: "com.apple.TextEdit", layout: .float, assignToWorkspace: "2")
+
+        let merged = WindowRuleEngine.applyingOneShotOverride(unmanagedDecision, oneShot: oneShot)
+
+        XCTAssertEqual(merged, unmanagedDecision)
+        XCTAssertNotEqual(merged.ruleEffects.matchedRuleId, oneShot.id)
+    }
+
     func testHelpTagIsHardUnmanagedWithoutWindowServerOrCompleteAXFacts() {
         let engine = WindowRuleEngine()
         let token = WindowToken(pid: 86_312, windowId: 7_918)

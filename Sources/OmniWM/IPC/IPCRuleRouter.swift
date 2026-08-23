@@ -34,6 +34,11 @@ final class IPCRuleRouter {
             return .failure(.invalidArguments)
         }
 
+        if definition.oneShot == true {
+            controller.addOneShotRule(IPCRuleProjection.appRule(from: definition))
+            return .success(currentRulesResult())
+        }
+
         var rules = controller.settings.appRules
         rules.append(IPCRuleProjection.appRule(from: definition))
         controller.settings.appRules = rules
@@ -66,13 +71,18 @@ final class IPCRuleRouter {
         }
 
         var rules = controller.settings.appRules
-        guard let index = rules.firstIndex(where: { $0.id == ruleId }) else {
-            return .failure(.notFound)
+        if let index = rules.firstIndex(where: { $0.id == ruleId }) {
+            rules.remove(at: index)
+            controller.settings.appRules = rules
+            controller.updateAppRules()
+            return .success(currentRulesResult())
         }
 
-        rules.remove(at: index)
-        controller.settings.appRules = rules
-        controller.updateAppRules()
+        // Not a persistent rule — an armed one-shot is cancellable the same way,
+        // since it is the same underlying command a user reaches for either way.
+        guard controller.removeOneShotRule(id: ruleId) else {
+            return .failure(.notFound)
+        }
         return .success(currentRulesResult())
     }
 
@@ -139,9 +149,6 @@ final class IPCRuleRouter {
     }
 
     private func currentRulesResult() -> IPCRulesQueryResult {
-        IPCRuleProjection.result(
-            settings: controller.settings,
-            windowRuleEngine: controller.windowRuleEngine
-        )
+        IPCRuleProjection.combinedResult(controller: controller)
     }
 }

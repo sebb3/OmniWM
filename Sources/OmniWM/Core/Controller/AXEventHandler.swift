@@ -2583,12 +2583,20 @@ final class AXEventHandler {
         let bundleId = resolveBundleId(token.pid) ?? app?.bundleIdentifier
         let appFullscreen = AXWindowService.isFullscreen(axRef)
         let matchingWindowInfo = WMController.exactWindowServerInfo(windowInfo, for: token)
-        let evaluation = controller.evaluateWindowDisposition(
-            axRef: axRef,
-            pid: token.pid,
-            appFullscreen: appFullscreen,
-            windowInfo: matchingWindowInfo,
-            windowServerLookupAttempted: true
+        // This is the live window-creation path — existingEntry above is nil, so
+        // this window has never been evaluated before. One-shot rules must only
+        // ever be consulted here: LayoutRefreshController's reconciliation sweep
+        // and WMController.reevaluateWindowRules both call evaluateWindowDisposition
+        // too, but for windows that are either already tracked or being
+        // explicitly reapplied, neither of which a one-shot should ever fire on.
+        let evaluation = controller.applyingOneShotRule(
+            to: controller.evaluateWindowDisposition(
+                axRef: axRef,
+                pid: token.pid,
+                appFullscreen: appFullscreen,
+                windowInfo: matchingWindowInfo,
+                windowServerLookupAttempted: true
+            )
         )
         let interactionPolicy = WindowInteractionPolicy.resolve(for: evaluation)
         WindowAdmissionTrace.record(

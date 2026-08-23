@@ -107,6 +107,13 @@ final class WMController {
     private let restorePlanner = RestorePlanner()
     let windowRuleEngine = WindowRuleEngine()
     let userInitiatedLaunchTracker = UserInitiatedLaunchTracker()
+    /// Rules armed by `rule add --one-shot`: in-memory only, never written to
+    /// `settings.appRules`/settings.toml, and never consulted by the layout
+    /// refresh or `reevaluateWindowRules` paths — only by the live window
+    /// creation path, so a match is scoped to the very next matching window and
+    /// cannot fire on an already-tracked one. See WMController+OneShotRules.swift.
+    private(set) var oneShotRules: [AppRule] = []
+    let oneShotRuleEngine = WindowRuleEngine()
 
     var niriEngine: NiriLayoutEngine? {
         get { workspaceManager.niriEngine }
@@ -1068,6 +1075,72 @@ final class WMController {
     func updateAppRules() {
         rebuildAppRulesCache()
         layoutRefreshController.requestFullRescan(reason: .appRulesChanged)
+    }
+
+    /// Arms a one-shot rule. Deliberately does not call `requestFullRescan` —
+    /// unlike a persistent rule change, arming a one-shot must not touch any
+    /// window that already exists; it can only ever match a window admitted
+    /// after this call.
+    func addOneShotRule(_ rule: AppRule) {
+        oneShotRules.append(rule)
+        oneShotRuleEngine.rebuild(rules: oneShotRules)
+    }
+
+    /// Cancels an armed one-shot by id. Returns false if no such one-shot is
+    /// currently armed (the caller falls back to this from the persistent-rule
+    /// `remove`, so a not-found here is a real "no such rule" case).
+    @discardableResult
+    func removeOneShotRule(id: UUID) -> Bool {
+        guard let index = oneShotRules.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+        oneShotRules.remove(at: index)
+        oneShotRuleEngine.rebuild(rules: oneShotRules)
+        return true
+    }
+
+    /// Consumes the one-shot (if any) that fired for this decision. Must be
+    /// called with the *merged* decision `applyingOneShotOverride` produced —
+    /// its `matchedRuleId` only equals a one-shot's id when the override
+    /// actually applied, so a one-shot bailed on (e.g. the window turned out
+    /// unmanaged) is correctly left armed for a later, real window.
+    func reapOneShotRuleIfFired(_ mergedDecision: WindowDecision) {
+        guard let matchedRuleId = mergedDecision.ruleEffects.matchedRuleId,
+              oneShotRules.contains(where: { $0.id == matchedRuleId })
+        else {
+            return
+        }
+        removeOneShotRule(id: matchedRuleId)
+    }
+
+    /// Overlays any armed one-shot that matches `evaluation.facts` and reaps it
+    /// on a genuine match. Only the live window-creation path should call this —
+    /// see the `oneShotRules` doc comment; the refresh and manual-reapply paths
+    /// must keep evaluating without ever passing through here.
+    func applyingOneShotRule(to evaluation: WindowDecisionEvaluation) -> WindowDecisionEvaluation {
+        guard !oneShotRules.isEmpty else {
+            return evaluation
+        }
+        let oneShotDecision = oneShotRuleEngine.decision(
+            for: evaluation.facts,
+            token: evaluation.token,
+            appFullscreen: evaluation.appFullscreen
+        )
+        guard let matchedRuleId = oneShotDecision.ruleEffects.matchedRuleId,
+              let oneShot = oneShotRules.first(where: { $0.id == matchedRuleId })
+        else {
+            return evaluation
+        }
+        let merged = WindowRuleEngine.applyingOneShotOverride(evaluation.decision, oneShot: oneShot)
+        reapOneShotRuleIfFired(merged)
+        return WindowDecisionEvaluation(
+            token: evaluation.token,
+            facts: evaluation.facts,
+            decision: merged,
+            appFullscreen: evaluation.appFullscreen,
+            manualOverride: evaluation.manualOverride,
+            admissionGeometry: evaluation.admissionGeometry
+        )
     }
 
     private var workspaceBarRefreshIsEnabled: Bool {
