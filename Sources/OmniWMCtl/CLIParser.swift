@@ -367,6 +367,7 @@ enum CLIParser {
         var minHeight: Double?
         var focus: IPCRuleFocus?
         var windowLevel: IPCRuleWindowLevel?
+        var oneShot: Bool?
         var seenFlags: Set<String> = []
         var index = 0
 
@@ -417,6 +418,13 @@ enum CLIParser {
                     throw CLIParseError.usage(usageText)
                 }
                 windowLevel = parsedLevel
+            case "--one-shot":
+                // Mirrors yabai's own `one-shot=on` rule flag rather than a bare
+                // switch, so it fits this parser's uniform `--flag value` shape.
+                guard value == "on" || value == "off" else {
+                    throw CLIParseError.usage(usageText)
+                }
+                oneShot = value == "on"
             default:
                 throw CLIParseError.usage(usageText)
             }
@@ -437,7 +445,8 @@ enum CLIParser {
             minWidth: minWidth,
             minHeight: minHeight,
             focus: focus,
-            windowLevel: windowLevel
+            windowLevel: windowLevel,
+            oneShot: oneShot
         )
 
         guard IPCRuleValidator.validate(definition).isValid else {
