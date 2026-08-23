@@ -46,15 +46,17 @@ final class WindowRuleCascadeTests: XCTestCase {
     func testNarrowRuleOverridesWildcardPerField() {
         let engine = WindowRuleEngine()
         engine.rebuild(rules: [
-            AppRule(bundleId: AppRule.wildcardBundleId, windowLevel: .normal),
-            AppRule(bundleId: "com.spotify.client", windowLevel: .floating),
+            AppRule(bundleId: AppRule.wildcardBundleId, focus: .never, windowLevel: .normal),
+            AppRule(bundleId: "com.spotify.client", focus: .always),
         ])
 
         let spotify = engine.decision(for: facts(bundleId: "com.spotify.client"), token: nil, appFullscreen: false)
-        XCTAssertEqual(spotify.ruleEffects.windowLevel, .floating)
+        XCTAssertEqual(spotify.ruleEffects.focus, .always)
+        // Not stated by the narrow rule, so it still falls through to the default.
+        XCTAssertEqual(spotify.ruleEffects.windowLevel, .normal)
 
         let other = engine.decision(for: facts(bundleId: "com.apple.finder"), token: nil, appFullscreen: false)
-        XCTAssertEqual(other.ruleEffects.windowLevel, .normal)
+        XCTAssertEqual(other.ruleEffects.focus, .never)
     }
 
     func testNarrowRuleWithUnrelatedEffectDoesNotShadowDefault() {
@@ -80,6 +82,30 @@ final class WindowRuleCascadeTests: XCTestCase {
 
         let decision = engine.decision(for: facts(bundleId: "com.spotify.client"), token: nil, appFullscreen: false)
         XCTAssertEqual(decision.ruleEffects.windowLevel, .floating)
+    }
+
+    func testFocusGateTruthTable() {
+        let pid: pid_t = 42
+
+        XCTAssertTrue(WindowFocusPolicyGate.allowsFocus(
+            policy: nil, windowPid: pid, frontmostPid: 99, recentUserInput: false
+        ), "no rule keeps today's always-focus behaviour")
+
+        XCTAssertFalse(WindowFocusPolicyGate.allowsFocus(
+            policy: .never, windowPid: pid, frontmostPid: pid, recentUserInput: true
+        ))
+
+        XCTAssertTrue(WindowFocusPolicyGate.allowsFocus(
+            policy: .userInitiated, windowPid: pid, frontmostPid: pid, recentUserInput: true
+        ))
+
+        XCTAssertFalse(WindowFocusPolicyGate.allowsFocus(
+            policy: .userInitiated, windowPid: pid, frontmostPid: pid, recentUserInput: false
+        ), "app is frontmost but nothing the user did caused it")
+
+        XCTAssertFalse(WindowFocusPolicyGate.allowsFocus(
+            policy: .userInitiated, windowPid: pid, frontmostPid: 99, recentUserInput: true
+        ), "user is busy in another app")
     }
 
     func testAutoLevelSinksTiledWindows() {
@@ -108,9 +134,11 @@ final class WindowRuleCascadeTests: XCTestCase {
     func testRoundTripsThroughCodable() throws {
         let rule = AppRule(
             bundleId: AppRule.wildcardBundleId,
+            focus: .userInitiated,
             windowLevel: .floating
         )
         let decoded = try JSONDecoder().decode(AppRule.self, from: JSONEncoder().encode(rule))
+        XCTAssertEqual(decoded.focus, .userInitiated)
         XCTAssertEqual(decoded.windowLevel, .floating)
     }
 }

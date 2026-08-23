@@ -964,6 +964,20 @@ enum StructuralMutationOutcome: Equatable {
         return (viewportNeedsRecalc, rememberedFocusToken)
     }
 
+    /// Whether an arriving window may select itself, scroll the viewport to
+    /// itself, and take focus, per the `focus` field resolved from app rules.
+    ///
+    /// Denying this leaves the window tiled where it was inserted but keeps the
+    /// user's selection, viewport, and keyboard focus where they already were.
+    private func allowsArrivalFocus(_ token: WindowToken) -> Bool {
+        WindowFocusPolicyGate.allowsFocus(
+            policy: controller?.workspaceManager.entry(for: token)?.ruleEffects.focus,
+            windowPid: token.pid,
+            frontmostPid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            recentUserInput: WindowFocusPolicyGate.hasRecentUserInput()
+        )
+    }
+
     private func handleNewWindowArrival(
         pass: NiriLayoutPass,
         motion: MotionSnapshot,
@@ -982,7 +996,8 @@ enum StructuralMutationOutcome: Equatable {
         if snapshot.hasCompletedInitialRefresh,
            let newToken = newTokens.last,
            let newNode = pass.engine.findNode(for: newToken, in: pass.wsId),
-           snapshot.isActiveWorkspace
+           snapshot.isActiveWorkspace,
+           allowsArrivalFocus(newToken)
         {
             let isTabLocalArrival = insertion.tabLocalTokens.contains(newToken)
             state.selectedNodeId = newNode.id
