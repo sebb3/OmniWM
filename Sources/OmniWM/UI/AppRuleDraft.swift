@@ -72,6 +72,8 @@ struct AppRuleDraft: Identifiable, Equatable {
     var axRole: String
     var axSubroleEnabled: Bool
     var axSubrole: String
+    /// `nil` means cascade: inherit from the most specific rule that sets it.
+    var windowLevel: WindowRuleWindowLevel?
 
     init(id: UUID = UUID(), bundleId: String = "") {
         self.id = id
@@ -94,6 +96,7 @@ struct AppRuleDraft: Identifiable, Equatable {
         axRole = ""
         axSubroleEnabled = false
         axSubrole = ""
+        windowLevel = nil
     }
 
     init(rule: AppRule) {
@@ -123,6 +126,7 @@ struct AppRuleDraft: Identifiable, Equatable {
         axRole = rule.axRole ?? ""
         axSubroleEnabled = rule.axSubrole?.isEmpty == false
         axSubrole = rule.axSubrole ?? ""
+        windowLevel = rule.windowLevel
     }
 
     static func == (lhs: AppRuleDraft, rhs: AppRuleDraft) -> Bool {
@@ -145,7 +149,8 @@ struct AppRuleDraft: Identifiable, Equatable {
             lhs.axRoleEnabled == rhs.axRoleEnabled &&
             lhs.axRole == rhs.axRole &&
             lhs.axSubroleEnabled == rhs.axSubroleEnabled &&
-            lhs.axSubrole == rhs.axSubrole
+            lhs.axSubrole == rhs.axSubrole &&
+            lhs.windowLevel == rhs.windowLevel
     }
 
     static func guided(from snapshot: WindowDecisionDebugSnapshot) -> AppRuleDraft? {
@@ -214,8 +219,8 @@ struct AppRuleDraft: Identifiable, Equatable {
     var effectHint: String? {
         let rule = makeRule()
         guard rule.hasIdentifyingMatcher, !rule.hasEffect else { return nil }
-        return "This rule matches windows but has no effect — set a layout, workspace, initial container primary span, "
-            + "or minimum size."
+        return "This rule matches windows but has no effect — set a layout, window level, workspace, "
+            + "initial container primary span, or minimum size."
     }
 
     var isValid: Bool {
@@ -254,7 +259,8 @@ struct AppRuleDraft: Identifiable, Equatable {
             assignToWorkspace: assignToWorkspaceEnabled ? assignToWorkspace.trimmedNonEmpty : nil,
             initialContainerPrimarySpan: initialContainerPrimarySpanEnabled ? initialContainerPrimarySpan : nil,
             minWidth: minWidthEnabled ? minWidth : nil,
-            minHeight: minHeightEnabled ? minHeight : nil
+            minHeight: minHeightEnabled ? minHeight : nil,
+            windowLevel: windowLevel
         )
     }
 

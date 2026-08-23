@@ -53,9 +53,14 @@ public enum IPCRuleValidator {
         pattern: "^[a-zA-Z0-9]+([.-][a-zA-Z0-9]+)*$"
     )
 
+    /// The catch-all rule's bundle id. Matches every window and scores no
+    /// specificity, so any real rule outranks it.
+    public static let wildcardBundleId = "*"
+
     public static func bundleIdError(for bundleId: String) -> String? {
         let trimmed = bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        guard trimmed != wildcardBundleId else { return nil }
 
         let range = NSRange(trimmed.startIndex..., in: trimmed)
         guard appIdentifierPattern.firstMatch(in: trimmed, range: range) != nil else {
@@ -83,9 +88,11 @@ public enum IPCRuleValidator {
             || rule.initialContainerPrimarySpan.map { initialContainerPrimarySpanError(for: $0) == nil } == true
             || rule.minWidth != nil
             || rule.minHeight != nil
+            || rule.windowLevel != nil
         return hasEffect
             ? nil
-            : "Set a layout, workspace, initial container primary span, or minimum size — this rule has no effect"
+            : "Set a layout, workspace, initial container primary span, minimum size, "
+            + "or window level — this rule has no effect"
     }
 
     public static func initialContainerPrimarySpanError(for value: Double?) -> String? {

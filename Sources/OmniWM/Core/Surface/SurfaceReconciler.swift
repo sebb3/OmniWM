@@ -8,6 +8,9 @@ struct DesiredBorderSurface: Equatable {
     var token: WindowToken
     var frame: CGRect
     var config: BorderConfig
+    /// Sub-level of the framed window, so the border shares its band instead of
+    /// hovering over unrelated windows.
+    var subLevel: ScriptingAddition.LevelKey = .normal
 
     var windowId: Int {
         token.windowId
@@ -137,7 +140,15 @@ enum SurfaceDerivation {
         else {
             return nil
         }
-        return DesiredBorderSurface(token: entry.token, frame: frame, config: config)
+        return DesiredBorderSurface(
+            token: entry.token,
+            frame: frame,
+            config: config,
+            subLevel: ScriptingAddition.resolveLevel(
+                rule: entry.ruleEffects.windowLevel,
+                isFloating: entry.mode == .floating
+            )
+        )
     }
 
     @MainActor

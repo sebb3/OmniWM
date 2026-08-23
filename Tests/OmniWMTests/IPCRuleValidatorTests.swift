@@ -229,6 +229,38 @@ final class IPCRuleValidatorTests: XCTestCase {
         XCTAssertNotNil(height.minSizeError)
     }
 
+    /// The catch-all rule is authored as `bundleId = "*"`, which the bundle-id
+    /// pattern cannot match. The editor rejected the one rule that supplies
+    /// every default.
+    func testWildcardBundleIdIsValid() {
+        XCTAssertNil(IPCRuleValidator.bundleIdError(for: IPCRuleValidator.wildcardBundleId))
+
+        // Needs an effect of its own: a matcher with nothing to apply is
+        // rejected as inert regardless of the bundle id.
+        let report = IPCRuleValidator.validate(IPCRuleDefinition(bundleId: "*", layout: .float))
+        XCTAssertNil(report.bundleIdError)
+        XCTAssertNil(report.identifierError)
+        XCTAssertTrue(report.isValid)
+    }
+
+    func testWildcardOnlyMatchesExactly() {
+        XCTAssertNotNil(IPCRuleValidator.bundleIdError(for: "com.*.app"))
+        XCTAssertNotNil(IPCRuleValidator.bundleIdError(for: "**"))
+    }
+
+    /// A rule whose only effect is the cascading field is not inert.
+    func testWindowLevelAloneCountsAsAnEffect() {
+        let levelOnly = IPCRuleValidator.validate(
+            IPCRuleDefinition(bundleId: "com.test.app", windowLevel: .floating)
+        )
+        XCTAssertNil(levelOnly.effectError)
+
+        let neither = IPCRuleValidator.validate(
+            IPCRuleDefinition(bundleId: "com.test.app")
+        )
+        XCTAssertNotNil(neither.effectError)
+    }
+
     func testMinSizeAcceptsSmallestPositiveFinite() {
         let one = IPCRuleValidator.validate(
             IPCRuleDefinition(bundleId: "com.test.app", minWidth: 1)
