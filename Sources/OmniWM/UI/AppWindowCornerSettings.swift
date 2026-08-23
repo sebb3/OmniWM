@@ -208,7 +208,14 @@ struct AppWindowCornerSettings: View {
 enum AppWindowCornerRadiusFormatting {
     static func string(for radius: Double) -> String {
         guard radius != 0 else { return "Square" }
-        return radius.formatted(.number.precision(.significantDigits(1 ... 6))) + " pt"
+        // The unit suffix is hardcoded English, so this was never actually
+        // localized — under a comma-decimal locale it silently became
+        // ambiguous with the significant-digit grouping (e.g. "12,25 pt").
+        // Pin the locale to match the fixed suffix instead of leaving the
+        // separator to whichever locale the machine happens to run under.
+        return radius.formatted(
+            .number.precision(.significantDigits(1 ... 6)).locale(Locale(identifier: "en_US_POSIX"))
+        ) + " pt"
     }
 }
 
