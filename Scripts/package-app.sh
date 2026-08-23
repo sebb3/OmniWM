@@ -75,8 +75,15 @@ if [ "$SIGN_AND_NOTARIZE" = "true" ]; then
   rm -f "$ZIP_PATH"
   echo "Done! $APP_DIR is signed and notarized."
 elif [ "$SIGN_AND_NOTARIZE" = "dev" ]; then
+  # Ad-hoc signing ties the designated requirement to the binary's cdhash, so
+  # every rebuild looks like a new app to TCC and all Accessibility / Input
+  # Monitoring grants are dropped. A self-signed certificate keeps the DR tied
+  # to the certificate instead, so grants survive rebuilds.
+  DEV_FALLBACK_IDENTITY="${OMNIWM_DEV_SIGNING_IDENTITY:-OmniWM Dev Signing}"
   if security find-identity -v -p codesigning | grep -qF "$SIGNING_IDENTITY"; then
     IDENTITY="$SIGNING_IDENTITY"
+  elif security find-identity -v -p codesigning | grep -qF "$DEV_FALLBACK_IDENTITY"; then
+    IDENTITY="$DEV_FALLBACK_IDENTITY"
   else
     IDENTITY="-"
   fi
