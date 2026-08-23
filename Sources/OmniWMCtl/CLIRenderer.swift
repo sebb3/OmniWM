@@ -530,7 +530,8 @@ enum CLIRenderer {
         _ payload: IPCCapabilitiesQueryResult,
         format: CLIOutputFormat
     ) -> String {
-        let rows = [
+        // Explicit type: the 6.3 type checker times out inferring this literal.
+        let rows: [[String]] = [
             ["protocol-version", String(payload.protocolVersion)],
             ["app-version", payload.appVersion ?? "-"],
             ["authorization-required", payload.authorizationRequired ? "true" : "false"],
