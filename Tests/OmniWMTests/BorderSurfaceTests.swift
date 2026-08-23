@@ -17,6 +17,7 @@ final class BorderSurfaceTests: XCTestCase {
         var moveCount = 0
         var moveAndOrderCount = 0
         var hideCount = 0
+        var appliedSubLevels: [Int32] = []
         var nextWindowId: UInt32 = 1001
         var contextProvider: @MainActor () -> CGContext? = { BorderOperationsRecorder.makeContext() }
 
@@ -41,6 +42,9 @@ final class BorderSurfaceTests: XCTestCase {
                 transactionMove: { [weak self] _, _ in self?.moveCount += 1 },
                 transactionMoveAndOrder: { [weak self] _, _, _, _, _ in self?.moveAndOrderCount += 1 },
                 transactionHide: { [weak self] _ in self?.hideCount += 1 },
+                setSubLevel: { [weak self] _, level in
+                    self?.appliedSubLevels.append(level)
+                },
                 backingScaleForFrame: { _ in (2.0, CGRect(x: 0, y: 0, width: 5000, height: 5000)) }
             )
         }

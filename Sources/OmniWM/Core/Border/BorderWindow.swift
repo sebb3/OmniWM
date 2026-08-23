@@ -18,6 +18,7 @@ final class BorderWindow {
         var transactionMove: @MainActor (UInt32, CGPoint) -> Void
         var transactionMoveAndOrder: @MainActor (UInt32, CGPoint, Int32, UInt32, SkyLightWindowOrder) -> Void
         var transactionHide: @MainActor (UInt32) -> Void
+        var setSubLevel: @MainActor (UInt32, Int32) -> Void
         var backingScaleForFrame: @MainActor (CGRect) -> (scale: CGFloat, screenFrame: CGRect)
 
         static let live = Self(
@@ -34,6 +35,7 @@ final class BorderWindow {
                 SkyLight.shared.transactionMoveAndOrder($0, origin: $1, level: $2, relativeTo: $3, order: $4)
             },
             transactionHide: { SkyLight.shared.transactionHide($0) },
+            setSubLevel: { SkyLight.shared.setSubLevel($0, $1) },
             backingScaleForFrame: { targetFrame in
                 let targetScreen = NSScreen.screens.first(where: {
                     $0.frame.contains(targetFrame.center)
@@ -60,7 +62,12 @@ final class BorderWindow {
     private var cachedScaleScreenFrame: CGRect = .null
 
     private let defaultCornerRadii = WindowCornerRadii(uniform: 9.0)
-    private let orderingLevel: Int32 = 3
+    /// The border shares the ordinary window level and is separated from its
+    /// neighbours by sub-level instead, matching whatever band the framed window
+    /// sits in. A fixed higher level would make the border hover above unrelated
+    /// windows whenever its own window was not frontmost.
+    private let orderingLevel = CGWindowLevelForKey(.normalWindow)
+    private var currentSubLevel: Int32?
 
     init(config: BorderConfig, operations: Operations = .live) {
         self.config = config
@@ -87,7 +94,8 @@ final class BorderWindow {
         frame targetFrame: CGRect,
         targetWid: UInt32,
         cornerRadii: WindowCornerRadii = WindowCornerRadii(uniform: 9.0),
-        forceOrdering: Bool = false
+        forceOrdering: Bool = false,
+        subLevel: Int32? = nil
     ) -> Bool {
         BorderOpMetricsRecorder.shared.noteUpdate()
         let scale = backingScale(for: targetFrame)
@@ -125,6 +133,11 @@ final class BorderWindow {
 
         if needsRedraw {
             draw(frame: frame)
+        }
+
+        if let subLevel, subLevel != currentSubLevel, wid != 0 {
+            operations.setSubLevel(wid, subLevel)
+            currentSubLevel = subLevel
         }
 
         let needsOrdering = forceOrdering || createdWindow || !isVisible || lastOrderedTargetWid != targetWid
@@ -247,7 +260,11 @@ final class BorderWindow {
     private func move(relativeTo targetWid: UInt32, needsOrdering: Bool) {
         if needsOrdering {
             BorderOpMetricsRecorder.shared.noteMoveAndOrder()
-            operations.transactionMoveAndOrder(wid, origin, orderingLevel, targetWid, .below)
+            // Directly above the framed window, inside its band: the ring is
+            // drawn over the window's own edge, so ordering below would hide it
+            // entirely, while a higher level would let it cover unrelated
+            // windows.
+            operations.transactionMoveAndOrder(wid, origin, orderingLevel, targetWid, .above)
             return
         }
 

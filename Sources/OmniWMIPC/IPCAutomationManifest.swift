@@ -983,6 +983,11 @@ public enum IPCAutomationManifest {
             flag: "--min-height",
             summary: "Set the minimum floating height in points.",
             valuePlaceholder: "<points>"
+        ),
+        .init(
+            flag: "--window-level",
+            summary: "Set the window stacking level. Omit to cascade to a less specific rule.",
+            valuePlaceholder: "<auto|below|normal|floating>"
         )
     ]
 

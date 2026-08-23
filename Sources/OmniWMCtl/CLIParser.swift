@@ -351,6 +351,7 @@ enum CLIParser {
         var initialContainerPrimarySpan: Double?
         var minWidth: Double?
         var minHeight: Double?
+        var windowLevel: IPCRuleWindowLevel?
         var seenFlags: Set<String> = []
         var index = 0
 
@@ -391,6 +392,11 @@ enum CLIParser {
                 minWidth = try parsePositiveDouble(value)
             case "--min-height":
                 minHeight = try parsePositiveDouble(value)
+            case "--window-level":
+                guard let parsedLevel = IPCRuleWindowLevel(rawValue: value) else {
+                    throw CLIParseError.usage(usageText)
+                }
+                windowLevel = parsedLevel
             default:
                 throw CLIParseError.usage(usageText)
             }
@@ -409,7 +415,8 @@ enum CLIParser {
             assignToWorkspace: assignToWorkspace,
             initialContainerPrimarySpan: initialContainerPrimarySpan,
             minWidth: minWidth,
-            minHeight: minHeight
+            minHeight: minHeight,
+            windowLevel: windowLevel
         )
 
         guard IPCRuleValidator.validate(definition).isValid else {
