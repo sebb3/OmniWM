@@ -248,8 +248,13 @@ final class IPCRuleValidatorTests: XCTestCase {
         XCTAssertNotNil(IPCRuleValidator.bundleIdError(for: "**"))
     }
 
-    /// A rule whose only effect is the cascading field is not inert.
-    func testWindowLevelAloneCountsAsAnEffect() {
+    /// A rule whose only effects are the cascading fields is not inert.
+    func testFocusOrWindowLevelAloneCountsAsAnEffect() {
+        let focusOnly = IPCRuleValidator.validate(
+            IPCRuleDefinition(bundleId: "com.test.app", focus: .never)
+        )
+        XCTAssertNil(focusOnly.effectError)
+
         let levelOnly = IPCRuleValidator.validate(
             IPCRuleDefinition(bundleId: "com.test.app", windowLevel: .floating)
         )

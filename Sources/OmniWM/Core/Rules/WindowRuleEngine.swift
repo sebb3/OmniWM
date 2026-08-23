@@ -46,6 +46,7 @@ struct ManagedWindowRuleEffects: Equatable, Sendable {
     var minWidth: Double?
     var minHeight: Double?
     var matchedRuleId: UUID?
+    var focus: WindowRuleFocusPolicy?
     var windowLevel: WindowRuleWindowLevel?
 
     static let none = ManagedWindowRuleEffects()
@@ -484,6 +485,7 @@ final class WindowRuleEngine {
             minWidth: userRule?.rule.minWidth,
             minHeight: userRule?.rule.minHeight,
             matchedRuleId: userRule?.rule.id,
+            focus: cascade(in: compiledUserRules, facts: facts) { $0.focus },
             windowLevel: cascade(in: compiledUserRules, facts: facts) { $0.windowLevel }
         )
         let admissionHints = ManagedWindowAdmissionHints(

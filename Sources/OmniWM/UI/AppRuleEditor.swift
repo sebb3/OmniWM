@@ -199,6 +199,13 @@ struct RuleWindowBehaviorSection: View {
             }
             .pickerStyle(.segmented)
 
+            Picker("Focus", selection: $draft.focus) {
+                Text("Cascade").tag(WindowRuleFocusPolicy?.none)
+                ForEach(WindowRuleFocusPolicy.allCases) { policy in
+                    Text(policy.displayName).tag(WindowRuleFocusPolicy?.some(policy))
+                }
+            }
+
             Picker("Window Level", selection: $draft.windowLevel) {
                 Text("Cascade").tag(WindowRuleWindowLevel?.none)
                 ForEach(WindowRuleWindowLevel.allCases) { level in
@@ -208,8 +215,8 @@ struct RuleWindowBehaviorSection: View {
 
             SettingsCaption(
                 "Cascade takes the value from the most specific rule that sets it, so a narrow "
-                    + "rule can override this without discarding the rest. The settings above "
-                    + "instead come wholly from the single best-matching rule."
+                    + "rule can override one of these without discarding the others. The settings "
+                    + "above instead come wholly from the single best-matching rule."
             )
 
             Toggle("Assign to Workspace", isOn: $draft.assignToWorkspaceEnabled)

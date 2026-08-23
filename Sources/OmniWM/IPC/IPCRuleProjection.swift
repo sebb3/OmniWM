@@ -53,6 +53,7 @@ enum IPCRuleProjection {
             initialContainerPrimarySpan: definition.initialContainerPrimarySpan,
             minWidth: definition.minWidth,
             minHeight: definition.minHeight,
+            focus: definition.focus,
             windowLevel: definition.windowLevel,
             specificity: rule.specificity,
             isValid: isValid,
@@ -75,6 +76,7 @@ enum IPCRuleProjection {
                 initialContainerPrimarySpan: rule.initialContainerPrimarySpan,
                 minWidth: rule.minWidth,
                 minHeight: rule.minHeight,
+                focus: ipcRuleFocus(from: rule.focus),
                 windowLevel: ipcRuleWindowLevel(from: rule.windowLevel)
             )
         )
@@ -95,6 +97,7 @@ enum IPCRuleProjection {
             initialContainerPrimarySpan: normalized.initialContainerPrimarySpan,
             minWidth: normalized.minWidth,
             minHeight: normalized.minHeight,
+            focus: windowRuleFocus(from: normalized.focus),
             windowLevel: windowRuleWindowLevel(from: normalized.windowLevel)
         )
     }
@@ -112,6 +115,7 @@ enum IPCRuleProjection {
             initialContainerPrimarySpan: definition.initialContainerPrimarySpan,
             minWidth: definition.minWidth,
             minHeight: definition.minHeight,
+            focus: definition.focus,
             windowLevel: definition.windowLevel
         )
     }
@@ -127,8 +131,26 @@ enum IPCRuleProjection {
         }
     }
 
-    // `windowLevel` cascades per field, so nil round-trips as nil rather than
+    // These two cascade per field, so nil round-trips as nil rather than
     // collapsing to a default the way `layout` does.
+
+    private static func ipcRuleFocus(from focus: WindowRuleFocusPolicy?) -> IPCRuleFocus? {
+        switch focus {
+        case .none: nil
+        case .always: .always
+        case .userInitiated: .userInitiated
+        case .never: .never
+        }
+    }
+
+    private static func windowRuleFocus(from focus: IPCRuleFocus?) -> WindowRuleFocusPolicy? {
+        switch focus {
+        case .none: nil
+        case .always: .always
+        case .userInitiated: .userInitiated
+        case .never: .never
+        }
+    }
 
     private static func ipcRuleWindowLevel(from level: WindowRuleWindowLevel?) -> IPCRuleWindowLevel? {
         switch level {
