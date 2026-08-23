@@ -20,10 +20,46 @@ enum IPCRuleProjection {
         return IPCRulesQueryResult(rules: rules)
     }
 
+    /// Armed one-shots, appended after `settings.appRules` in the combined
+    /// listing so an unfired one is discoverable (`isOneShot: true`) rather than
+    /// silently invisible between arming and firing. `position` continues the
+    /// persistent list's numbering for a stable, unique position across the
+    /// combined result; it has no meaning for `rule move`, which only ever
+    /// operates on `settings.appRules`.
+    static func oneShotResult(
+        rules: [AppRule],
+        windowRuleEngine: WindowRuleEngine,
+        startingPosition: Int
+    ) -> IPCRulesQueryResult {
+        let snapshots = rules.enumerated().map { index, rule in
+            snapshot(
+                from: rule,
+                position: startingPosition + index,
+                invalidRegexMessagesByRuleId: windowRuleEngine.invalidRegexMessagesByRuleId,
+                isOneShot: true
+            )
+        }
+        return IPCRulesQueryResult(rules: snapshots)
+    }
+
+    /// `result(settings:windowRuleEngine:)` plus `oneShotResult`, in one
+    /// listing — what every read of "the current rules" (query, and each
+    /// mutation's response) should actually return.
+    static func combinedResult(controller: WMController) -> IPCRulesQueryResult {
+        let persistent = result(settings: controller.settings, windowRuleEngine: controller.windowRuleEngine)
+        let oneShots = oneShotResult(
+            rules: controller.oneShotRules,
+            windowRuleEngine: controller.oneShotRuleEngine,
+            startingPosition: persistent.rules.count + 1
+        )
+        return IPCRulesQueryResult(rules: persistent.rules + oneShots.rules)
+    }
+
     static func snapshot(
         from rule: AppRule,
         position: Int,
-        invalidRegexMessagesByRuleId: [UUID: String]
+        invalidRegexMessagesByRuleId: [UUID: String],
+        isOneShot: Bool = false
     ) -> IPCRuleSnapshot {
         let definition = definition(from: rule)
         let validation = IPCRuleValidator.validate(definition)
@@ -55,6 +91,7 @@ enum IPCRuleProjection {
             minHeight: definition.minHeight,
             focus: definition.focus,
             windowLevel: definition.windowLevel,
+            isOneShot: isOneShot,
             specificity: rule.specificity,
             isValid: isValid,
             invalidRegexMessage: invalidRegexMessage,

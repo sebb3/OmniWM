@@ -289,10 +289,7 @@ final class IPCQueryRouter {
     }
 
     func rulesResult() -> IPCRulesQueryResult {
-        IPCRuleProjection.result(
-            settings: controller.settings,
-            windowRuleEngine: controller.windowRuleEngine
-        )
+        IPCRuleProjection.combinedResult(controller: controller)
     }
 
     func ruleActionsResult() -> IPCRuleActionsQueryResult {
