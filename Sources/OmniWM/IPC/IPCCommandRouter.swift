@@ -401,10 +401,10 @@ final class IPCCommandRouter {
     }
 
     private func switchWorkspace(using command: HotkeyCommand) -> ExternalCommandResult {
-        let previousWorkspaceId = controller.activeWorkspace()?.id
-        let result = controller.commandHandler.performCommand(command)
-        guard result == .executed else { return result }
-        return controller.activeWorkspace()?.id == previousWorkspaceId ? .notFound : .executed
+        // Workspace animation captures and stages proxies before mutating the
+        // active workspace, so success means the command was accepted here;
+        // activation completes asynchronously a few milliseconds later.
+        controller.commandHandler.performCommand(command)
     }
 
     private func moveFocusedWindow(using command: HotkeyCommand) -> ExternalCommandResult {
@@ -463,9 +463,11 @@ final class IPCCommandRouter {
             rawWorkspaceID = resolved
         }
 
-        let previousWorkspaceId = controller.activeWorkspace()?.id
+        if controller.activeWorkspace()?.name == rawWorkspaceID {
+            return .notFound
+        }
         controller.workspaceNavigationHandler.switchWorkspace(rawWorkspaceID: rawWorkspaceID)
-        return controller.activeWorkspace()?.id == previousWorkspaceId ? .notFound : .executed
+        return .executed
     }
 
     private func switchWorkspaceAnywhere(to target: WorkspaceTarget) -> ExternalCommandResult {

@@ -8,6 +8,7 @@ import OmniWMIPC
 @MainActor
 final class WorkspaceNavigationHandler {
     weak var controller: WMController?
+    private var workspaceSwitchPreparationGeneration: UInt64 = 0
 
     private enum WorkspaceMoveFocusPolicy {
         case configured
@@ -263,75 +264,127 @@ final class WorkspaceNavigationHandler {
                 if startScrollAnimation {
                     controller.layoutRefreshController.startScrollAnimation(for: targetWorkspaceId)
                 }
-                // Deferred to here, inside the post-layout callback, because the
-                // real hide/reveal frames from `setActiveWorkspace` are only
-                // authoritative once `commitWorkspaceTransition`'s async relayout
-                // has actually run — calling this any earlier would animate toward
-                // stale (pre-switch) frames.
+                // The real visibility mutation ran under already-staged
+                // proxies. Only the incoming proxies need their final physical
+                // frames before both rows can start one shared spring.
                 if let monitor, let verticalSwitchAnimation {
-                    let incomingNowFrames = Self.captureWindowFrames(
-                        for: targetWorkspaceId,
-                        controller: controller
-                    )
-                    Log.layout.notice(
-                        "workspace switch animation starting outgoing=\(verticalSwitchAnimation.outgoingPriorFrames.count) "
-                            + "incoming=\(incomingNowFrames.count)"
-                    )
+                    let incomingMembers = Self.captureWindowFrames(for: targetWorkspaceId, controller: controller).map {
+                        WorkspaceSwitchTransition.Member(entry: $0.entry, baseFrame: $0.priorFrame, isIncoming: true)
+                    }
                     controller.layoutRefreshController.startWorkspaceSwitchTransition(
                         monitor: monitor,
-                        outgoingEntries: verticalSwitchAnimation.outgoingPriorFrames,
-                        incomingEntries: incomingNowFrames.map {
-                            (
-                                entry: $0.entry,
-                                priorFrame: verticalSwitchAnimation.incomingPriorFrame(for: $0.entry.token) ?? $0.priorFrame
-                            )
-                        }
+                        targetWorkspaceId: targetWorkspaceId,
+                        staged: verticalSwitchAnimation.staged,
+                        incomingMembers: incomingMembers
                     )
                 }
+            },
+            postLayoutInvalidated: { [weak controller] in
+                guard let controller, let staged = verticalSwitchAnimation?.staged else { return }
+                controller.layoutRefreshController.cancelStagedWorkspaceSwitchTransition(staged)
             }
         )
     }
 
-    /// Frames captured *before* `setActiveWorkspace` runs — the animation's
-    /// true start points. The outgoing set is used directly; the incoming set
-    /// is looked up by token once the real post-switch frames are known, since
-    /// which windows actually end up on the incoming workspace's monitor can
-    /// only be confirmed after the switch (a window might be reassigned,
-    /// closed, etc. in between).
     struct WorkspaceSwitchAnimationCapture {
-        let outgoingPriorFrames: [(entry: WindowState, priorFrame: CGRect)]
-        private let incomingPriorFramesByToken: [WindowToken: CGRect]
-
-        init(
-            outgoingPriorFrames: [(entry: WindowState, priorFrame: CGRect)],
-            incomingPriorFrames: [(entry: WindowState, priorFrame: CGRect)]
-        ) {
-            self.outgoingPriorFrames = outgoingPriorFrames
-            incomingPriorFramesByToken = Dictionary(
-                incomingPriorFrames.map { ($0.entry.token, $0.priorFrame) },
-                uniquingKeysWith: { first, _ in first }
-            )
-        }
-
-        func incomingPriorFrame(for token: WindowToken) -> CGRect? {
-            incomingPriorFramesByToken[token]
-        }
+        let staged: WorkspaceSwitchStagedTransition
     }
 
-    /// Best-effort snapshot of each window's current on-screen frame for a
-    /// workspace, used as an animation endpoint. Windows without a readable
-    /// frame yet (e.g. still being admitted) are simply omitted — they animate
-    /// in on a later pass instead of blocking this one.
+    /// Snapshot of each window's *physical* window-server frame for a
+    /// workspace, in AppKit coordinates. `fastFrame`/AX must not be used here:
+    /// the park/reveal system moves surfaces via SkyLight-only writes, so the
+    /// app's own AX frame is chronically stale (it keeps reporting the park
+    /// position long after the window is physically on-screen, and vice
+    /// versa). `SLSGetWindowBounds` is the same physical source the park
+    /// visibility audit trusts. Windows without readable bounds are omitted.
     static func captureWindowFrames(
         for workspaceId: WorkspaceDescriptor.ID,
         controller: WMController
     ) -> [(entry: WindowState, priorFrame: CGRect)] {
         controller.workspaceManager.entries(in: workspaceId).compactMap { entry in
-            guard let frame = controller.layoutRefreshController.fastFrame(for: entry.token, axRef: entry.axRef) else {
+            guard let windowId = UInt32(exactly: entry.windowId),
+                  let bounds = SkyLight.shared.getWindowBounds(windowId)
+            else {
                 return nil
             }
-            return (entry, frame)
+            return (entry, ScreenCoordinateSpace.toAppKit(rect: bounds))
         }
+    }
+
+    /// Defers the workspace mutation until every source/target proxy has been
+    /// captured and atomically swapped in. If capture or staging fails, the
+    /// caller still performs the normal instant switch.
+    private func prepareWorkspaceSwitchAnimation(
+        sourceWorkspaceId: WorkspaceDescriptor.ID,
+        targetWorkspaceId: WorkspaceDescriptor.ID,
+        monitor: Monitor,
+        direction: CGFloat,
+        performSwitch: @escaping (WorkspaceSwitchAnimationCapture?) -> Void
+    ) {
+        guard let controller else { return }
+        workspaceSwitchPreparationGeneration &+= 1
+        let generation = workspaceSwitchPreparationGeneration
+
+        let outgoingMembers = Self.captureWindowFrames(for: sourceWorkspaceId, controller: controller).map {
+            WorkspaceSwitchTransition.Member(entry: $0.entry, baseFrame: $0.priorFrame, isIncoming: false)
+        }
+        let incomingMembers = Self.captureWindowFrames(for: targetWorkspaceId, controller: controller).map {
+            WorkspaceSwitchTransition.Member(entry: $0.entry, baseFrame: $0.priorFrame, isIncoming: true)
+        }
+        let members = outgoingMembers + incomingMembers
+        guard !members.isEmpty else {
+            performSwitch(nil)
+            return
+        }
+        guard members.allSatisfy({ member in
+            NSRunningApplication(processIdentifier: member.entry.pid) != nil
+        }) else {
+            performSwitch(nil)
+            return
+        }
+
+        Task { @MainActor [weak self, weak controller] in
+            guard let self, let controller else { return }
+            let preparation = await controller.layoutRefreshController.prepareWorkspaceSwitchTransition(
+                monitor: monitor,
+                members: members
+            )
+            let currentSourceTokens = Set(controller.workspaceManager.entries(in: sourceWorkspaceId).map(\.token))
+            let currentTargetTokens = Set(controller.workspaceManager.entries(in: targetWorkspaceId).map(\.token))
+            let expectedSourceTokens = Set(outgoingMembers.map(\.entry.token))
+            let expectedTargetTokens = Set(incomingMembers.map(\.entry.token))
+            guard self.workspaceSwitchPreparationGeneration == generation,
+                  controller.activeWorkspace()?.id == sourceWorkspaceId,
+                  controller.workspaceManager.monitor(for: sourceWorkspaceId)?.id == monitor.id,
+                  controller.workspaceManager.monitor(for: targetWorkspaceId)?.id == monitor.id
+            else {
+                preparation?.connection.close()
+                return
+            }
+            guard currentSourceTokens == expectedSourceTokens,
+                  currentTargetTokens == expectedTargetTokens
+            else {
+                preparation?.connection.close()
+                performSwitch(nil)
+                return
+            }
+            guard let preparation,
+                  let staged = controller.layoutRefreshController.stageWorkspaceSwitchTransition(
+                      monitor: monitor,
+                      targetWorkspaceId: targetWorkspaceId,
+                      direction: direction,
+                      preparation: preparation
+                  )
+            else {
+                performSwitch(nil)
+                return
+            }
+            performSwitch(WorkspaceSwitchAnimationCapture(staged: staged))
+        }
+    }
+
+    private func cancelWorkspaceSwitchPreparation() {
+        workspaceSwitchPreparationGeneration &+= 1
     }
 
     func focusMonitorCyclic(previous: Bool) {
@@ -618,11 +671,7 @@ final class WorkspaceNavigationHandler {
     func switchWorkspace(rawWorkspaceID: String) {
         guard let controller else { return }
         let currentWorkspace = controller.activeWorkspace()
-        if let currentWorkspace,
-           currentWorkspace.name == rawWorkspaceID
-        {
-            return
-        }
+        if let currentWorkspace, currentWorkspace.name == rawWorkspaceID { return }
 
         if let currentWorkspace {
             saveNiriViewportState(for: currentWorkspace.id)
@@ -637,22 +686,47 @@ final class WorkspaceNavigationHandler {
             return
         }
 
-        let outgoingPriorFrames = currentWorkspace.map {
-            Self.captureWindowFrames(for: $0.id, controller: controller)
-        } ?? []
-        let incomingPriorFrames = Self.captureWindowFrames(for: targetWorkspaceId, controller: controller)
-
-        guard let result = controller.workspaceManager.focusWorkspace(named: rawWorkspaceID) else { return }
-
-        commitWorkspaceTransitionFocusHandoff(
-            targetWorkspaceId: result.workspace.id,
-            monitor: result.monitor,
-            startScrollAnimation: false,
-            verticalSwitchAnimation: WorkspaceSwitchAnimationCapture(
-                outgoingPriorFrames: outgoingPriorFrames,
-                incomingPriorFrames: incomingPriorFrames
+        let performSwitch: (WorkspaceSwitchAnimationCapture?) -> Void = { [weak self, weak controller] animation in
+            guard let self, let controller else { return }
+            guard let result = controller.workspaceManager.focusWorkspace(named: rawWorkspaceID) else {
+                if let staged = animation?.staged {
+                    controller.layoutRefreshController.cancelStagedWorkspaceSwitchTransition(staged)
+                }
+                return
+            }
+            self.commitWorkspaceTransitionFocusHandoff(
+                targetWorkspaceId: result.workspace.id,
+                monitor: result.monitor,
+                startScrollAnimation: false,
+                verticalSwitchAnimation: animation
             )
-        )
+        }
+
+        // Animate only within one monitor's workspace stack: a cross-monitor
+        // switch has no meaningful vertical direction, so it stays instant.
+        if let currentWorkspace,
+           let sourceMonitor = controller.workspaceManager.monitor(for: currentWorkspace.id),
+           let targetMonitor = controller.workspaceManager.monitor(for: targetWorkspaceId),
+           sourceMonitor.id == targetMonitor.id
+        {
+            let ordered = controller.workspaceManager.workspaces(on: sourceMonitor.id)
+            if let fromIndex = ordered.firstIndex(where: { $0.id == currentWorkspace.id }),
+               let toIndex = ordered.firstIndex(where: { $0.id == targetWorkspaceId }),
+               fromIndex != toIndex
+            {
+                prepareWorkspaceSwitchAnimation(
+                    sourceWorkspaceId: currentWorkspace.id,
+                    targetWorkspaceId: targetWorkspaceId,
+                    monitor: sourceMonitor,
+                    direction: toIndex > fromIndex ? 1 : -1,
+                    performSwitch: performSwitch
+                )
+                return
+            }
+        }
+
+        cancelWorkspaceSwitchPreparation()
+        performSwitch(nil)
     }
 
     func switchWorkspaceRelative(
@@ -681,28 +755,41 @@ final class WorkspaceNavigationHandler {
                 wrapAround: wrapAround
             )
         }
-
         guard let targetWorkspace else { return }
 
-        let outgoingPriorFrames = Self.captureWindowFrames(for: currentWorkspace.id, controller: controller)
-        let incomingPriorFrames = Self.captureWindowFrames(for: targetWorkspace.id, controller: controller)
-
         saveNiriViewportState(for: currentWorkspace.id)
-        guard controller.workspaceManager.setActiveWorkspace(targetWorkspace.id, on: currentMonitorId) else {
-            return
-        }
-
         let monitor = controller.workspaceManager.monitor(for: targetWorkspace.id)
             ?? controller.workspaceManager.monitor(byId: currentMonitorId)
-        commitWorkspaceTransitionFocusHandoff(
-            targetWorkspaceId: targetWorkspace.id,
-            monitor: monitor,
-            startScrollAnimation: false,
-            verticalSwitchAnimation: WorkspaceSwitchAnimationCapture(
-                outgoingPriorFrames: outgoingPriorFrames,
-                incomingPriorFrames: incomingPriorFrames
+        let performSwitch: (WorkspaceSwitchAnimationCapture?) -> Void = { [weak self, weak controller] animation in
+            guard let self, let controller else { return }
+            guard controller.workspaceManager.setActiveWorkspace(targetWorkspace.id, on: currentMonitorId) else {
+                if let staged = animation?.staged {
+                    controller.layoutRefreshController.cancelStagedWorkspaceSwitchTransition(staged)
+                }
+                return
+            }
+            self.commitWorkspaceTransitionFocusHandoff(
+                targetWorkspaceId: targetWorkspace.id,
+                monitor: monitor,
+                startScrollAnimation: false,
+                verticalSwitchAnimation: animation
             )
-        )
+        }
+
+        // `isNext` is the stack direction directly, wraparound included: a
+        // wrapped "next" still reads as descending the stack.
+        if let monitor {
+            prepareWorkspaceSwitchAnimation(
+                sourceWorkspaceId: currentWorkspace.id,
+                targetWorkspaceId: targetWorkspace.id,
+                monitor: monitor,
+                direction: isNext ? 1 : -1,
+                performSwitch: performSwitch
+            )
+        } else {
+            cancelWorkspaceSwitchPreparation()
+            performSwitch(nil)
+        }
     }
 
     func saveNiriViewportState(for workspaceId: WorkspaceDescriptor.ID) {

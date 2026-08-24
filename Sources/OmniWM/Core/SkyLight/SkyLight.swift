@@ -111,6 +111,8 @@ final class SkyLight {
     static let shared = SkyLight()
 
     private typealias MainConnectionIDFunc = @convention(c) () -> Int32
+    private typealias NewConnectionFunc = @convention(c) (Int32, UnsafeMutablePointer<Int32>) -> CGError
+    private typealias ConnectionControlFunc = @convention(c) (Int32) -> CGError
     private typealias WindowQueryWindowsFunc = @convention(c) (Int32, CFArray, UInt32) -> Unmanaged<CFTypeRef>?
     private typealias WindowQueryResultCopyWindowsFunc = @convention(c) (CFTypeRef) -> Unmanaged<CFTypeRef>?
     private typealias WindowIteratorGetCountFunc = @convention(c) (CFTypeRef) -> Int32
@@ -131,6 +133,14 @@ final class SkyLight {
     private typealias TransactionOrderWindowFunc = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Void
     private typealias WindowIsOrderedInFunc = @convention(c) (Int32, UInt32, UnsafeMutablePointer<UInt8>) -> CGError
     private typealias TransactionMoveWindowWithGroupFunc = @convention(c) (CFTypeRef, UInt32, CGPoint) -> CGError
+    private typealias TransactionSetWindowTransformFunc = @convention(c) (
+        CFTypeRef,
+        UInt32,
+        Int32,
+        Int32,
+        CGAffineTransform
+    ) -> CGError
+    private typealias TransactionSetWindowAlphaFunc = @convention(c) (CFTypeRef, UInt32, Float) -> CGError
     private typealias MoveWindowFunc = @convention(c) (Int32, UInt32, UnsafePointer<CGPoint>) -> CGError
     private typealias GetWindowBoundsFunc = @convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> CGError
     private typealias NewWindowFunc = @convention(c) (
@@ -141,6 +151,20 @@ final class SkyLight {
         CFTypeRef,
         UnsafeMutablePointer<UInt32>
     ) -> CGError
+    private typealias NewWindowWithOpaqueShapeAndContextFunc = @convention(c) (
+        Int32,
+        Int32,
+        CFTypeRef,
+        CFTypeRef,
+        Int32,
+        UnsafeMutablePointer<UInt64>,
+        Float,
+        Float,
+        Int32,
+        UnsafeMutablePointer<UInt32>,
+        UnsafeMutableRawPointer?
+    ) -> CGError
+    private typealias CreateEmptyRegionFunc = @convention(c) () -> Unmanaged<CFTypeRef>?
     private typealias ReleaseWindowFunc = @convention(c) (Int32, UInt32) -> CGError
     private typealias WindowContextCreateFunc = @convention(c) (
         Int32,
@@ -150,11 +174,14 @@ final class SkyLight {
     private typealias SetWindowShapeFunc = @convention(c) (Int32, UInt32, Float, Float, CFTypeRef) -> CGError
     private typealias SetWindowResolutionFunc = @convention(c) (Int32, UInt32, Float) -> CGError
     private typealias SetWindowOpacityFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
+    private typealias SetWindowAlphaFunc = @convention(c) (Int32, UInt32, Float) -> CGError
     private typealias SetWindowLevelFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
     private typealias SetWindowSubLevelFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
+    private typealias GetWindowSubLevelFunc = @convention(c) (Int32, UInt32) -> Int32
     private typealias GetWindowLevelFunc = @convention(c) (Int32, UInt32, UnsafeMutablePointer<Int32>) -> CGError
     private typealias SetWindowBackgroundBlurRadiusFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
     private typealias SetWindowTagsFunc = @convention(c) (Int32, UInt32, UnsafePointer<UInt64>, Int32) -> CGError
+    private typealias WindowSetShadowPropertiesFunc = @convention(c) (UInt32, CFDictionary) -> CGError
     private typealias SetWindowPropertyFunc = @convention(c) (Int32, UInt32, CFString, CFTypeRef) -> CGError
     private typealias CopyWindowPropertyFunc = @convention(c) (
         Int32,
@@ -222,6 +249,10 @@ final class SkyLight {
     ) -> Int32
 
     private let mainConnectionID: MainConnectionIDFunc
+    private let newConnection: NewConnectionFunc?
+    private let releaseConnection: ConnectionControlFunc?
+    private let disableUpdate: ConnectionControlFunc?
+    private let reenableUpdate: ConnectionControlFunc?
     private let windowQueryWindows: WindowQueryWindowsFunc
     private let windowQueryResultCopyWindows: WindowQueryResultCopyWindowsFunc
     private let windowIteratorGetCount: WindowIteratorGetCountFunc
@@ -240,6 +271,8 @@ final class SkyLight {
     private let transactionOrderWindow: TransactionOrderWindowFunc
     private let windowIsOrderedIn: WindowIsOrderedInFunc
     private let transactionMoveWindowWithGroup: TransactionMoveWindowWithGroupFunc
+    private let transactionSetWindowTransform: TransactionSetWindowTransformFunc?
+    private let transactionSetWindowAlpha: TransactionSetWindowAlphaFunc?
     private let moveWindow: MoveWindowFunc
     private let getWindowBounds: GetWindowBoundsFunc
     private let registerConnectionNotifyProc: RegisterConnectionNotifyProcFunc
@@ -248,16 +281,21 @@ final class SkyLight {
     private let registerNotifyProc: RegisterNotifyProcFunc
     private let unregisterNotifyProcFunc: UnregisterNotifyProcFunc
     private let newWindow: NewWindowFunc
+    private let newWindowWithOpaqueShapeAndContext: NewWindowWithOpaqueShapeAndContextFunc?
+    private let createEmptyRegion: CreateEmptyRegionFunc?
     private let releaseWindow: ReleaseWindowFunc
     private let windowContextCreate: WindowContextCreateFunc
     private let setWindowShape: SetWindowShapeFunc
     private let setWindowResolution: SetWindowResolutionFunc
     private let setWindowOpacity: SetWindowOpacityFunc
+    private let setWindowAlpha: SetWindowAlphaFunc?
     private let setWindowLevel: SetWindowLevelFunc?
     private let setWindowSubLevel: SetWindowSubLevelFunc?
+    private let getWindowSubLevel: GetWindowSubLevelFunc?
     private let getWindowLevel: GetWindowLevelFunc?
     private let setWindowBackgroundBlurRadius: SetWindowBackgroundBlurRadiusFunc?
     private let setWindowTags: SetWindowTagsFunc
+    private let windowSetShadowProperties: WindowSetShadowPropertiesFunc?
     private let setWindowProperty: SetWindowPropertyFunc?
     private let copyWindowProperty: CopyWindowPropertyFunc?
     private let flushWindowContentRegion: FlushWindowContentRegionFunc
@@ -310,6 +348,10 @@ final class SkyLight {
         }
 
         mainConnectionID = resolve("SLSMainConnectionID", as: MainConnectionIDFunc.self)
+        newConnection = resolveOptional("SLSNewConnection", as: NewConnectionFunc.self)
+        releaseConnection = resolveOptional("SLSReleaseConnection", as: ConnectionControlFunc.self)
+        disableUpdate = resolveOptional("SLSDisableUpdate", as: ConnectionControlFunc.self)
+        reenableUpdate = resolveOptional("SLSReenableUpdate", as: ConnectionControlFunc.self)
         windowQueryWindows = resolve("SLSWindowQueryWindows", as: WindowQueryWindowsFunc.self)
         windowQueryResultCopyWindows = resolve(
             "SLSWindowQueryResultCopyWindows",
@@ -344,6 +386,14 @@ final class SkyLight {
             as: TransactionMoveWindowWithGroupFunc.self
         )
         moveWindow = resolve("SLSMoveWindow", as: MoveWindowFunc.self)
+        transactionSetWindowTransform = resolveOptional(
+            "SLSTransactionSetWindowTransform",
+            as: TransactionSetWindowTransformFunc.self
+        )
+        transactionSetWindowAlpha = resolveOptional(
+            "SLSTransactionSetWindowAlpha",
+            as: TransactionSetWindowAlphaFunc.self
+        )
         getWindowBounds = resolve("SLSGetWindowBounds", as: GetWindowBoundsFunc.self)
         registerConnectionNotifyProc = resolve(
             "SLSRegisterConnectionNotifyProc",
@@ -360,19 +410,30 @@ final class SkyLight {
         registerNotifyProc = resolve("SLSRegisterNotifyProc", as: RegisterNotifyProcFunc.self)
         unregisterNotifyProcFunc = resolve("SLSRemoveNotifyProc", as: UnregisterNotifyProcFunc.self)
         newWindow = resolve("SLSNewWindow", as: NewWindowFunc.self)
+        newWindowWithOpaqueShapeAndContext = resolveOptional(
+            "SLSNewWindowWithOpaqueShapeAndContext",
+            as: NewWindowWithOpaqueShapeAndContextFunc.self
+        )
+        createEmptyRegion = resolveOptional("CGRegionCreateEmptyRegion", as: CreateEmptyRegionFunc.self)
         releaseWindow = resolve("SLSReleaseWindow", as: ReleaseWindowFunc.self)
         windowContextCreate = resolve("SLWindowContextCreate", as: WindowContextCreateFunc.self)
         setWindowShape = resolve("SLSSetWindowShape", as: SetWindowShapeFunc.self)
         setWindowResolution = resolve("SLSSetWindowResolution", as: SetWindowResolutionFunc.self)
         setWindowOpacity = resolve("SLSSetWindowOpacity", as: SetWindowOpacityFunc.self)
+        setWindowAlpha = resolveOptional("SLSSetWindowAlpha", as: SetWindowAlphaFunc.self)
         setWindowLevel = resolveOptional("SLSSetWindowLevel", as: SetWindowLevelFunc.self)
         setWindowSubLevel = resolveOptional("SLSSetWindowSubLevel", as: SetWindowSubLevelFunc.self)
+        getWindowSubLevel = resolveOptional("SLSGetWindowSubLevel", as: GetWindowSubLevelFunc.self)
         getWindowLevel = resolveOptional("SLSGetWindowLevel", as: GetWindowLevelFunc.self)
         setWindowBackgroundBlurRadius = resolveOptional(
             "SLSSetWindowBackgroundBlurRadius",
             as: SetWindowBackgroundBlurRadiusFunc.self
         )
         setWindowTags = resolve("SLSSetWindowTags", as: SetWindowTagsFunc.self)
+        windowSetShadowProperties = resolveOptional(
+            "SLSWindowSetShadowProperties",
+            as: WindowSetShadowPropertiesFunc.self
+        )
         setWindowProperty = resolveOptional("SLSSetWindowProperty", as: SetWindowPropertyFunc.self)
         copyWindowProperty = resolveOptional("SLSCopyWindowProperty", as: CopyWindowPropertyFunc.self)
         flushWindowContentRegion = resolve("SLSFlushWindowContentRegion", as: FlushWindowContentRegionFunc.self)
@@ -1086,6 +1147,14 @@ final class SkyLight {
         return level
     }
 
+    /// Reads a window's stacking sub-level. Works across processes.
+    func windowSubLevel(_ wid: UInt32) -> Int32? {
+        guard let getWindowSubLevel else { return nil }
+        let cid = getMainConnectionID()
+        guard cid != 0 else { return nil }
+        return getWindowSubLevel(cid, wid)
+    }
+
     /// Sets a window's stacking level. Works across processes, and persists in
     /// the window server until changed again — so callers are responsible for
     /// restoring the original level when they stop managing the window.
@@ -1156,6 +1225,161 @@ final class SkyLight {
         withTransaction { transaction in
             _ = transactionMoveWindowWithGroup(transaction, wid, origin)
         }
+    }
+
+    @MainActor
+    final class AnimationConnection {
+        private unowned let owner: SkyLight
+        let id: Int32
+        private var updatesDisabled = false
+        private var closed = false
+
+        fileprivate init(owner: SkyLight, id: Int32) {
+            self.owner = owner
+            self.id = id
+        }
+
+        @discardableResult
+        func disableUpdates() -> Bool {
+            guard !closed, !updatesDisabled, let disable = owner.disableUpdate else { return false }
+            guard disable(id) == .success else { return false }
+            updatesDisabled = true
+            return true
+        }
+
+        @discardableResult
+        func reenableUpdates() -> Bool {
+            guard !closed else { return false }
+            guard updatesDisabled else { return true }
+            guard let reenable = owner.reenableUpdate, reenable(id) == .success else { return false }
+            updatesDisabled = false
+            return true
+        }
+
+        func createImageProxyWindow(frame: CGRect) -> UInt32 {
+            guard !closed,
+                  let createWindow = owner.newWindowWithOpaqueShapeAndContext,
+                  let createEmptyRegion = owner.createEmptyRegion
+            else { return 0 }
+
+            var region: CFTypeRef?
+            var rect = frame
+            _ = owner.newRegionWithRect(&rect, &region)
+            guard let region, let emptyRegion = createEmptyRegion()?.takeRetainedValue() else { return 0 }
+
+            var tags: UInt64 = 1 << 46
+            var wid: UInt32 = 0
+            let options: Int32 = 13 | (1 << 18)
+            guard createWindow(
+                id,
+                2,
+                region,
+                emptyRegion,
+                options,
+                &tags,
+                0,
+                0,
+                64,
+                &wid,
+                nil
+            ) == .success else { return 0 }
+            return wid
+        }
+
+        func createWindowContext(for wid: UInt32) -> CGContext? {
+            guard !closed else { return nil }
+            return owner.windowContextCreate(id, wid, nil)?.takeRetainedValue()
+        }
+
+        func configureWindow(_ wid: UInt32, resolution: Float, opaque: Bool) -> Bool {
+            guard !closed else { return false }
+            let resolutionOK = owner.setWindowResolution(id, wid, resolution) == .success
+            let opacityOK = owner.setWindowOpacity(id, wid, opaque ? 1 : 0) == .success
+            return resolutionOK && opacityOK
+        }
+
+        func setWindowAlpha(_ wid: UInt32, alpha: Float) -> Bool {
+            guard !closed, let setAlpha = owner.setWindowAlpha else { return false }
+            return setAlpha(id, wid, alpha) == .success
+        }
+
+        func setWindowLevel(_ wid: UInt32, level: Int32) -> Bool {
+            guard !closed, let setLevel = owner.setWindowLevel else { return false }
+            return setLevel(id, wid, level) == .success
+        }
+
+        func setWindowSubLevel(_ wid: UInt32, subLevel: Int32) -> Bool {
+            guard !closed, let setSubLevel = owner.setWindowSubLevel else { return false }
+            return setSubLevel(id, wid, subLevel) == .success
+        }
+
+        func disableWindowShadow(_ wid: UInt32) -> Bool {
+            guard !closed, let setShadow = owner.windowSetShadowProperties else { return false }
+            let options = ["com.apple.WindowShadowDensity" as CFString: 0 as CFNumber] as CFDictionary
+            return setShadow(wid, options) == .success
+        }
+
+        @discardableResult
+        func setWindowTransform(_ wid: UInt32, presentingAt origin: CGPoint) -> Bool {
+            guard !closed,
+                  let setTransform = owner.transactionSetWindowTransform,
+                  let setAlpha = owner.transactionSetWindowAlpha,
+                  let transaction = owner.transactionCreate(id)?.takeRetainedValue()
+            else { return false }
+            let transformResult = setTransform(
+                transaction,
+                wid,
+                0,
+                0,
+                CGAffineTransform(translationX: -origin.x, y: -origin.y)
+            )
+            let alphaResult = setAlpha(transaction, wid, 1)
+            let committed = owner.transactionCommit(transaction, 0)
+            return transformResult == .success && alphaResult == .success && committed == .success
+        }
+
+        func releaseWindow(_ wid: UInt32) {
+            guard !closed else { return }
+            _ = owner.releaseWindow(id, wid)
+        }
+
+        func close() {
+            guard !closed else { return }
+            _ = reenableUpdates()
+            closed = true
+            if let release = owner.releaseConnection {
+                _ = release(id)
+            }
+        }
+    }
+
+    func makeAnimationConnection() -> AnimationConnection? {
+        guard let newConnection,
+              releaseConnection != nil,
+              disableUpdate != nil,
+              reenableUpdate != nil,
+              supportsProxyAnimation
+        else { return nil }
+        var id: Int32 = 0
+        guard newConnection(0, &id) == .success, id != 0 else { return nil }
+        return AnimationConnection(owner: self, id: id)
+    }
+
+    /// Whether the proxy-window animation primitives (image capture + window
+    /// transforms) resolved on this OS build.
+    var supportsProxyAnimation: Bool {
+        transactionSetWindowTransform != nil
+            && transactionSetWindowAlpha != nil
+            && newConnection != nil
+            && releaseConnection != nil
+            && disableUpdate != nil
+            && reenableUpdate != nil
+            && newWindowWithOpaqueShapeAndContext != nil
+            && createEmptyRegion != nil
+            && setWindowAlpha != nil
+            && setWindowSubLevel != nil
+            && getWindowSubLevel != nil
+            && windowSetShadowProperties != nil
     }
 
     func transactionMoveAndOrder(
