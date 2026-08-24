@@ -408,8 +408,16 @@ enum CLICompletionGenerator {
             "complete -c omniwmctl -f -n '__fish_seen_subcommand_from completion' -a '\(shell.rawValue)'"
         }
 
+        // Every completion rule below is conditioned on `-n`, so when no
+        // condition matches — every positional and flag already given — fish
+        // falls through to its own default of completing filenames from the
+        // current directory. An unconditional `-f` rule is what actually
+        // disables that fallback; per-rule `-f` only stops files being added
+        // alongside that rule's own suggestions.
+        let disableFileCompletion = "complete -c omniwmctl -f"
+
         return (
-            [helperFunctions]
+            [helperFunctions, disableFileCompletion]
                 + baseLines
                 + queryLines
                 + queryFlagLines.sorted()

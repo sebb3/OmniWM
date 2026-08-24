@@ -310,10 +310,35 @@ final class NiriInitialContainerPrimarySpanTests: XCTestCase {
     @MainActor
     func testHandlerSeedsAdmissionWidthBeforeFirstConstraintResolutionAndLeavesLiveStateUntouched() throws {
         let controller = makeController()
+        // A monitor with an explicit, known frame: the assertions below derive
+        // `cachedWidth` from this width and zero gaps, so they must not depend
+        // on whatever screen happens to be attached to the machine running the
+        // test — `Monitor.fallback()` reads `NSScreen.main`, which is real
+        // hardware, not a fixture.
+        let monitor = Monitor(
+            id: .init(displayId: 1),
+            displayId: 1,
+            frame: CGRect(x: 0, y: 0, width: 2800, height: 1600),
+            visibleFrame: CGRect(x: 0, y: 0, width: 2800, height: 1600),
+            hasNotch: false,
+            name: "Test"
+        )
+        controller.workspaceManager.applyMonitorConfigurationChange([monitor])
+        controller.settings.updateGapSettings(
+            MonitorGapSettings(
+                monitorName: monitor.name,
+                monitorDisplayId: monitor.displayId,
+                innerGap: 0,
+                outerGapLeft: 0,
+                outerGapRight: 0,
+                outerGapTop: 0,
+                outerGapBottom: 0
+            ),
+            for: monitor
+        )
         let workspaceId = try XCTUnwrap(
             controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
         )
-        let monitor = try XCTUnwrap(controller.workspaceManager.monitor(for: workspaceId))
         controller.settings.updateOrientationSettings(
             MonitorOrientationSettings(
                 monitorName: monitor.name,
