@@ -210,7 +210,7 @@ import QuartzCore
         }
     }
 
-    private func getOrCreateDisplayLink(for displayId: CGDirectDisplayID) -> CADisplayLink? {
+    func getOrCreateDisplayLink(for displayId: CGDirectDisplayID) -> CADisplayLink? {
         if let existing = layoutState.displayLinksByDisplay[displayId] {
             return existing
         }
@@ -275,6 +275,7 @@ import QuartzCore
             t2 = traceActive ? CACurrentMediaTime() : 0
             tickClosingAnimations(targetTime: displayLink.targetTimestamp, displayId: displayId)
             t3 = traceActive ? CACurrentMediaTime() : 0
+            tickWorkspaceSwitchTransition(targetTime: displayLink.targetTimestamp, displayId: displayId)
             controller?.surfaceReconciler.reconcileAnimationTick()
         }
 
@@ -427,10 +428,11 @@ import QuartzCore
         dwindleHandler.hasDwindleAnimationRunning(in: workspaceId)
     }
 
-    private func stopDisplayLinkIfIdle(for displayId: CGDirectDisplayID) {
+    func stopDisplayLinkIfIdle(for displayId: CGDirectDisplayID) {
         if niriHandler.scrollAnimationByDisplay[displayId] == nil,
            dwindleHandler.dwindleAnimationByDisplay[displayId] == nil,
-           layoutState.closingAnimationsByDisplay[displayId].map({ $0.isEmpty }) ?? true
+           layoutState.closingAnimationsByDisplay[displayId].map({ $0.isEmpty }) ?? true,
+           workspaceSwitchTransitionsByDisplay[displayId] == nil
         {
             // Idle display links must not remain cached after teardown.
             if let link = layoutState.displayLinksByDisplay.removeValue(forKey: displayId) {

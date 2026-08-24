@@ -44,6 +44,7 @@ struct LayoutRefreshState {
     var trailingAuditTask: Task<Void, Never>?
     var refreshRateByDisplay: [CGDirectDisplayID: Double] = [:]
     var closingAnimationsByDisplay: [CGDirectDisplayID: [Int: ClosingAnimation]] = [:]
+    var workspaceSwitchTransitionsByDisplay: [CGDirectDisplayID: WorkspaceSwitchTransition] = [:]
     var screenChangeObserver: NSObjectProtocol?
     var hasCompletedInitialRefresh: Bool = false
     var didExecuteEffectPlan: Bool = false

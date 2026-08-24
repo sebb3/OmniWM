@@ -243,7 +243,8 @@ final class WorkspaceNavigationHandler {
     private func commitWorkspaceTransitionFocusHandoff(
         targetWorkspaceId: WorkspaceDescriptor.ID,
         monitor: Monitor?,
-        startScrollAnimation: Bool
+        startScrollAnimation: Bool,
+        verticalSwitchAnimation: WorkspaceSwitchAnimationCapture? = nil
     ) {
         guard let controller else { return }
         let handoff = resolveWorkspaceTransitionFocusHandoff(for: targetWorkspaceId)
@@ -251,17 +252,85 @@ final class WorkspaceNavigationHandler {
             controller.layoutRefreshController.stopScrollAnimation(for: monitor.displayId)
         }
         controller.layoutRefreshController.commitWorkspaceTransition(
-            reason: .workspaceTransition
-        ) { [weak self, weak controller] in
-            guard let controller else { return }
-            if let focusToken = handoff.focusToken {
-                controller.focusWindow(focusToken)
-            } else if handoff.shouldClearManagedFocus {
-                self?.clearManagedFocusAfterEmptyWorkspaceSwitch()
+            reason: .workspaceTransition,
+            postLayout: { [weak self, weak controller] in
+                guard let controller else { return }
+                if let focusToken = handoff.focusToken {
+                    controller.focusWindow(focusToken)
+                } else if handoff.shouldClearManagedFocus {
+                    self?.clearManagedFocusAfterEmptyWorkspaceSwitch()
+                }
+                if startScrollAnimation {
+                    controller.layoutRefreshController.startScrollAnimation(for: targetWorkspaceId)
+                }
+                // Deferred to here, inside the post-layout callback, because the
+                // real hide/reveal frames from `setActiveWorkspace` are only
+                // authoritative once `commitWorkspaceTransition`'s async relayout
+                // has actually run — calling this any earlier would animate toward
+                // stale (pre-switch) frames.
+                if let monitor, let verticalSwitchAnimation {
+                    let incomingNowFrames = Self.captureWindowFrames(
+                        for: targetWorkspaceId,
+                        controller: controller
+                    )
+                    Log.layout.notice(
+                        "workspace switch animation starting outgoing=\(verticalSwitchAnimation.outgoingPriorFrames.count) "
+                            + "incoming=\(incomingNowFrames.count)"
+                    )
+                    controller.layoutRefreshController.startWorkspaceSwitchTransition(
+                        monitor: monitor,
+                        outgoingEntries: verticalSwitchAnimation.outgoingPriorFrames,
+                        incomingEntries: incomingNowFrames.map {
+                            (
+                                entry: $0.entry,
+                                priorFrame: verticalSwitchAnimation.incomingPriorFrame(for: $0.entry.token) ?? $0.priorFrame
+                            )
+                        }
+                    )
+                }
             }
-            if startScrollAnimation {
-                controller.layoutRefreshController.startScrollAnimation(for: targetWorkspaceId)
+        )
+    }
+
+    /// Frames captured *before* `setActiveWorkspace` runs — the animation's
+    /// true start points. The outgoing set is used directly; the incoming set
+    /// is looked up by token once the real post-switch frames are known, since
+    /// which windows actually end up on the incoming workspace's monitor can
+    /// only be confirmed after the switch (a window might be reassigned,
+    /// closed, etc. in between).
+    struct WorkspaceSwitchAnimationCapture {
+        let outgoingPriorFrames: [(entry: WindowState, priorFrame: CGRect)]
+        private let incomingPriorFramesByToken: [WindowToken: CGRect]
+
+        init(
+            outgoingPriorFrames: [(entry: WindowState, priorFrame: CGRect)],
+            incomingPriorFrames: [(entry: WindowState, priorFrame: CGRect)]
+        ) {
+            self.outgoingPriorFrames = outgoingPriorFrames
+            incomingPriorFramesByToken = Dictionary(
+                incomingPriorFrames.map { ($0.entry.token, $0.priorFrame) },
+                uniquingKeysWith: { first, _ in first }
+            )
+        }
+
+        func incomingPriorFrame(for token: WindowToken) -> CGRect? {
+            incomingPriorFramesByToken[token]
+        }
+    }
+
+    /// Best-effort snapshot of each window's current on-screen frame for a
+    /// workspace, used as an animation endpoint. Windows without a readable
+    /// frame yet (e.g. still being admitted) are simply omitted — they animate
+    /// in on a later pass instead of blocking this one.
+    static func captureWindowFrames(
+        for workspaceId: WorkspaceDescriptor.ID,
+        controller: WMController
+    ) -> [(entry: WindowState, priorFrame: CGRect)] {
+        controller.workspaceManager.entries(in: workspaceId).compactMap { entry in
+            guard let frame = controller.layoutRefreshController.fastFrame(for: entry.token, axRef: entry.axRef) else {
+                return nil
             }
+            return (entry, frame)
         }
     }
 
@@ -568,12 +637,21 @@ final class WorkspaceNavigationHandler {
             return
         }
 
+        let outgoingPriorFrames = currentWorkspace.map {
+            Self.captureWindowFrames(for: $0.id, controller: controller)
+        } ?? []
+        let incomingPriorFrames = Self.captureWindowFrames(for: targetWorkspaceId, controller: controller)
+
         guard let result = controller.workspaceManager.focusWorkspace(named: rawWorkspaceID) else { return }
 
         commitWorkspaceTransitionFocusHandoff(
             targetWorkspaceId: result.workspace.id,
             monitor: result.monitor,
-            startScrollAnimation: false
+            startScrollAnimation: false,
+            verticalSwitchAnimation: WorkspaceSwitchAnimationCapture(
+                outgoingPriorFrames: outgoingPriorFrames,
+                incomingPriorFrames: incomingPriorFrames
+            )
         )
     }
 
@@ -606,6 +684,9 @@ final class WorkspaceNavigationHandler {
 
         guard let targetWorkspace else { return }
 
+        let outgoingPriorFrames = Self.captureWindowFrames(for: currentWorkspace.id, controller: controller)
+        let incomingPriorFrames = Self.captureWindowFrames(for: targetWorkspace.id, controller: controller)
+
         saveNiriViewportState(for: currentWorkspace.id)
         guard controller.workspaceManager.setActiveWorkspace(targetWorkspace.id, on: currentMonitorId) else {
             return
@@ -616,7 +697,11 @@ final class WorkspaceNavigationHandler {
         commitWorkspaceTransitionFocusHandoff(
             targetWorkspaceId: targetWorkspace.id,
             monitor: monitor,
-            startScrollAnimation: false
+            startScrollAnimation: false,
+            verticalSwitchAnimation: WorkspaceSwitchAnimationCapture(
+                outgoingPriorFrames: outgoingPriorFrames,
+                incomingPriorFrames: incomingPriorFrames
+            )
         )
     }
 

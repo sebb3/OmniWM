@@ -69,6 +69,8 @@ enum ScriptingAddition {
     }
 
     private static let opcodeWindowLayer: UInt8 = 0x09
+    private static let opcodeWindowSwapProxyIn: UInt8 = 0x0E
+    private static let opcodeWindowSwapProxyOut: UInt8 = 0x0F
 
     private static var socketPath: String {
         "/tmp/yabai-sa_\(NSUserName()).socket"
@@ -90,6 +92,43 @@ enum ScriptingAddition {
 
         // Framing is a little-endian Int16 payload length followed by the
         // payload; the length deliberately excludes its own two bytes.
+        var message: [UInt8] = []
+        withUnsafeBytes(of: Int16(payload.count).littleEndian) { message.append(contentsOf: $0) }
+        message.append(contentsOf: payload)
+
+        return transmit(message)
+    }
+
+    /// Hides each real window behind its proxy in one transaction: the addition
+    /// orders the proxy above the window (grouped with it, so it tracks the
+    /// window's own level/sub-level) and sets the *real* window's system alpha
+    /// to 0. Both are foreign-window mutations, so — same as `setSubLevel` —
+    /// they only take effect issued from Dock's privileged connection; a plain
+    /// `SLSTransactionSetWindowSystemAlpha` from OmniWM's own connection would
+    /// report success and do nothing an independent observer can see.
+    @discardableResult
+    static func swapProxiesIn(_ pairs: [(windowId: UInt32, proxyId: UInt32)]) -> Bool {
+        swapProxy(pairs, opcode: opcodeWindowSwapProxyIn)
+    }
+
+    /// Reverses `swapProxiesIn`: restores the real window's alpha to 1 and
+    /// un-groups the proxy, so the caller should already have written the real
+    /// window's final AX frame and destroyed the proxy before calling this.
+    @discardableResult
+    static func swapProxiesOut(_ pairs: [(windowId: UInt32, proxyId: UInt32)]) -> Bool {
+        swapProxy(pairs, opcode: opcodeWindowSwapProxyOut)
+    }
+
+    private static func swapProxy(_ pairs: [(windowId: UInt32, proxyId: UInt32)], opcode: UInt8) -> Bool {
+        guard !pairs.isEmpty else { return true }
+
+        var payload: [UInt8] = [opcode]
+        withUnsafeBytes(of: Int32(pairs.count).littleEndian) { payload.append(contentsOf: $0) }
+        for pair in pairs {
+            withUnsafeBytes(of: pair.windowId.littleEndian) { payload.append(contentsOf: $0) }
+            withUnsafeBytes(of: pair.proxyId.littleEndian) { payload.append(contentsOf: $0) }
+        }
+
         var message: [UInt8] = []
         withUnsafeBytes(of: Int16(payload.count).littleEndian) { message.append(contentsOf: $0) }
         message.append(contentsOf: payload)
