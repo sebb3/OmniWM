@@ -528,6 +528,34 @@ import QuartzCore
         appliedSubLevels = appliedSubLevels.filter { liveTokens.contains($0.key) }
     }
 
+    /// Restores WindowServer sub-levels before OmniWM relinquishes ownership.
+    /// Sub-levels survive the process that set them, so every managed window —
+    /// including windows in inactive workspaces no longer present in the
+    /// applied-level cache — must be returned to the normal band on exit.
+    func resetManagedWindowLevels() {
+        guard let controller else {
+            appliedSubLevels.removeAll()
+            return
+        }
+        let windowIds = controller.workspaceManager.workspaces.flatMap { workspace in
+            controller.workspaceManager.entries(in: workspace.id).map(\.windowId)
+        }
+        Self.resetWindowLevels(windowIds: windowIds) { windowId, level in
+            ScriptingAddition.setSubLevel(windowId: windowId, level: level)
+        }
+        appliedSubLevels.removeAll()
+    }
+
+    static func resetWindowLevels(
+        windowIds: [Int],
+        setSubLevel: (UInt32, ScriptingAddition.LevelKey) -> Bool
+    ) {
+        let validWindowIds = Set(windowIds.compactMap(UInt32.init(exactly:))).sorted()
+        for windowId in validWindowIds {
+            _ = setSubLevel(windowId, .normal)
+        }
+    }
+
     private func executeLayoutPlans(
         _ plans: [WorkspaceLayoutPlan],
         suppressWindowActivation: Bool
