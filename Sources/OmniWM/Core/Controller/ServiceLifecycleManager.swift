@@ -203,6 +203,12 @@ final class ServiceLifecycleManager {
         controller.eventIntake.open(sink: controller.eventInterpreter)
         controller.layoutRefreshController.setup()
         controller.axManager.onAppLaunched = { [weak controller] app in
+            // Sampled here, not when the app's first window arrives: a cold
+            // start outlives the input that caused it.
+            controller?.userInitiatedLaunchTracker.recordLaunch(
+                pid: app.processIdentifier,
+                userInitiated: WindowFocusPolicyGate.hasRecentUserInput()
+            )
             controller?.refreshUnavailableWorkspaceBarIconOverride(
                 bundleId: app.bundleIdentifier
             )

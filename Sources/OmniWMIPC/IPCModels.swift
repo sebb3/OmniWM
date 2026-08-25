@@ -149,8 +149,15 @@ public enum IPCRuleLayout: String, Codable, Equatable, Sendable {
     case float
 }
 
-/// Mirrors `WindowRuleWindowLevel`. Absent means "cascade": fall through to a
+/// Mirrors `WindowRuleFocusPolicy`. Absent means "cascade": fall through to a
 /// less specific rule that defines it.
+public enum IPCRuleFocus: String, Codable, Equatable, Sendable {
+    case always
+    case userInitiated
+    case never
+}
+
+/// Mirrors `WindowRuleWindowLevel`. Absent means "cascade", as above.
 public enum IPCRuleWindowLevel: String, Codable, Equatable, Sendable {
     case auto
     case below
@@ -1582,8 +1589,9 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
     public let initialContainerPrimarySpan: Double?
     public let minWidth: Double?
     public let minHeight: Double?
-    /// Unlike the fields above, `windowLevel` cascades per field, so nil here
-    /// means "not defined by this rule" rather than "default".
+    /// Unlike the fields above, `focus` and `windowLevel` cascade per field, so
+    /// nil here means "not defined by this rule" rather than "default".
+    public let focus: IPCRuleFocus?
     public let windowLevel: IPCRuleWindowLevel?
 
     public init(
@@ -1598,6 +1606,7 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         initialContainerPrimarySpan: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
+        focus: IPCRuleFocus? = nil,
         windowLevel: IPCRuleWindowLevel? = nil
     ) {
         self.bundleId = bundleId
@@ -1611,6 +1620,7 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.minWidth = minWidth
         self.minHeight = minHeight
+        self.focus = focus
         self.windowLevel = windowLevel
     }
 }
@@ -2463,6 +2473,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     public let initialContainerPrimarySpan: Double?
     public let minWidth: Double?
     public let minHeight: Double?
+    public let focus: IPCRuleFocus?
     public let windowLevel: IPCRuleWindowLevel?
     public let specificity: Int
     public let isValid: Bool
@@ -2472,7 +2483,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, position, bundleId, appNameSubstring, titleSubstring, titleRegex, axRole, axSubrole
         case layout, assignToWorkspace, initialContainerPrimarySpan, minWidth, minHeight, specificity, isValid
-        case windowLevel
+        case focus, windowLevel
         case invalidRegexMessage, validationMessages
     }
 
@@ -2490,6 +2501,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         initialContainerPrimarySpan: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
+        focus: IPCRuleFocus? = nil,
         windowLevel: IPCRuleWindowLevel? = nil,
         specificity: Int,
         isValid: Bool,
@@ -2509,6 +2521,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.minWidth = minWidth
         self.minHeight = minHeight
+        self.focus = focus
         self.windowLevel = windowLevel
         self.specificity = specificity
         self.isValid = isValid
@@ -2531,6 +2544,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
+        focus = try container.decodeIfPresent(IPCRuleFocus.self, forKey: .focus)
         windowLevel = try container.decodeIfPresent(IPCRuleWindowLevel.self, forKey: .windowLevel)
         specificity = try container.decode(Int.self, forKey: .specificity)
         isValid = try container.decode(Bool.self, forKey: .isValid)
