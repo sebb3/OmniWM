@@ -1593,6 +1593,12 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
     /// nil here means "not defined by this rule" rather than "default".
     public let focus: IPCRuleFocus?
     public let windowLevel: IPCRuleWindowLevel?
+    /// Routes `add` to the in-memory one-shot list instead of `settings.appRules`
+    /// (see `IPCRuleSnapshot.isOneShot`). Write-only: it never round-trips onto
+    /// `AppRule` itself, since one-shot-ness is which list a rule lives in, not a
+    /// property of the rule. Optional (not a plain `Bool`) purely so synthesized
+    /// `Decodable` treats a missing key as false instead of failing decode.
+    public let oneShot: Bool?
 
     public init(
         bundleId: String,
@@ -1607,7 +1613,8 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         minWidth: Double? = nil,
         minHeight: Double? = nil,
         focus: IPCRuleFocus? = nil,
-        windowLevel: IPCRuleWindowLevel? = nil
+        windowLevel: IPCRuleWindowLevel? = nil,
+        oneShot: Bool? = nil
     ) {
         self.bundleId = bundleId
         self.appNameSubstring = appNameSubstring
@@ -1622,6 +1629,7 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         self.minHeight = minHeight
         self.focus = focus
         self.windowLevel = windowLevel
+        self.oneShot = oneShot
     }
 }
 
@@ -2475,6 +2483,9 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     public let minHeight: Double?
     public let focus: IPCRuleFocus?
     public let windowLevel: IPCRuleWindowLevel?
+    /// Whether this rule is armed in the in-memory one-shot list rather than
+    /// `settings.appRules`. See `IPCRuleDefinition.oneShot`.
+    public let isOneShot: Bool
     public let specificity: Int
     public let isValid: Bool
     public let invalidRegexMessage: String?
@@ -2483,7 +2494,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, position, bundleId, appNameSubstring, titleSubstring, titleRegex, axRole, axSubrole
         case layout, assignToWorkspace, initialContainerPrimarySpan, minWidth, minHeight, specificity, isValid
-        case focus, windowLevel
+        case focus, windowLevel, isOneShot
         case invalidRegexMessage, validationMessages
     }
 
@@ -2503,6 +2514,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         minHeight: Double? = nil,
         focus: IPCRuleFocus? = nil,
         windowLevel: IPCRuleWindowLevel? = nil,
+        isOneShot: Bool = false,
         specificity: Int,
         isValid: Bool,
         invalidRegexMessage: String? = nil,
@@ -2523,6 +2535,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         self.minHeight = minHeight
         self.focus = focus
         self.windowLevel = windowLevel
+        self.isOneShot = isOneShot
         self.specificity = specificity
         self.isValid = isValid
         self.invalidRegexMessage = invalidRegexMessage
@@ -2546,6 +2559,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
         focus = try container.decodeIfPresent(IPCRuleFocus.self, forKey: .focus)
         windowLevel = try container.decodeIfPresent(IPCRuleWindowLevel.self, forKey: .windowLevel)
+        isOneShot = try container.decodeIfPresent(Bool.self, forKey: .isOneShot) ?? false
         specificity = try container.decode(Int.self, forKey: .specificity)
         isValid = try container.decode(Bool.self, forKey: .isValid)
         invalidRegexMessage = try container.decodeIfPresent(String.self, forKey: .invalidRegexMessage)

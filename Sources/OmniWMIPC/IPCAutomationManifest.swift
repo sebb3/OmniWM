@@ -993,6 +993,12 @@ public enum IPCAutomationManifest {
             flag: "--window-level",
             summary: "Set the window stacking level. Omit to cascade to a less specific rule.",
             valuePlaceholder: "<auto|below|normal|floating>"
+        ),
+        .init(
+            flag: "--one-shot",
+            summary: "Arm the rule in memory for the next matching window only; never written to "
+                + "settings.toml. Ignored by `rule replace`/`rule move`.",
+            valuePlaceholder: "<on|off>"
         )
     ]
 
