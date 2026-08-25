@@ -2,6 +2,7 @@
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
 import AppKit
+import Darwin
 import Observation
 import OmniWMIPC
 
@@ -71,11 +72,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitorSetupEvaluationTask: Task<Void, Never>?
     private var launchOverlayFinished = false
     private var launchPermissionsWindowController: LaunchPermissionsWindowController?
+    private var terminationSignalSources: [DispatchSourceSignal] = []
     private var didFinishBootstrap = false
 
     public func applicationDidFinishLaunching(_: Notification) {
+        installTerminationSignalHandlers()
         NSApplication.shared.setActivationPolicy(.accessory)
         bootstrapApplication()
+    }
+
+    private func installTerminationSignalHandlers() {
+        for signalNumber in [SIGTERM, SIGINT] {
+            Darwin.signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+            source.setEventHandler {
+                NSApplication.shared.terminate(nil)
+            }
+            source.resume()
+            terminationSignalSources.append(source)
+        }
     }
 
     public func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
@@ -85,6 +100,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationWillTerminate(_: Notification) {
         statusBarController?.cleanup()
         if let controller = AppDelegate.sharedBootstrap?.controller {
+            controller.layoutRefreshController.resetManagedWindowLevels()
             controller.serviceLifecycleManager.stop()
             controller.workspaceManager.flushPersistedWindowRestoreCatalogNow()
         }

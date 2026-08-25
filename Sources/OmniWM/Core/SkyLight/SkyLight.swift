@@ -5,7 +5,9 @@ import CoreGraphics
 import Foundation
 
 enum SkyLightWindowOrder: Int32 {
-    case above = 0
+    // CGS order codes: 1 above, -1 below. 0 means "order out", which is what
+    // `transactionHide` passes.
+    case above = 1
     case below = -1
 }
 
@@ -148,6 +150,9 @@ final class SkyLight {
     private typealias SetWindowShapeFunc = @convention(c) (Int32, UInt32, Float, Float, CFTypeRef) -> CGError
     private typealias SetWindowResolutionFunc = @convention(c) (Int32, UInt32, Float) -> CGError
     private typealias SetWindowOpacityFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
+    private typealias SetWindowLevelFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
+    private typealias SetWindowSubLevelFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
+    private typealias GetWindowLevelFunc = @convention(c) (Int32, UInt32, UnsafeMutablePointer<Int32>) -> CGError
     private typealias SetWindowBackgroundBlurRadiusFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
     private typealias SetWindowTagsFunc = @convention(c) (Int32, UInt32, UnsafePointer<UInt64>, Int32) -> CGError
     private typealias SetWindowPropertyFunc = @convention(c) (Int32, UInt32, CFString, CFTypeRef) -> CGError
@@ -248,6 +253,9 @@ final class SkyLight {
     private let setWindowShape: SetWindowShapeFunc
     private let setWindowResolution: SetWindowResolutionFunc
     private let setWindowOpacity: SetWindowOpacityFunc
+    private let setWindowLevel: SetWindowLevelFunc?
+    private let setWindowSubLevel: SetWindowSubLevelFunc?
+    private let getWindowLevel: GetWindowLevelFunc?
     private let setWindowBackgroundBlurRadius: SetWindowBackgroundBlurRadiusFunc?
     private let setWindowTags: SetWindowTagsFunc
     private let setWindowProperty: SetWindowPropertyFunc?
@@ -357,6 +365,9 @@ final class SkyLight {
         setWindowShape = resolve("SLSSetWindowShape", as: SetWindowShapeFunc.self)
         setWindowResolution = resolve("SLSSetWindowResolution", as: SetWindowResolutionFunc.self)
         setWindowOpacity = resolve("SLSSetWindowOpacity", as: SetWindowOpacityFunc.self)
+        setWindowLevel = resolveOptional("SLSSetWindowLevel", as: SetWindowLevelFunc.self)
+        setWindowSubLevel = resolveOptional("SLSSetWindowSubLevel", as: SetWindowSubLevelFunc.self)
+        getWindowLevel = resolveOptional("SLSGetWindowLevel", as: GetWindowLevelFunc.self)
         setWindowBackgroundBlurRadius = resolveOptional(
             "SLSSetWindowBackgroundBlurRadius",
             as: SetWindowBackgroundBlurRadiusFunc.self
@@ -1065,6 +1076,32 @@ final class SkyLight {
         return (resolutionOk, opacityOk)
     }
 
+    /// Reads a window's stacking level. Works across processes.
+    func windowLevel(_ wid: UInt32) -> Int32? {
+        guard let getWindowLevel else { return nil }
+        let cid = getMainConnectionID()
+        guard cid != 0 else { return nil }
+        var level: Int32 = 0
+        guard getWindowLevel(cid, wid, &level) == .success else { return nil }
+        return level
+    }
+
+    /// Sets a window's stacking level. Works across processes, and persists in
+    /// the window server until changed again — so callers are responsible for
+    /// restoring the original level when they stop managing the window.
+    @discardableResult
+    func setWindowLevel(_ wid: UInt32, level: Int32) -> Bool {
+        guard let setWindowLevel else {
+            FallbackFiringRecorder.shared.note(.skylight, "setWindowLevelUnavailable")
+            return false
+        }
+        let cid = getMainConnectionID()
+        guard cid != 0 else { return false }
+        let ok = setWindowLevel(cid, wid, level) == .success
+        if !ok { FallbackFiringRecorder.shared.note(.skylight, "setWindowLevelFailed") }
+        return ok
+    }
+
     @discardableResult
     func setWindowBackgroundBlurRadius(_ wid: UInt32, radius: Int) -> Bool {
         let cid = getMainConnectionID()
@@ -1139,6 +1176,19 @@ final class SkyLight {
         withTransaction { transaction in
             transactionOrderWindow(transaction, wid, 0, 0)
         }
+    }
+
+    /// Set a sub-level on a window this process owns.
+    ///
+    /// Our own connection is enough here; only foreign windows need the
+    /// scripting addition. Sub-level is the secondary ordering key within a
+    /// level, so this is what puts an overlay in the same band as the window it
+    /// accompanies.
+    @discardableResult
+    func setSubLevel(_ wid: UInt32, _ subLevel: Int32) -> Bool {
+        guard let setWindowSubLevel else { return false }
+        let cid = getMainConnectionID()
+        return setWindowSubLevel(cid, wid, subLevel) == .success
     }
 }
 

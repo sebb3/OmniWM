@@ -332,6 +332,28 @@ final class WindowRuleEngineTests: XCTestCase {
         XCTAssertFalse(snapshot.isValid)
     }
 
+    /// `omniwmctl rule replace` rebuilds an AppRule through the projection, so a
+    /// field the projection does not carry is silently dropped on every edit —
+    /// the same defect the UI draft had.
+    func testProjectionRoundTripsCascadingFields() {
+        let rule = AppRule(bundleId: "*", layout: .float, windowLevel: .floating)
+
+        let definition = IPCRuleProjection.definition(from: rule)
+        XCTAssertEqual(definition.windowLevel, .floating)
+
+        let rebuilt = IPCRuleProjection.appRule(from: definition, id: rule.id)
+        XCTAssertEqual(rebuilt.windowLevel, .floating)
+        XCTAssertEqual(rebuilt, rule)
+    }
+
+    /// nil must survive as nil — it means "cascade", not "default".
+    func testProjectionPreservesUnsetCascadingFields() {
+        let rule = AppRule(bundleId: "com.test.app", layout: .float)
+
+        let rebuilt = IPCRuleProjection.appRule(from: IPCRuleProjection.definition(from: rule), id: rule.id)
+        XCTAssertNil(rebuilt.windowLevel)
+    }
+
     func testEffectlessRuleDoesNotShadowEffectiveRule() {
         let engine = WindowRuleEngine()
         // More specific (bundle + app name) but effect-less: must be dropped, not shadow.

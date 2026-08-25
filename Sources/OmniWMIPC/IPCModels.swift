@@ -149,6 +149,15 @@ public enum IPCRuleLayout: String, Codable, Equatable, Sendable {
     case float
 }
 
+/// Mirrors `WindowRuleWindowLevel`. Absent means "cascade": fall through to a
+/// less specific rule that defines it.
+public enum IPCRuleWindowLevel: String, Codable, Equatable, Sendable {
+    case auto
+    case below
+    case normal
+    case floating
+}
+
 public enum IPCResizeOperation: String, Codable, Equatable, Sendable {
     case grow
     case shrink
@@ -1573,6 +1582,9 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
     public let initialContainerPrimarySpan: Double?
     public let minWidth: Double?
     public let minHeight: Double?
+    /// Unlike the fields above, `windowLevel` cascades per field, so nil here
+    /// means "not defined by this rule" rather than "default".
+    public let windowLevel: IPCRuleWindowLevel?
 
     public init(
         bundleId: String,
@@ -1585,7 +1597,8 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         assignToWorkspace: String? = nil,
         initialContainerPrimarySpan: Double? = nil,
         minWidth: Double? = nil,
-        minHeight: Double? = nil
+        minHeight: Double? = nil,
+        windowLevel: IPCRuleWindowLevel? = nil
     ) {
         self.bundleId = bundleId
         self.appNameSubstring = appNameSubstring
@@ -1598,6 +1611,7 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.minWidth = minWidth
         self.minHeight = minHeight
+        self.windowLevel = windowLevel
     }
 }
 
@@ -2449,6 +2463,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     public let initialContainerPrimarySpan: Double?
     public let minWidth: Double?
     public let minHeight: Double?
+    public let windowLevel: IPCRuleWindowLevel?
     public let specificity: Int
     public let isValid: Bool
     public let invalidRegexMessage: String?
@@ -2457,6 +2472,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, position, bundleId, appNameSubstring, titleSubstring, titleRegex, axRole, axSubrole
         case layout, assignToWorkspace, initialContainerPrimarySpan, minWidth, minHeight, specificity, isValid
+        case windowLevel
         case invalidRegexMessage, validationMessages
     }
 
@@ -2474,6 +2490,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         initialContainerPrimarySpan: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
+        windowLevel: IPCRuleWindowLevel? = nil,
         specificity: Int,
         isValid: Bool,
         invalidRegexMessage: String? = nil,
@@ -2492,6 +2509,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.minWidth = minWidth
         self.minHeight = minHeight
+        self.windowLevel = windowLevel
         self.specificity = specificity
         self.isValid = isValid
         self.invalidRegexMessage = invalidRegexMessage
@@ -2513,6 +2531,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
+        windowLevel = try container.decodeIfPresent(IPCRuleWindowLevel.self, forKey: .windowLevel)
         specificity = try container.decode(Int.self, forKey: .specificity)
         isValid = try container.decode(Bool.self, forKey: .isValid)
         invalidRegexMessage = try container.decodeIfPresent(String.self, forKey: .invalidRegexMessage)

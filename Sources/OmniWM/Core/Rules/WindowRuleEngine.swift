@@ -45,6 +45,7 @@ struct ManagedWindowRuleEffects: Equatable, Sendable {
     var minWidth: Double?
     var minHeight: Double?
     var matchedRuleId: UUID?
+    var windowLevel: WindowRuleWindowLevel?
 
     static let none = ManagedWindowRuleEffects()
 }
@@ -277,6 +278,7 @@ final class WindowRuleEngine {
 
         func matchesApp(bundleId: String?, appName: String?) -> Bool {
             if let requiredBundleId = nonEmpty(rule.bundleId),
+               !rule.isWildcard,
                requiredBundleId.caseInsensitiveCompare(bundleId ?? "") != .orderedSame
             {
                 return false
@@ -303,6 +305,7 @@ final class WindowRuleEngine {
 
         func matches(_ facts: WindowRuleFacts) -> Bool {
             if let bundleId = nonEmpty(rule.bundleId),
+               !rule.isWildcard,
                bundleId.caseInsensitiveCompare(facts.ax.bundleId ?? "") != .orderedSame
             {
                 return false
@@ -469,7 +472,8 @@ final class WindowRuleEngine {
         let effects = ManagedWindowRuleEffects(
             minWidth: userRule?.rule.minWidth,
             minHeight: userRule?.rule.minHeight,
-            matchedRuleId: userRule?.rule.id
+            matchedRuleId: userRule?.rule.id,
+            windowLevel: cascade(in: compiledUserRules, facts: facts) { $0.windowLevel }
         )
         let admissionHints = ManagedWindowAdmissionHints(
             initialNiriContainerPrimarySpan: userRule?.rule.validInitialContainerPrimarySpan
@@ -770,6 +774,39 @@ final class WindowRuleEngine {
         }
 
         return best
+    }
+
+    /// Resolves one optional rule field on its own, rather than taking every
+    /// field from a single winning rule the way `bestMatch` does.
+    ///
+    /// The most specific matching rule that actually sets the field wins, ties
+    /// break on declaration order. Without this a `bundleId = "*"` default is
+    /// shadowed outright by any narrower rule, even one that says nothing about
+    /// the field.
+    private func cascade<Value>(
+        in rules: [CompiledRule],
+        facts: WindowRuleFacts,
+        field: (AppRule) -> Value?
+    ) -> Value? {
+        var best: (specificity: Int, order: Int, value: Value)?
+
+        for candidate in rules where candidate.matches(facts) {
+            guard let value = field(candidate.rule) else { continue }
+            let entry = (specificity: candidate.rule.specificity, order: candidate.order, value: value)
+
+            guard let current = best else {
+                best = entry
+                continue
+            }
+
+            if entry.specificity > current.specificity
+                || (entry.specificity == current.specificity && entry.order < current.order)
+            {
+                best = entry
+            }
+        }
+
+        return best?.value
     }
 
     private func compile(

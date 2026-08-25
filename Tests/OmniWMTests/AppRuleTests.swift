@@ -176,6 +176,19 @@ final class AppRuleTests: XCTestCase {
         XCTAssertEqual(draft.makeRule(), rule)
     }
 
+    /// Editing a rule in the UI used to silently drop this field: the draft did
+    /// not carry it, so `makeRule` rebuilt the rule without it and a saved
+    /// catch-all lost its window level with no error.
+    func testDraftRoundTripsCascadingFields() {
+        let emptyDraft = AppRuleDraft()
+        XCTAssertNil(emptyDraft.windowLevel)
+
+        let rule = AppRule(bundleId: AppRule.wildcardBundleId, windowLevel: .auto)
+        let draft = AppRuleDraft(rule: rule)
+        XCTAssertEqual(draft.windowLevel, .auto)
+        XCTAssertEqual(draft.makeRule(), rule)
+    }
+
     func testSelectingBundledApplicationReplacesOnlyApplicationIdentityMatchers() {
         var draft = populatedDraft()
         let expectedId = draft.id

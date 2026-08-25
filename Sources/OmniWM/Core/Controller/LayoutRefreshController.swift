@@ -165,6 +165,8 @@ import QuartzCore
     private var pendingRevealTransactionsByWindowId: [Int: PendingRevealTransaction] = [:]
     private var pendingRevealVerificationTasksByWindowId: [Int: Task<Void, Never>] = [:]
     private var closingAnimationIdsByObjectId: [ObjectIdentifier: UUID] = [:]
+    /// Last sub-level pushed per window, so a pass only sends on change.
+    private var appliedSubLevels: [WindowToken: ScriptingAddition.LevelKey] = [:]
     private var lastSubmittedClosingFramesByAnimationId: [UUID: CGRect] = [:]
     var nativeFullscreenRestoredFrameApplyTokens: Set<WindowToken> = []
 
@@ -494,6 +496,66 @@ import QuartzCore
         }
     }
 
+    /// Reapplies rule-driven window levels after a layout pass.
+    ///
+    /// Driven from the refresh rather than from admission so that it also heals
+    /// windows whose owning app resets its own level after creation.
+    /// Reapplies rule-driven stacking after a layout pass.
+    ///
+    /// Push each managed window's resolved sub-level to the scripting addition.
+    ///
+    /// Sub-levels are standing, so this only sends where the desired level
+    /// differs from what was last applied. That keeps a reconcile pass free in
+    /// the steady state and means z-order never depends on activation.
+    private func applyWindowLevels(controller: WMController, activeWorkspaceIds: Set<WorkspaceDescriptor.ID>) {
+        guard ScriptingAddition.isAvailable else { return }
+
+        var liveTokens: Set<WindowToken> = []
+        for ws in controller.workspaceManager.workspaces where activeWorkspaceIds.contains(ws.id) {
+            for entry in controller.workspaceManager.entries(in: ws.id) {
+                liveTokens.insert(entry.token)
+                let desired = ScriptingAddition.resolveLevel(
+                    rule: entry.ruleEffects.windowLevel,
+                    isFloating: entry.mode == .floating
+                )
+                guard appliedSubLevels[entry.token] != desired else { continue }
+                if ScriptingAddition.setSubLevel(windowId: UInt32(entry.windowId), level: desired) {
+                    appliedSubLevels[entry.token] = desired
+                }
+            }
+        }
+
+        appliedSubLevels = appliedSubLevels.filter { liveTokens.contains($0.key) }
+    }
+
+    /// Restores WindowServer sub-levels before OmniWM relinquishes ownership.
+    /// Sub-levels survive the process that set them, so every managed window —
+    /// including windows in inactive workspaces no longer present in the
+    /// applied-level cache — must be returned to the normal band on exit.
+    func resetManagedWindowLevels() {
+        guard let controller else {
+            appliedSubLevels.removeAll()
+            return
+        }
+        let windowIds = controller.workspaceManager.workspaces.flatMap { workspace in
+            controller.workspaceManager.entries(in: workspace.id).map(\.windowId)
+        }
+        Self.resetWindowLevels(windowIds: windowIds) { windowId, level in
+            ScriptingAddition.setSubLevel(windowId: windowId, level: level)
+        }
+        appliedSubLevels.removeAll()
+    }
+
+    static func resetWindowLevels(
+        windowIds: [Int],
+        setSubLevel: (UInt32, ScriptingAddition.LevelKey) -> Bool
+    ) {
+        let validWindowIds = Set(windowIds.compactMap(UInt32.init(exactly:))).sorted()
+        for windowId in validWindowIds {
+            _ = setSubLevel(windowId, .normal)
+        }
+    }
+
     private func executeLayoutPlans(
         _ plans: [WorkspaceLayoutPlan],
         suppressWindowActivation: Bool
@@ -635,6 +697,11 @@ import QuartzCore
         if plan.effects.subscribeManagedWindows {
             controller.axEventHandler.subscribeToManagedWindows()
         }
+
+        applyWindowLevels(
+            controller: controller,
+            activeWorkspaceIds: activeWorkspaceIdsForFocusValidation
+        )
 
         return true
     }

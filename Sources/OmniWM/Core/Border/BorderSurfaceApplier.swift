@@ -117,7 +117,8 @@ final class BorderSurfaceApplier {
             frame: desired.frame,
             targetWid: UInt32(desired.windowId),
             cornerRadii: cornerResolution.radii,
-            forceOrdering: forceOrdering
+            forceOrdering: forceOrdering,
+            subLevel: desired.subLevel.windowLevel
         ) == true else {
             applied = nil
             appliedCornerRadii = nil
