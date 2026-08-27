@@ -13,6 +13,24 @@ enum OmniWMBrandMark {
             context.addPath(fit(glyph, into: rect.insetBy(dx: pointSize * 0.08, dy: pointSize * 0.06)))
             context.setFillColor(NSColor.white.cgColor)
             context.fillPath()
+
+            let badgeCenter = CGPoint(x: rect.maxX * 0.82, y: rect.maxY * 0.82)
+            let badgeRadius = pointSize * 0.14
+            context.setFillColor(NSColor.black.withAlphaComponent(0.75).cgColor)
+            context.fillEllipse(in: CGRect(
+                x: badgeCenter.x - badgeRadius,
+                y: badgeCenter.y - badgeRadius,
+                width: badgeRadius * 2,
+                height: badgeRadius * 2
+            ))
+            let inset = pointSize * 0.035
+            context.setFillColor(NSColor.systemOrange.cgColor)
+            context.fillEllipse(in: CGRect(
+                x: badgeCenter.x - badgeRadius + inset,
+                y: badgeCenter.y - badgeRadius + inset,
+                width: (badgeRadius - inset) * 2,
+                height: (badgeRadius - inset) * 2
+            ))
             return true
         }
         image.isTemplate = false
