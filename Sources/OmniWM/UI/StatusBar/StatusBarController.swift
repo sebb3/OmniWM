@@ -178,14 +178,14 @@ final class StatusBarController: NSObject {
             )?.withSymbolConfiguration(config)
             button.image?.isTemplate = false
             button.contentTintColor = nil
-            button.toolTip = "OmniWM — recording diagnostics (auto-stops in 10 min)"
+            button.toolTip = "OmniWM Fork — recording diagnostics (auto-stops in 10 min)"
             applyRecordingPulse(to: button)
         } else {
             button.layer?.removeAnimation(forKey: recordingPulseKey)
             button.layer?.opacity = 1
             button.image = OmniWMBrandMark.statusItemImage(pointSize: 18)
             button.contentTintColor = nil
-            button.toolTip = nil
+            button.toolTip = "OmniWM Fork"
         }
         updateButtonAccessibility(button)
     }
@@ -246,7 +246,7 @@ final class StatusBarController: NSObject {
             settings.statusBarUseWorkspaceId ? $0.workspaceRawName : $0.workspaceLabel
         }
         let focusedAppName = settings.statusBarShowAppNames ? summary?.focusedAppName : nil
-        button.setAccessibilityLabel("OmniWM")
+        button.setAccessibilityLabel("OmniWM Fork")
         button.setAccessibilityValue(
             Self.statusButtonAccessibilityValue(
                 workspaceLabel: workspaceLabel,
@@ -254,7 +254,7 @@ final class StatusBarController: NSObject {
                 isRecording: controller?.isTraceCaptureActive == true
             )
         )
-        button.setAccessibilityHelp("Press to open the OmniWM menu.")
+        button.setAccessibilityHelp("Press to open the OmniWM Fork menu.")
     }
 
     func refreshWorkspaces() {
