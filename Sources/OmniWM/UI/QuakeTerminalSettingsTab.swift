@@ -29,11 +29,17 @@ struct QuakeTerminalSettingsTab: View {
                             Text(position.displayName).tag(position)
                         }
                     }
+                    .onChange(of: settings.quakeTerminalPosition) { _, _ in
+                        controller.reapplyQuakeTerminalGeometryForMonitorChange()
+                    }
 
                     Picker("Show On", selection: $settings.quakeTerminalMonitorMode) {
                         ForEach(QuakeTerminalMonitorMode.allCases, id: \.self) { mode in
                             Text(mode.displayName).tag(mode)
                         }
+                    }
+                    .onChange(of: settings.quakeTerminalMonitorMode) { _, _ in
+                        controller.reapplyQuakeTerminalGeometryForMonitorChange()
                     }
 
                     SettingsSliderRow(
@@ -43,6 +49,9 @@ struct QuakeTerminalSettingsTab: View {
                         step: 5,
                         valueText: "\(Int(settings.quakeTerminalWidthPercent))%"
                     )
+                    .onChange(of: settings.quakeTerminalWidthPercent) { _, _ in
+                        controller.reapplyQuakeTerminalGeometryForMonitorChange()
+                    }
 
                     SettingsSliderRow(
                         label: "Height",
@@ -51,10 +60,14 @@ struct QuakeTerminalSettingsTab: View {
                         step: 5,
                         valueText: "\(Int(settings.quakeTerminalHeightPercent))%"
                     )
+                    .onChange(of: settings.quakeTerminalHeightPercent) { _, _ in
+                        controller.reapplyQuakeTerminalGeometryForMonitorChange()
+                    }
 
                     if settings.quakeTerminalUseCustomFrame {
                         Button("Reset to Default Position") {
                             settings.resetQuakeTerminalCustomFrame()
+                            controller.reapplyQuakeTerminalGeometryForMonitorChange()
                         }
                     }
                 }
