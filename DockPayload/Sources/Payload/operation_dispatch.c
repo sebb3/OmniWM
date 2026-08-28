@@ -1,6 +1,9 @@
 #include "operation_dispatch.h"
+#include "workspace_transition.h"
 
+#include <errno.h>
 #include <math.h>
+#include <time.h>
 
 #define HS2_DOCK_V2_COORDINATE_LIMIT 1000000.0
 
@@ -39,6 +42,12 @@ uint64_t hs2_dock_active_capabilities(const hs2_dock_skylight_api *api)
     }
     if (api->set_window_warp != NULL) {
         capabilities |= HS2_DOCK_V2_CAP_SET_WARP | HS2_DOCK_V2_CAP_CLEAR_WARP;
+    }
+    if (api->get_window_bounds != NULL && api->get_window_transform != NULL &&
+        api->set_window_transform != NULL && api->transaction_create != NULL &&
+        api->transaction_set_window_transform != NULL && api->transaction_commit != NULL &&
+        api->transaction_release != NULL) {
+        capabilities |= HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION;
     }
     return capabilities;
 }
@@ -354,6 +363,141 @@ static bool dispatch_clear_warp(const hs2_dock_skylight_api *api,
     return true;
 }
 
+static uint64_t monotonic_now_ns(void *context)
+{
+    struct timespec value;
+    (void)context;
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) {
+        return 0;
+    }
+    return (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec;
+}
+
+static void monotonic_wait_until_ns(uint64_t deadline_ns, void *context)
+{
+    (void)context;
+    for (;;) {
+        uint64_t now_ns = monotonic_now_ns(NULL);
+        if (now_ns == 0 || now_ns >= deadline_ns) {
+            return;
+        }
+        uint64_t remaining_ns = deadline_ns - now_ns;
+        struct timespec remaining = {
+            .tv_sec = (time_t)(remaining_ns / UINT64_C(1000000000)),
+            .tv_nsec = (long)(remaining_ns % UINT64_C(1000000000)),
+        };
+        if (nanosleep(&remaining, NULL) == 0 || errno != EINTR) {
+            return;
+        }
+    }
+}
+
+static bool dispatch_workspace_transition(const hs2_dock_skylight_api *api,
+                                          hs2_dock_v2_server *server,
+                                          const hs2_dock_v2_peer *peer,
+                                          const hs2_dock_v2_envelope *envelope,
+                                          const uint8_t *payload,
+                                          hs2_dock_operation_reply *reply)
+{
+    hs2_dock_v2_workspace_transition_request wire;
+    hs2_dock_workspace_transition_member members[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS];
+    hs2_dock_v2_lease *leases[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS] = {0};
+    CGRect frames[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS] = {0};
+    CGAffineTransform observed[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS] = {0};
+    bool observed_captured[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS] = {0};
+
+    if (!hs2_dock_v2_decode_workspace_transition_request(payload, envelope->payload_bytes,
+                                                          &wire) ||
+        wire.duration_ns == 0 || wire.duration_ns > HS2_DOCK_WORKSPACE_TRANSITION_MAX_DURATION_NS ||
+        wire.frame_interval_ns < HS2_DOCK_WORKSPACE_TRANSITION_MIN_FRAME_INTERVAL_NS ||
+        wire.frame_interval_ns > wire.duration_ns) {
+        encode_status_reply(reply, HS2_DOCK_V2_MALFORMED_ENVELOPE, 0, 0);
+        return true;
+    }
+    for (size_t index = 0; index < wire.member_count; index++) {
+        if (!valid_window_id(wire.members[index].window_id)) {
+            encode_status_reply(reply, HS2_DOCK_V2_MALFORMED_ENVELOPE, 0, 0);
+            return true;
+        }
+        for (size_t value = 0; value < 6; value++) {
+            if (!valid_coordinate(wire.members[index].from[value]) ||
+                !valid_coordinate(wire.members[index].to[value])) {
+                encode_status_reply(reply, HS2_DOCK_V2_MALFORMED_ENVELOPE, 0, 0);
+                return true;
+            }
+        }
+        for (size_t prior = 0; prior < index; prior++) {
+            if (wire.members[prior].window_id == wire.members[index].window_id ||
+                wire.members[prior].lease_id == wire.members[index].lease_id) {
+                encode_status_reply(reply, HS2_DOCK_V2_MALFORMED_ENVELOPE, 0, 0);
+                return true;
+            }
+        }
+        const double *from = wire.members[index].from;
+        const double *to = wire.members[index].to;
+        members[index] = (hs2_dock_workspace_transition_member){
+            .window_id = (uint32_t)wire.members[index].window_id,
+            .from = CGAffineTransformMake(from[0], from[1], from[2], from[3], from[4], from[5]),
+            .to = CGAffineTransformMake(to[0], to[1], to[2], to[3], to[4], to[5]),
+        };
+    }
+    uint16_t result = hs2_dock_v2_authorize_workspace_transition(
+        server, peer, envelope, wire.nonce, &wire, leases);
+    if (result == HS2_DOCK_V2_OK &&
+        (hs2_dock_active_capabilities(api) & HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION) == 0) {
+        result = HS2_DOCK_V2_CAPABILITY_REJECTED;
+    }
+    if (result != HS2_DOCK_V2_OK) {
+        encode_status_reply(reply, result, 0, 0);
+        return true;
+    }
+
+    int connection = 0;
+    connection = api->main_connection_id();
+    /* Finish every fallible observation before retaining notes or allowing the
+     * primitive to mutate WindowServer. */
+    for (size_t index = 0; index < wire.member_count; index++) {
+        uint32_t window_id = (uint32_t)wire.members[index].window_id;
+        CGError error = api->get_window_bounds(connection, window_id, &frames[index]);
+        if (error != kCGErrorSuccess) {
+            encode_status_reply(reply, HS2_DOCK_V2_OPERATION_FAILED, (uint16_t)error, 0);
+            return true;
+        }
+        observed_captured[index] = api->get_window_transform(
+            connection, window_id, &observed[index]) == kCGErrorSuccess;
+    }
+    for (size_t index = 0; index < wire.member_count; index++) {
+        retain_transform_note(leases[index], frames[index], observed[index],
+                              observed_captured[index]);
+        leases[index]->note.transform_pending = true;
+    }
+
+    hs2_dock_workspace_transition_request request = {
+        .members = members, .member_count = wire.member_count,
+        .duration_ns = wire.duration_ns, .frame_interval_ns = wire.frame_interval_ns,
+    };
+    hs2_dock_workspace_transition_clock clock = {
+        .now_ns = monotonic_now_ns, .wait_until_ns = monotonic_wait_until_ns,
+        .should_cancel = api->transition_should_cancel,
+        .context = api->transition_context,
+    };
+    hs2_dock_workspace_transition_result transition =
+        hs2_dock_run_workspace_transition(api, &request, &clock);
+    switch (transition) {
+    case HS2_DOCK_WORKSPACE_TRANSITION_COMPLETED:
+        encode_status_reply(reply, HS2_DOCK_V2_OK, 0, wire.member_count); break;
+    case HS2_DOCK_WORKSPACE_TRANSITION_COMMIT_UNCERTAIN:
+        encode_status_reply(reply, HS2_DOCK_V2_COMMIT_UNCERTAIN, 0, 0); break;
+    case HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED:
+        encode_status_reply(reply, HS2_DOCK_V2_CANCELLED, 0, 0); break;
+    case HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED:
+        encode_status_reply(reply, HS2_DOCK_V2_TIMEOUT, 0, 0); break;
+    default:
+        encode_status_reply(reply, HS2_DOCK_V2_OPERATION_FAILED, 0, 0); break;
+    }
+    return true;
+}
+
 bool hs2_dock_dispatch_operation(const hs2_dock_skylight_api *api,
                                  hs2_dock_v2_server *server,
                                  const hs2_dock_v2_peer *peer,
@@ -435,6 +579,9 @@ bool hs2_dock_dispatch_operation(const hs2_dock_skylight_api *api,
     }
     if (envelope->type == HS2_DOCK_V2_CLEAR_WARP) {
         return dispatch_clear_warp(api, server, peer, envelope, payload, reply);
+    }
+    if (envelope->type == HS2_DOCK_V2_WORKSPACE_TRANSITION) {
+        return dispatch_workspace_transition(api, server, peer, envelope, payload, reply);
     }
 
     return false;

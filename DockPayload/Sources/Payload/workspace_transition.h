@@ -29,6 +29,7 @@ typedef struct {
 typedef struct {
     uint64_t (*now_ns)(void *context);
     void (*wait_until_ns)(uint64_t deadline_ns, void *context);
+    bool (*should_cancel)(void *context);
     void *context;
 } hs2_dock_workspace_transition_clock;
 
@@ -38,6 +39,7 @@ typedef enum {
     HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED,
     HS2_DOCK_WORKSPACE_TRANSITION_APPLY_FAILED,
     HS2_DOCK_WORKSPACE_TRANSITION_COMMIT_UNCERTAIN,
+    HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED,
 } hs2_dock_workspace_transition_result;
 
 /* Runs one bounded multi-window presentation transition on Dock's privileged
