@@ -975,6 +975,16 @@ public enum IPCAutomationManifest {
             valuePlaceholder: "<proportion>"
         ),
         .init(
+            flag: "--default-width",
+            summary: "Set the initial width for matching floating windows in points.",
+            valuePlaceholder: "<points>"
+        ),
+        .init(
+            flag: "--default-height",
+            summary: "Set the initial height for matching floating windows in points.",
+            valuePlaceholder: "<points>"
+        ),
+        .init(
             flag: "--min-width",
             summary: "Set the minimum floating width in points.",
             valuePlaceholder: "<points>"

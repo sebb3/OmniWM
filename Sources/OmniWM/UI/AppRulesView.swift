@@ -271,7 +271,10 @@ struct AppRuleSidebarRow: View {
             )
         }
         if rule.minWidth != nil || rule.minHeight != nil {
-            RuleBadge(text: "Size", color: .orange, accessibilityLabel: "Minimum size set")
+            RuleBadge(text: "Min", color: .orange, accessibilityLabel: "Minimum size set")
+        }
+        if rule.defaultWidth != nil || rule.defaultHeight != nil {
+            RuleBadge(text: "Default", color: .mint, accessibilityLabel: "Default floating size set")
         }
         if rule.hasAdvancedMatchers {
             RuleBadge(text: "Advanced", color: .purple, accessibilityLabel: "Advanced matchers")

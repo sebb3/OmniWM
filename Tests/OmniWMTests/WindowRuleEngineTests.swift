@@ -268,6 +268,18 @@ final class WindowRuleEngineTests: XCTestCase {
         XCTAssertNil(decision.admissionHints.initialNiriContainerPrimarySpan)
     }
 
+    func testDefaultFloatingSizeCascadesPerAxis() {
+        let engine = WindowRuleEngine()
+        let catchAll = AppRule(bundleId: AppRule.wildcardBundleId, defaultWidth: 800, defaultHeight: 600)
+        let specific = AppRule(bundleId: "com.test.app", layout: .float, defaultWidth: 720)
+        engine.rebuild(rules: [catchAll, specific])
+
+        let decision = evaluate(engine, facts(appName: "Test", bundleId: "com.test.app"))
+
+        XCTAssertEqual(decision.admissionHints.defaultWidth, 720)
+        XCTAssertEqual(decision.admissionHints.defaultHeight, 600)
+    }
+
     func testSystemTextInputPanelStaysUnmanagedWithWildcard() {
         let engine = WindowRuleEngine()
         let wildcard = AppRule(bundleId: "", appNameSubstring: "Input", layout: .float)
@@ -637,7 +649,11 @@ final class WindowRuleEngineTests: XCTestCase {
                 focus: .never,
                 windowLevel: .below
             ),
-            admissionHints: ManagedWindowAdmissionHints(initialNiriContainerPrimarySpan: 0.4),
+            admissionHints: ManagedWindowAdmissionHints(
+                initialNiriContainerPrimarySpan: 0.4,
+                defaultWidth: 800,
+                defaultHeight: 600
+            ),
             heuristicReasons: [],
             deferredReason: nil
         )
@@ -654,6 +670,8 @@ final class WindowRuleEngineTests: XCTestCase {
         XCTAssertEqual(merged.ruleEffects.windowLevel, .below)
         XCTAssertEqual(merged.ruleEffects.matchedRuleId, oneShot.id, "reap-detection depends on this")
         XCTAssertEqual(merged.admissionHints.initialNiriContainerPrimarySpan, 0.4)
+        XCTAssertEqual(merged.admissionHints.defaultWidth, 800)
+        XCTAssertEqual(merged.admissionHints.defaultHeight, 600)
     }
 
     /// A one-shot that sets every field overrides every field, including
@@ -673,6 +691,8 @@ final class WindowRuleEngineTests: XCTestCase {
             bundleId: "com.apple.TextEdit",
             layout: .float,
             assignToWorkspace: "2",
+            defaultWidth: 800,
+            defaultHeight: 600,
             minWidth: 500,
             minHeight: 350,
             focus: .userInitiated,
@@ -684,6 +704,8 @@ final class WindowRuleEngineTests: XCTestCase {
         XCTAssertEqual(merged.disposition, .floating)
         XCTAssertEqual(merged.source, .userRule(oneShot.id))
         XCTAssertEqual(merged.workspaceName, "2")
+        XCTAssertEqual(merged.admissionHints.defaultWidth, 800)
+        XCTAssertEqual(merged.admissionHints.defaultHeight, 600)
         XCTAssertEqual(merged.ruleEffects.minWidth, 500)
         XCTAssertEqual(merged.ruleEffects.minHeight, 350)
         XCTAssertEqual(merged.ruleEffects.focus, .userInitiated)
