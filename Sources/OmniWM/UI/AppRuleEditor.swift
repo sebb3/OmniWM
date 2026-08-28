@@ -45,6 +45,7 @@ struct AppRuleDetailView: View {
         Form {
             RuleApplicationSection(draft: $draft, controller: controller)
             RuleWindowBehaviorSection(draft: $draft, workspaceNames: workspaceNames)
+            RuleDefaultSizeSection(draft: $draft)
             RuleMinimumSizeSection(draft: $draft)
 
             Section {
@@ -151,6 +152,7 @@ struct AppRuleAddSheet: View {
             Form {
                 RuleApplicationSection(draft: $draft, controller: controller)
                 RuleWindowBehaviorSection(draft: $draft, workspaceNames: workspaceNames)
+                RuleDefaultSizeSection(draft: $draft)
                 RuleMinimumSizeSection(draft: $draft)
 
                 Section {
@@ -310,6 +312,44 @@ struct RuleWindowBehaviorSection: View {
     private func seedWorkspaceIfNeeded() {
         if draft.assignToWorkspace.isEmpty, let first = workspaceNames.first {
             draft.assignToWorkspace = first
+        }
+    }
+}
+
+struct RuleDefaultSizeSection: View {
+    @Binding var draft: AppRuleDraft
+
+    var body: some View {
+        Section("Default Size (Floating Windows)") {
+            Toggle("Default Width", isOn: $draft.defaultWidthEnabled)
+            if draft.defaultWidthEnabled {
+                HStack {
+                    TextField("Width", value: $draft.defaultWidth, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                    Text("px")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Toggle("Default Height", isOn: $draft.defaultHeightEnabled)
+            if draft.defaultHeightEnabled {
+                HStack {
+                    TextField("Height", value: $draft.defaultHeight, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                    Text("px")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let error = draft.defaultSizeError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            SettingsCaption("Sets the initial size when a matching window first opens floating. You can resize it afterwards.")
         }
     }
 }

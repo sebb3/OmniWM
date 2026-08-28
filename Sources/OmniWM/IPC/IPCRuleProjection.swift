@@ -71,6 +71,7 @@ enum IPCRuleProjection {
             validation.titleMatcherError,
             validation.initialContainerPrimarySpanError,
             validation.effectError,
+            validation.defaultSizeError,
             validation.minSizeError
         ].compactMap { $0 }
         let isValid = validationMessages.isEmpty
@@ -87,6 +88,8 @@ enum IPCRuleProjection {
             layout: definition.layout,
             assignToWorkspace: definition.assignToWorkspace,
             initialContainerPrimarySpan: definition.initialContainerPrimarySpan,
+            defaultWidth: definition.defaultWidth,
+            defaultHeight: definition.defaultHeight,
             minWidth: definition.minWidth,
             minHeight: definition.minHeight,
             focus: definition.focus,
@@ -111,6 +114,8 @@ enum IPCRuleProjection {
                 layout: ipcRuleLayout(from: rule.effectiveLayoutAction),
                 assignToWorkspace: rule.assignToWorkspace,
                 initialContainerPrimarySpan: rule.initialContainerPrimarySpan,
+                defaultWidth: rule.defaultWidth,
+                defaultHeight: rule.defaultHeight,
                 minWidth: rule.minWidth,
                 minHeight: rule.minHeight,
                 focus: ipcRuleFocus(from: rule.focus),
@@ -132,6 +137,8 @@ enum IPCRuleProjection {
             layout: windowRuleLayout(from: normalized.layout),
             assignToWorkspace: normalized.assignToWorkspace,
             initialContainerPrimarySpan: normalized.initialContainerPrimarySpan,
+            defaultWidth: normalized.defaultWidth,
+            defaultHeight: normalized.defaultHeight,
             minWidth: normalized.minWidth,
             minHeight: normalized.minHeight,
             focus: windowRuleFocus(from: normalized.focus),
@@ -150,6 +157,8 @@ enum IPCRuleProjection {
             layout: definition.layout,
             assignToWorkspace: definition.assignToWorkspace?.trimmedNonEmpty,
             initialContainerPrimarySpan: definition.initialContainerPrimarySpan,
+            defaultWidth: definition.defaultWidth,
+            defaultHeight: definition.defaultHeight,
             minWidth: definition.minWidth,
             minHeight: definition.minHeight,
             focus: definition.focus,

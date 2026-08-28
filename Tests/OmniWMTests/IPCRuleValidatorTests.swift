@@ -93,6 +93,32 @@ final class IPCRuleValidatorTests: XCTestCase {
         XCTAssertTrue(report.isValid)
     }
 
+    func testDefaultFloatingSizeValidationAndWireRoundTrip() throws {
+        for value in [0.0, -10.0, Double.nan] {
+            let report = IPCRuleValidator.validate(
+                IPCRuleDefinition(bundleId: "com.test.app", defaultWidth: value)
+            )
+            XCTAssertNotNil(report.defaultSizeError)
+            XCTAssertFalse(report.isValid)
+        }
+
+        let definition = IPCRuleDefinition(
+            bundleId: "com.apple.finder",
+            layout: .float,
+            defaultWidth: 800,
+            defaultHeight: 600
+        )
+        XCTAssertTrue(IPCRuleValidator.validate(definition).isValid)
+        let data = try JSONEncoder().encode(definition)
+        XCTAssertEqual(try JSONDecoder().decode(IPCRuleDefinition.self, from: data), definition)
+    }
+
+    func testDefaultFloatingSizeManifestOptions() {
+        let flags = Set(IPCAutomationManifest.ruleDefinitionOptionDescriptors.map(\.flag))
+        XCTAssertTrue(flags.contains("--default-width"))
+        XCTAssertTrue(flags.contains("--default-height"))
+    }
+
     func testInitialContainerPrimarySpanInclusiveBoundsAccepted() {
         for value in [0.05, 0.5, 1.0] {
             let report = IPCRuleValidator.validate(

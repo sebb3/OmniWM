@@ -690,6 +690,7 @@ struct WindowDecision {
     let source: WindowDecisionSource            // .manualOverride/.userRule(UUID)/.builtInRule/.heuristic
     let workspaceName: String?
     let ruleEffects: ManagedWindowRuleEffects   // minWidth/minHeight
+    let admissionHints: ManagedWindowAdmissionHints // initial Niri span/default floating size
 }
 ```
 

@@ -59,6 +59,10 @@ struct AppRuleDraft: Identifiable, Equatable {
     var assignToWorkspace: String
     var initialContainerPrimarySpanEnabled: Bool
     var initialContainerPrimarySpan: Double
+    var defaultWidthEnabled: Bool
+    var defaultWidth: Double
+    var defaultHeightEnabled: Bool
+    var defaultHeight: Double
     var minWidthEnabled: Bool
     var minWidth: Double
     var minHeightEnabled: Bool
@@ -84,6 +88,10 @@ struct AppRuleDraft: Identifiable, Equatable {
         assignToWorkspace = ""
         initialContainerPrimarySpanEnabled = false
         initialContainerPrimarySpan = 0.5
+        defaultWidthEnabled = false
+        defaultWidth = 800
+        defaultHeightEnabled = false
+        defaultHeight = 600
         minWidthEnabled = false
         minWidth = 400
         minHeightEnabled = false
@@ -109,6 +117,10 @@ struct AppRuleDraft: Identifiable, Equatable {
         assignToWorkspace = rule.assignToWorkspace ?? ""
         initialContainerPrimarySpanEnabled = rule.initialContainerPrimarySpan != nil
         initialContainerPrimarySpan = rule.initialContainerPrimarySpan ?? 0.5
+        defaultWidthEnabled = rule.defaultWidth != nil
+        defaultWidth = rule.defaultWidth ?? 800
+        defaultHeightEnabled = rule.defaultHeight != nil
+        defaultHeight = rule.defaultHeight ?? 600
         minWidthEnabled = rule.minWidth != nil
         minWidth = rule.minWidth ?? 400
         minHeightEnabled = rule.minHeight != nil
@@ -140,6 +152,10 @@ struct AppRuleDraft: Identifiable, Equatable {
             lhs.assignToWorkspace == rhs.assignToWorkspace &&
             lhs.initialContainerPrimarySpanEnabled == rhs.initialContainerPrimarySpanEnabled &&
             nanStableEqual(lhs.initialContainerPrimarySpan, rhs.initialContainerPrimarySpan) &&
+            lhs.defaultWidthEnabled == rhs.defaultWidthEnabled &&
+            nanStableEqual(lhs.defaultWidth, rhs.defaultWidth) &&
+            lhs.defaultHeightEnabled == rhs.defaultHeightEnabled &&
+            nanStableEqual(lhs.defaultHeight, rhs.defaultHeight) &&
             lhs.minWidthEnabled == rhs.minWidthEnabled &&
             nanStableEqual(lhs.minWidth, rhs.minWidth) &&
             lhs.minHeightEnabled == rhs.minHeightEnabled &&
@@ -214,6 +230,16 @@ struct AppRuleDraft: Identifiable, Equatable {
         return nil
     }
 
+    var defaultSizeError: String? {
+        if defaultWidthEnabled, !(defaultWidth.isFinite && defaultWidth > 0) {
+            return "Default width must be a positive number."
+        }
+        if defaultHeightEnabled, !(defaultHeight.isFinite && defaultHeight > 0) {
+            return "Default height must be a positive number."
+        }
+        return nil
+    }
+
     var initialContainerPrimarySpanError: String? {
         IPCRuleValidator.initialContainerPrimarySpanError(
             for: initialContainerPrimarySpanEnabled ? initialContainerPrimarySpan : nil
@@ -224,13 +250,13 @@ struct AppRuleDraft: Identifiable, Equatable {
         let rule = makeRule()
         guard rule.hasIdentifyingMatcher, !rule.hasEffect else { return nil }
         return "This rule matches windows but has no effect — set a layout, focus policy, window level, workspace, "
-            + "initial container primary span, or minimum size."
+            + "initial container primary span, default size, or minimum size."
     }
 
     var isValid: Bool {
         let rule = makeRule()
         return bundleIdError == nil && titleRegexError == nil && initialContainerPrimarySpanError == nil &&
-            minSizeError == nil
+            defaultSizeError == nil && minSizeError == nil
             && rule.hasIdentifyingMatcher && rule.hasEffect
     }
 
@@ -262,6 +288,8 @@ struct AppRuleDraft: Identifiable, Equatable {
             layout: layoutAction == .auto ? nil : layoutAction,
             assignToWorkspace: assignToWorkspaceEnabled ? assignToWorkspace.trimmedNonEmpty : nil,
             initialContainerPrimarySpan: initialContainerPrimarySpanEnabled ? initialContainerPrimarySpan : nil,
+            defaultWidth: defaultWidthEnabled ? defaultWidth : nil,
+            defaultHeight: defaultHeightEnabled ? defaultHeight : nil,
             minWidth: minWidthEnabled ? minWidth : nil,
             minHeight: minHeightEnabled ? minHeight : nil,
             focus: focus,

@@ -53,6 +53,8 @@ struct ManagedWindowRuleEffects: Equatable, Sendable {
 
 struct ManagedWindowAdmissionHints: Equatable, Sendable {
     var initialNiriContainerPrimarySpan: Double?
+    var defaultWidth: Double?
+    var defaultHeight: Double?
 
     static let none = ManagedWindowAdmissionHints()
 }
@@ -200,6 +202,8 @@ struct WindowDecisionDebugSnapshot: Equatable, Sendable {
     let minWidth: Double?
     let minHeight: Double?
     let initialNiriContainerPrimarySpan: Double?
+    let defaultWidth: Double?
+    let defaultHeight: Double?
     let matchedRuleId: UUID?
     let heuristicReasons: [AXWindowHeuristicReason]
     let attributeFetchSucceeded: Bool
@@ -240,6 +244,8 @@ struct WindowDecisionDebugSnapshot: Equatable, Sendable {
             "minWidth=\(stringValue(minWidth))",
             "minHeight=\(stringValue(minHeight))",
             "initialNiriContainerPrimarySpan=\(stringValue(initialNiriContainerPrimarySpan))",
+            "defaultWidth=\(stringValue(defaultWidth))",
+            "defaultHeight=\(stringValue(defaultHeight))",
             "matchedRuleId=\(matchedRuleId?.uuidString ?? "nil")",
             "heuristicReasons=\(heuristicReasons.map(\.rawValue).joined(separator: ","))",
             "attributeFetchSucceeded=\(attributeFetchSucceeded)"
@@ -470,7 +476,9 @@ final class WindowRuleEngine {
             ),
             admissionHints: ManagedWindowAdmissionHints(
                 initialNiriContainerPrimarySpan: oneShot.validInitialContainerPrimarySpan
-                    ?? decision.admissionHints.initialNiriContainerPrimarySpan
+                    ?? decision.admissionHints.initialNiriContainerPrimarySpan,
+                defaultWidth: oneShot.defaultWidth ?? decision.admissionHints.defaultWidth,
+                defaultHeight: oneShot.defaultHeight ?? decision.admissionHints.defaultHeight
             ),
             heuristicReasons: decision.heuristicReasons,
             deferredReason: decision.deferredReason
@@ -532,7 +540,9 @@ final class WindowRuleEngine {
             windowLevel: cascade(in: compiledUserRules, facts: facts) { $0.windowLevel }
         )
         let admissionHints = ManagedWindowAdmissionHints(
-            initialNiriContainerPrimarySpan: userRule?.rule.validInitialContainerPrimarySpan
+            initialNiriContainerPrimarySpan: userRule?.rule.validInitialContainerPrimarySpan,
+            defaultWidth: cascade(in: compiledUserRules, facts: facts) { $0.defaultWidth },
+            defaultHeight: cascade(in: compiledUserRules, facts: facts) { $0.defaultHeight }
         )
 
         if let userRule,
