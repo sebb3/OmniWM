@@ -346,6 +346,32 @@ final class GapSettingsTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testLeftQuakeTerminalReservesOnlyItsMonitorWorkingArea() {
+        let settings = makeSettingsStore()
+        settings.outerGapLeft = 12
+        let controller = WMController(settings: settings)
+        let left = makeMonitor(displayId: 1, name: "Left")
+        let right = makeMonitor(displayId: 2, name: "Right", originX: 1440)
+
+        controller.updateQuakeTerminalReservedEdge(.init(displayId: left.displayId, width: 500))
+
+        XCTAssertEqual(
+            controller.insetWorkingFrame(for: left),
+            CGRect(x: 512, y: 0, width: 928, height: 900)
+        )
+        XCTAssertEqual(
+            controller.insetWorkingFrame(for: right),
+            CGRect(x: 1452, y: 0, width: 1428, height: 900)
+        )
+
+        controller.updateQuakeTerminalReservedEdge(nil)
+        XCTAssertEqual(
+            controller.insetWorkingFrame(for: left),
+            CGRect(x: 12, y: 0, width: 1428, height: 900)
+        )
+    }
+
     private func makeMonitor(displayId: CGDirectDisplayID, name: String, originX: CGFloat = 0) -> Monitor {
         Monitor(
             id: .init(displayId: displayId),

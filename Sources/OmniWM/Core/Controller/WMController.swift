@@ -69,6 +69,7 @@ final class WMController {
     private(set) var moveMouseToFocusedWindowEnabled: Bool = false
     private(set) var displaySpacesMode: DisplaySpacesMode = .enabled
     private var displaySpacesAlertShown = false
+    private var quakeTerminalReservedEdge: QuakeTerminalReservedEdge?
     var pendingCrashReport: FatalCapture.PendingCrashReport?
     var diagnosticsIssues: [DiagnosticsIssue] = []
 
@@ -175,6 +176,9 @@ final class WMController {
         },
         focusedWindowScreenProvider: { [weak self] in
             self?.focusedManagedWindowScreenForQuakeTerminal()
+        },
+        reservedEdgeChanged: { [weak self] edge in
+            self?.updateQuakeTerminalReservedEdge(edge)
         }
     )
     @ObservationIgnored
@@ -1019,7 +1023,7 @@ final class WMController {
         let gaps = settings.resolvedGapSettings(for: monitor)
         let menuBarInset = max(0, monitor.frame.maxY - monitor.visibleFrame.maxY)
         let struts = Struts(
-            left: gaps.outerGapLeft,
+            left: gaps.outerGapLeft + quakeTerminalReservedLeftInset(for: monitor),
             right: gaps.outerGapRight,
             top: normalizedTopStrut(
                 top: gaps.outerGapTop,
@@ -1029,6 +1033,21 @@ final class WMController {
             bottom: gaps.outerGapBottom
         )
         return computeWorkingArea(parentArea: monitor.visibleFrame, scale: scale, struts: struts)
+    }
+
+    func updateQuakeTerminalReservedEdge(_ edge: QuakeTerminalReservedEdge?) {
+        guard quakeTerminalReservedEdge != edge else { return }
+        quakeTerminalReservedEdge = edge
+        layoutRefreshController.requestRelayout(reason: .quakeTerminalReservedEdgeChanged)
+    }
+
+    private func quakeTerminalReservedLeftInset(for monitor: Monitor) -> CGFloat {
+        guard let edge = quakeTerminalReservedEdge,
+              edge.displayId == monitor.displayId
+        else {
+            return 0
+        }
+        return min(max(0, edge.width), monitor.visibleFrame.width)
     }
 
     func fullscreenLayoutFrame(for monitor: Monitor) -> CGRect {

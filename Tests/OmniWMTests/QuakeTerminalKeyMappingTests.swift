@@ -27,6 +27,51 @@ final class QuakeTerminalKeyMappingTests: XCTestCase {
         )
     }
 
+    func testLeftQuakeTerminalReservesItsConfiguredWidth() {
+        XCTAssertEqual(
+            QuakeTerminalController.reservedEdge(
+                position: .left,
+                customFrame: nil,
+                displayId: 7,
+                configuredWidth: 640,
+                visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+            ),
+            QuakeTerminalReservedEdge(displayId: 7, width: 640)
+        )
+    }
+
+    func testOnlyStandardLeftQuakeTerminalReservesAnEdge() {
+        for position in QuakeTerminalPosition.allCases where position != .left {
+            XCTAssertNil(QuakeTerminalController.reservedEdge(
+                position: position,
+                customFrame: nil,
+                displayId: 7,
+                configuredWidth: 640,
+                visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+            ))
+        }
+        XCTAssertNil(QuakeTerminalController.reservedEdge(
+            position: .left,
+            customFrame: CGRect(x: 100, y: 100, width: 640, height: 700),
+            displayId: 7,
+            configuredWidth: 640,
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+        ))
+    }
+
+    func testLeftAnchoredCustomTerminalReservesItsActualWidth() {
+        XCTAssertEqual(
+            QuakeTerminalController.reservedEdge(
+                position: .left,
+                customFrame: CGRect(x: 10, y: 100, width: 700, height: 700),
+                displayId: 7,
+                configuredWidth: 640,
+                visibleFrame: CGRect(x: 10, y: 0, width: 1440, height: 900)
+            ),
+            QuakeTerminalReservedEdge(displayId: 7, width: 700)
+        )
+    }
+
     func testEveryDigitKeyCodeSelectsItsTab() {
         let expectedTabIndexByKeyCode: [UInt16: Int] = [
             18: 0, 19: 1, 20: 2, 21: 3, 23: 4, 22: 5, 26: 6, 28: 7, 25: 8
