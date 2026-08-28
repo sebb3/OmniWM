@@ -6,6 +6,27 @@ import XCTest
 
 @MainActor
 final class QuakeTerminalKeyMappingTests: XCTestCase {
+    func testQuakeHotkeySummonsHiddenTerminal() {
+        XCTAssertEqual(
+            QuakeTerminalController.hotkeyAction(isVisible: false, isFocused: false),
+            .summon
+        )
+    }
+
+    func testQuakeHotkeyFocusesVisibleUnfocusedTerminal() {
+        XCTAssertEqual(
+            QuakeTerminalController.hotkeyAction(isVisible: true, isFocused: false),
+            .focus
+        )
+    }
+
+    func testQuakeHotkeyHidesVisibleFocusedTerminal() {
+        XCTAssertEqual(
+            QuakeTerminalController.hotkeyAction(isVisible: true, isFocused: true),
+            .hide
+        )
+    }
+
     func testEveryDigitKeyCodeSelectsItsTab() {
         let expectedTabIndexByKeyCode: [UInt16: Int] = [
             18: 0, 19: 1, 20: 2, 21: 3, 23: 4, 22: 5, 26: 6, 28: 7, 25: 8

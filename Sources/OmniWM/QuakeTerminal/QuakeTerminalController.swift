@@ -20,6 +20,12 @@ private final class GhosttyAppCallbackContext {
 
 @MainActor
 final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTabBarDelegate {
+    enum HotkeyAction: Equatable {
+        case summon
+        case focus
+        case hide
+    }
+
     private enum HideBehavior {
         case restoreLatestTarget
         case preserveCurrentFocus
@@ -675,11 +681,23 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     }
 
     func toggle() {
-        if visible {
-            animateOut()
-        } else {
+        let action = Self.hotkeyAction(
+            isVisible: visible,
+            isFocused: window.map(isWindowFocused) ?? false
+        )
+        switch action {
+        case .summon:
             animateIn()
+        case .focus:
+            focusVisibleWindow()
+        case .hide:
+            animateOut()
         }
+    }
+
+    static func hotkeyAction(isVisible: Bool, isFocused: Bool) -> HotkeyAction {
+        guard isVisible else { return .summon }
+        return isFocused ? .hide : .focus
     }
 
     func animateIn() {
@@ -882,8 +900,14 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         isTransitioning = false
         window.alphaValue = 1
         window.level = .floating
-        makeWindowKey(window)
+        focusVisibleWindow()
         refreshSurfacesForCurrentScreen()
+    }
+
+    private func focusVisibleWindow() {
+        guard visible, let window else { return }
+
+        makeWindowKey(window)
 
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
