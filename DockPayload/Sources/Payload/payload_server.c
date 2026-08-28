@@ -176,6 +176,20 @@ static bool write_operation_reply(int fd,
     return write_encoded(fd, &envelope, reply->payload);
 }
 
+static bool transition_peer_disconnected(void *context)
+{
+    int fd = *(const int *)context;
+    uint8_t byte;
+    ssize_t result = recv(fd, &byte, sizeof(byte), MSG_PEEK | MSG_DONTWAIT);
+    if (result == 0) {
+        return true;
+    }
+    if (result > 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        return false;
+    }
+    return true;
+}
+
 static bool handle_handshake(int fd,
                              hs2_dock_v2_server *server,
                              const hs2_dock_v2_peer *peer,
@@ -223,6 +237,9 @@ bool hs2_dock_v2_serve_connection(int fd,
                                   const volatile bool *stopping,
                                   long handshake_timeout_ms)
 {
+    hs2_dock_skylight_api connection_api = *api;
+    connection_api.transition_should_cancel = transition_peer_disconnected;
+    connection_api.transition_context = &fd;
     uint64_t session_id = 0;
     uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES] = {0};
     hs2_dock_handshake_deadline deadline = {0};
@@ -287,8 +304,9 @@ bool hs2_dock_v2_serve_connection(int fd,
         hs2_dock_operation_reply operation_reply;
         if (envelope.type == HS2_DOCK_V2_QUERY_FRAME || envelope.type == HS2_DOCK_V2_MOVE_REAL ||
             envelope.type == HS2_DOCK_V2_SET_TRANSFORM || envelope.type == HS2_DOCK_V2_SET_WARP ||
-            envelope.type == HS2_DOCK_V2_CLEAR_WARP) {
-            if (!hs2_dock_dispatch_operation(api, server, peer, &envelope, payload,
+            envelope.type == HS2_DOCK_V2_CLEAR_WARP ||
+            envelope.type == HS2_DOCK_V2_WORKSPACE_TRANSITION) {
+            if (!hs2_dock_dispatch_operation(&connection_api, server, peer, &envelope, payload,
                                              &operation_reply) ||
                 !write_operation_reply(fd, &envelope, &operation_reply)) {
                 break;

@@ -895,6 +895,7 @@ final class ServiceLifecycleManager {
         controller.axManager.onManagedWindowBindingFailed = nil
         controller.workspaceManager.onGapsChanged = nil
 
+        controller.layoutRefreshController.workspaceSwitchTransitionCoordinator.cancelAll()
         controller.layoutRefreshController.resetState()
         controller.mouseEventHandler.cleanup()
         controller.resetMouseWarpPolicy()

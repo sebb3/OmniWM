@@ -81,7 +81,7 @@ static float get_float(const uint8_t *in)
 
 static bool known_message_type(uint16_t type)
 {
-    return type >= HS2_DOCK_V2_HANDSHAKE_REQUEST && type <= HS2_DOCK_V2_FRAME_RESPONSE;
+    return type >= HS2_DOCK_V2_HANDSHAKE_REQUEST && type <= HS2_DOCK_V2_WORKSPACE_TRANSITION;
 }
 
 /* Envelope layout, little-endian:
@@ -443,6 +443,68 @@ bool hs2_dock_v2_decode_clear_warp_request(const uint8_t *bytes, size_t length,
     out->lease_id = get64(bytes + 16);
     out->window_id = get64(bytes + 24);
     return out->lease_id != 0 && out->window_id != 0;
+}
+
+
+/* Workspace transition: fixed prefix followed by member_count fixed records. */
+bool hs2_dock_v2_encode_workspace_transition_request(
+    const hs2_dock_v2_workspace_transition_request *message, uint8_t *out, size_t out_length)
+{
+    if (message == NULL || out == NULL || message->member_count == 0 ||
+        message->member_count > HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS ||
+        message->reserved != 0 ||
+        out_length != HS2_DOCK_V2_WORKSPACE_TRANSITION_PREFIX_BYTES +
+                          (size_t)message->member_count *
+                              HS2_DOCK_V2_WORKSPACE_TRANSITION_MEMBER_BYTES) {
+        return false;
+    }
+    memcpy(out, message->nonce, HS2_DOCK_V2_NONCE_BYTES);
+    put64(out + 16, message->duration_ns);
+    put64(out + 24, message->frame_interval_ns);
+    put16(out + 32, message->member_count);
+    put16(out + 34, 0);
+    for (size_t index = 0; index < message->member_count; index++) {
+        const hs2_dock_v2_workspace_transition_member *member = &message->members[index];
+        uint8_t *record = out + HS2_DOCK_V2_WORKSPACE_TRANSITION_PREFIX_BYTES +
+                          index * HS2_DOCK_V2_WORKSPACE_TRANSITION_MEMBER_BYTES;
+        if (member->lease_id == 0 || member->window_id == 0) return false;
+        put64(record, member->lease_id);
+        put64(record + 8, member->window_id);
+        for (size_t value = 0; value < 6; value++) {
+            if (!isfinite(member->from[value]) || !isfinite(member->to[value])) return false;
+            put_double(record + 16 + value * 8, member->from[value]);
+            put_double(record + 64 + value * 8, member->to[value]);
+        }
+    }
+    return true;
+}
+
+bool hs2_dock_v2_decode_workspace_transition_request(
+    const uint8_t *bytes, size_t length, hs2_dock_v2_workspace_transition_request *out)
+{
+    if (bytes == NULL || out == NULL || length < HS2_DOCK_V2_WORKSPACE_TRANSITION_PREFIX_BYTES)
+        return false;
+    memcpy(out->nonce, bytes, HS2_DOCK_V2_NONCE_BYTES);
+    out->duration_ns = get64(bytes + 16);
+    out->frame_interval_ns = get64(bytes + 24);
+    out->member_count = get16(bytes + 32);
+    out->reserved = get16(bytes + 34);
+    if (out->member_count == 0 || out->member_count > HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS ||
+        out->reserved != 0 || length != HS2_DOCK_V2_WORKSPACE_TRANSITION_PREFIX_BYTES +
+            (size_t)out->member_count * HS2_DOCK_V2_WORKSPACE_TRANSITION_MEMBER_BYTES) return false;
+    for (size_t index = 0; index < out->member_count; index++) {
+        hs2_dock_v2_workspace_transition_member *member = &out->members[index];
+        const uint8_t *record = bytes + HS2_DOCK_V2_WORKSPACE_TRANSITION_PREFIX_BYTES +
+                                index * HS2_DOCK_V2_WORKSPACE_TRANSITION_MEMBER_BYTES;
+        member->lease_id = get64(record); member->window_id = get64(record + 8);
+        if (member->lease_id == 0 || member->window_id == 0) return false;
+        for (size_t value = 0; value < 6; value++) {
+            member->from[value] = get_double(record + 16 + value * 8);
+            member->to[value] = get_double(record + 64 + value * 8);
+            if (!isfinite(member->from[value]) || !isfinite(member->to[value])) return false;
+        }
+    }
+    return true;
 }
 
 /* Generic status reply. */

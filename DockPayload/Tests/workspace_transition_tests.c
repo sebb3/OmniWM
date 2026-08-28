@@ -15,6 +15,7 @@ typedef struct {
     int fail_set_call;
     bool fail_commit;
     bool stall_clock;
+    bool cancelled;
     uint64_t now;
     uint64_t deadlines[MAX_RECORDED_FRAMES];
     size_t deadline_count;
@@ -93,6 +94,12 @@ static void fake_wait(uint64_t deadline, void *context)
     }
 }
 
+static bool fake_should_cancel(void *context)
+{
+    transition_fake *fake = context;
+    return fake->cancelled;
+}
+
 static hs2_dock_skylight_api complete_api(void)
 {
     return (hs2_dock_skylight_api){
@@ -109,8 +116,39 @@ static hs2_dock_workspace_transition_clock clock_for(transition_fake *fake)
     return (hs2_dock_workspace_transition_clock){
         .now_ns = fake_now,
         .wait_until_ns = fake_wait,
+        .should_cancel = fake_should_cancel,
         .context = fake,
     };
+}
+
+static void test_initial_clock_failure_and_cancellation_do_not_mutate(void)
+{
+    hs2_dock_workspace_transition_member member = {
+        .window_id = 1,
+        .from = CGAffineTransformIdentity,
+        .to = CGAffineTransformMakeTranslation(0, 100),
+    };
+    hs2_dock_workspace_transition_request request = {
+        .members = &member,
+        .member_count = 1,
+        .duration_ns = UINT64_C(10000000),
+        .frame_interval_ns = UINT64_C(1000000),
+    };
+    hs2_dock_skylight_api api = complete_api();
+
+    memset(&g_fake, 0, sizeof(g_fake));
+    hs2_dock_workspace_transition_clock clock = clock_for(&g_fake);
+    assert(hs2_dock_run_workspace_transition(&api, &request, &clock) ==
+           HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED);
+    assert(g_fake.connection_calls == 0 && g_fake.create_calls == 0);
+
+    memset(&g_fake, 0, sizeof(g_fake));
+    g_fake.now = 1;
+    g_fake.cancelled = true;
+    clock = clock_for(&g_fake);
+    assert(hs2_dock_run_workspace_transition(&api, &request, &clock) ==
+           HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED);
+    assert(g_fake.connection_calls == 0 && g_fake.create_calls == 0);
 }
 
 static void assert_transform(CGAffineTransform value, CGAffineTransform expected)
@@ -290,6 +328,7 @@ int main(void)
     test_failed_member_aborts_uncommitted_frame();
     test_failed_commit_releases_transaction_and_stops();
     test_stalled_clock_stops_after_one_frame();
+    test_initial_clock_failure_and_cancellation_do_not_mutate();
     test_validation_has_no_side_effects();
     return 0;
 }
