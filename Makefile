@@ -1,4 +1,4 @@
-.PHONY: format format-check lint lint-fix build run release-check verify check check-tool-versions check-swiftformat-version check-swiftlint-version
+.PHONY: format format-check lint lint-fix build run release-check verify check dock-payload-check check-tool-versions check-swiftformat-version check-swiftlint-version
 
 SWIFTFORMAT_VERSION = 0.62.1
 SWIFTLINT_VERSION = 0.65.0
@@ -31,6 +31,9 @@ build:
 	./Scripts/ghostty-preflight.sh verify
 	$(SWIFT_WITH_GHOSTTY) swift build --arch arm64
 
+dock-payload-check:
+	$(MAKE) -C DockPayload all test sanitize analyze
+
 run:
 	./Scripts/package-app.sh debug dev
 	-pkill -x OmniWM
@@ -38,6 +41,6 @@ run:
 
 release-check: build
 
-verify: format-check lint build
+verify: format-check lint build dock-payload-check
 
 check: verify
