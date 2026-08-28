@@ -1037,6 +1037,8 @@ final class WMController {
 
     func updateQuakeTerminalReservedEdge(_ edge: QuakeTerminalReservedEdge?) {
         guard quakeTerminalReservedEdge != edge else { return }
+        let affectedDisplayIds = Set([quakeTerminalReservedEdge?.displayId, edge?.displayId].compactMap { $0 })
+        layoutRefreshController.niriHandler.prepareWorkingAreaAnimation(on: affectedDisplayIds)
         quakeTerminalReservedEdge = edge
         layoutRefreshController.requestRelayout(reason: .quakeTerminalReservedEdgeChanged)
     }
