@@ -27,7 +27,7 @@
 /* Exact protocol version every envelope must carry. */
 #define HS2_DOCK_V2_MAJOR 2u
 #define HS2_DOCK_V2_MINOR 0u
-#define HS2_DOCK_V2_BUILD 1u
+#define HS2_DOCK_V2_BUILD 2u
 
 /* Frame geometry. */
 #define HS2_DOCK_V2_ENVELOPE_BYTES 40u
@@ -44,7 +44,14 @@
  * today carries (the 9x2 warp request). Servers reject anything larger after
  * envelope decode and before reading a payload into the fixed-size buffer,
  * and clients never allocate a response body larger than the largest reply. */
-#define HS2_DOCK_V2_MAX_PAYLOAD_BYTES 324u
+#define HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS 32u
+#define HS2_DOCK_V2_WORKSPACE_TRANSITION_PREFIX_BYTES 36u
+#define HS2_DOCK_V2_WORKSPACE_TRANSITION_MEMBER_BYTES 112u
+#define HS2_DOCK_V2_WORKSPACE_TRANSITION_REQUEST_BYTES \
+    (HS2_DOCK_V2_WORKSPACE_TRANSITION_PREFIX_BYTES + \
+     HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS * \
+         HS2_DOCK_V2_WORKSPACE_TRANSITION_MEMBER_BYTES)
+#define HS2_DOCK_V2_MAX_PAYLOAD_BYTES HS2_DOCK_V2_WORKSPACE_TRANSITION_REQUEST_BYTES
 
 /* Exact payload sizes, by message. */
 #define HS2_DOCK_V2_HANDSHAKE_REQUEST_BYTES 44u
@@ -72,11 +79,13 @@ enum hs2_dock_v2_capability {
     HS2_DOCK_V2_CAP_SET_WARP = UINT64_C(1) << 3,
     HS2_DOCK_V2_CAP_CLEAR_WARP = UINT64_C(1) << 4,
     HS2_DOCK_V2_CAP_LEASES = UINT64_C(1) << 5,
+    HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION = UINT64_C(1) << 6,
 };
 #define HS2_DOCK_V2_EVIDENCED_CAPABILITIES \
     (HS2_DOCK_V2_CAP_QUERY_FRAME | HS2_DOCK_V2_CAP_MOVE_REAL | \
      HS2_DOCK_V2_CAP_SET_TRANSFORM | HS2_DOCK_V2_CAP_SET_WARP | \
-     HS2_DOCK_V2_CAP_CLEAR_WARP | HS2_DOCK_V2_CAP_LEASES)
+     HS2_DOCK_V2_CAP_CLEAR_WARP | HS2_DOCK_V2_CAP_LEASES | \
+     HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION)
 
 enum hs2_dock_v2_message {
     HS2_DOCK_V2_HANDSHAKE_REQUEST = 1,
@@ -91,6 +100,7 @@ enum hs2_dock_v2_message {
     HS2_DOCK_V2_CLEAR_WARP = 10,
     HS2_DOCK_V2_RESPONSE = 11,
     HS2_DOCK_V2_FRAME_RESPONSE = 12,
+    HS2_DOCK_V2_WORKSPACE_TRANSITION = 13,
 };
 
 enum hs2_dock_v2_error {
@@ -107,6 +117,8 @@ enum hs2_dock_v2_error {
     HS2_DOCK_V2_CLEANUP_FAILED = 10,
     HS2_DOCK_V2_TIMEOUT = 11,
     HS2_DOCK_V2_OPERATION_FAILED = 12,
+    HS2_DOCK_V2_COMMIT_UNCERTAIN = 13,
+    HS2_DOCK_V2_CANCELLED = 14,
 };
 
 /* Wire structs. Field order below matches wire order; the codecs, not the
@@ -202,6 +214,24 @@ typedef struct {
     uint64_t window_id;
 } hs2_dock_v2_clear_warp_request;
 
+
+typedef struct {
+    uint64_t lease_id;
+    uint64_t window_id;
+    double from[6];
+    double to[6];
+} hs2_dock_v2_workspace_transition_member;
+
+typedef struct {
+    uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES];
+    uint64_t duration_ns;
+    uint64_t frame_interval_ns;
+    uint16_t member_count;
+    uint16_t reserved;
+    hs2_dock_v2_workspace_transition_member
+        members[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS];
+} hs2_dock_v2_workspace_transition_request;
+
 typedef struct {
     uint16_t error;
     uint16_t detail;
@@ -272,6 +302,10 @@ bool hs2_dock_v2_encode_clear_warp_request(const hs2_dock_v2_clear_warp_request 
 bool hs2_dock_v2_decode_clear_warp_request(const uint8_t *bytes,
                                            size_t length,
                                            hs2_dock_v2_clear_warp_request *out);
+bool hs2_dock_v2_encode_workspace_transition_request(
+    const hs2_dock_v2_workspace_transition_request *message, uint8_t *out, size_t out_length);
+bool hs2_dock_v2_decode_workspace_transition_request(
+    const uint8_t *bytes, size_t length, hs2_dock_v2_workspace_transition_request *out);
 bool hs2_dock_v2_encode_response(const hs2_dock_v2_response *message,
                                  uint8_t out[HS2_DOCK_V2_RESPONSE_BYTES]);
 bool hs2_dock_v2_decode_response(const uint8_t *bytes,

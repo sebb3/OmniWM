@@ -28,6 +28,7 @@ typedef CGError (*hs2_sls_transaction_set_window_transform_fn)(
     CFTypeRef, uint32_t, int32_t, int32_t, CGAffineTransform);
 typedef CGError (*hs2_sls_transaction_commit_fn)(CFTypeRef, int32_t);
 typedef void (*hs2_sls_transaction_release_fn)(CFTypeRef);
+typedef bool (*hs2_dock_transition_cancel_fn)(void *);
 
 typedef struct {
     hs2_sls_main_connection_id_fn main_connection_id;
@@ -40,6 +41,8 @@ typedef struct {
     hs2_sls_transaction_set_window_transform_fn transaction_set_window_transform;
     hs2_sls_transaction_commit_fn transaction_commit;
     hs2_sls_transaction_release_fn transaction_release;
+    hs2_dock_transition_cancel_fn transition_should_cancel;
+    void *transition_context;
 } hs2_dock_skylight_api;
 
 typedef struct {

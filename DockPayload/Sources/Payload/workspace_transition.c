@@ -119,15 +119,22 @@ hs2_dock_workspace_transition_result hs2_dock_run_workspace_transition(
         return HS2_DOCK_WORKSPACE_TRANSITION_INVALID;
     }
 
-    int connection = api->main_connection_id();
-    if (connection <= 0) {
-        return HS2_DOCK_WORKSPACE_TRANSITION_INVALID;
-    }
-
     uint64_t start = clock->now_ns(clock->context);
+    bool initially_cancelled =
+        clock->should_cancel != NULL && clock->should_cancel(clock->context);
+    if (start == 0 || initially_cancelled) {
+        return initially_cancelled
+            ? HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED
+            : HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED;
+    }
     uint64_t end = start + request->duration_ns;
     if (end < start) {
         return HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED;
+    }
+
+    int connection = api->main_connection_id();
+    if (connection <= 0) {
+        return HS2_DOCK_WORKSPACE_TRANSITION_INVALID;
     }
 
     uint64_t frame = 0;
@@ -135,6 +142,9 @@ hs2_dock_workspace_transition_result hs2_dock_run_workspace_transition(
     uint64_t maximum_frames =
         request->duration_ns / request->frame_interval_ns + 2;
     for (;;) {
+        if (clock->should_cancel != NULL && clock->should_cancel(clock->context)) {
+            return HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED;
+        }
         uint64_t now = clock->now_ns(clock->context);
         if (now < previous_now || frame >= maximum_frames) {
             return HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED;
@@ -159,6 +169,9 @@ hs2_dock_workspace_transition_result hs2_dock_run_workspace_transition(
             deadline = end;
         }
         clock->wait_until_ns(deadline, clock->context);
+        if (clock->should_cancel != NULL && clock->should_cancel(clock->context)) {
+            return HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED;
+        }
         uint64_t after_wait = clock->now_ns(clock->context);
         if (after_wait <= now || after_wait < deadline) {
             return HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED;
