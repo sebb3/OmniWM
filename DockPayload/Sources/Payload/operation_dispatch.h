@@ -24,9 +24,9 @@ typedef CGError (*hs2_sls_set_window_transform_fn)(int, uint32_t, CGAffineTransf
 typedef CGError (*hs2_sls_set_window_warp_fn)(int, uint32_t, int, int,
                                               const hs2_sls_warp_point *);
 typedef CFTypeRef (*hs2_sls_transaction_create_fn)(int);
-typedef CGError (*hs2_sls_transaction_set_window_transform_fn)(
+typedef void (*hs2_sls_transaction_set_window_transform_fn)(
     CFTypeRef, uint32_t, int32_t, int32_t, CGAffineTransform);
-typedef CGError (*hs2_sls_transaction_commit_fn)(CFTypeRef, int32_t);
+typedef void (*hs2_sls_transaction_commit_fn)(CFTypeRef, int32_t);
 typedef void (*hs2_sls_transaction_release_fn)(CFTypeRef);
 typedef bool (*hs2_dock_transition_cancel_fn)(void *);
 

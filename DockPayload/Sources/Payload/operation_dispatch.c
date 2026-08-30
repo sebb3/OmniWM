@@ -493,7 +493,7 @@ static bool dispatch_workspace_transition(const hs2_dock_skylight_api *api,
     case HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED:
         encode_status_reply(reply, HS2_DOCK_V2_TIMEOUT, 0, 0); break;
     default:
-        encode_status_reply(reply, HS2_DOCK_V2_OPERATION_FAILED, 0, 0); break;
+        encode_status_reply(reply, HS2_DOCK_V2_OPERATION_FAILED, (uint16_t)transition, 0); break;
     }
     return true;
 }

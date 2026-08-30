@@ -97,17 +97,12 @@ static hs2_dock_workspace_transition_result apply_frame(
     for (size_t index = 0; index < request->member_count; index++) {
         const hs2_dock_workspace_transition_member *member = &request->members[index];
         CGAffineTransform transform = interpolated_transform(member, progress);
-        if (api->transaction_set_window_transform(
-                transaction, member->window_id, 0, 0, transform) != kCGErrorSuccess) {
-            api->transaction_release(transaction);
-            return HS2_DOCK_WORKSPACE_TRANSITION_APPLY_FAILED;
-        }
+        api->transaction_set_window_transform(
+            transaction, member->window_id, 0, 0, transform);
     }
-    CGError commit_result = api->transaction_commit(transaction, 0);
+    api->transaction_commit(transaction, 0);
     api->transaction_release(transaction);
-    return commit_result == kCGErrorSuccess
-        ? HS2_DOCK_WORKSPACE_TRANSITION_COMPLETED
-        : HS2_DOCK_WORKSPACE_TRANSITION_COMMIT_UNCERTAIN;
+    return HS2_DOCK_WORKSPACE_TRANSITION_COMPLETED;
 }
 
 hs2_dock_workspace_transition_result hs2_dock_run_workspace_transition(

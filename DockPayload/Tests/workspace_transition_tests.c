@@ -12,8 +12,6 @@ typedef struct {
     int set_calls;
     int commit_calls;
     int release_calls;
-    int fail_set_call;
-    bool fail_commit;
     bool stall_clock;
     bool cancelled;
     uint64_t now;
@@ -43,33 +41,25 @@ static CFTypeRef fake_create_transaction(int connection)
     return (CFTypeRef)(uintptr_t)(g_fake.frame_count + 1);
 }
 
-static CGError fake_set_transform(CFTypeRef transaction, uint32_t window_id,
-                                  int32_t unknown_a, int32_t unknown_b,
-                                  CGAffineTransform transform)
+static void fake_set_transform(CFTypeRef transaction, uint32_t window_id,
+                               int32_t unknown_a, int32_t unknown_b,
+                               CGAffineTransform transform)
 {
     assert(transaction != NULL);
     assert(unknown_a == 0 && unknown_b == 0);
     g_fake.set_calls++;
-    if (g_fake.fail_set_call != 0 && g_fake.set_calls == g_fake.fail_set_call) {
-        return kCGErrorFailure;
-    }
     size_t index = g_fake.frames[g_fake.frame_count].count++;
     assert(index < HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS);
     g_fake.frames[g_fake.frame_count].window_ids[index] = window_id;
     g_fake.frames[g_fake.frame_count].transforms[index] = transform;
-    return kCGErrorSuccess;
 }
 
-static CGError fake_commit(CFTypeRef transaction, int32_t synchronous)
+static void fake_commit(CFTypeRef transaction, int32_t synchronous)
 {
     assert(transaction != NULL);
     assert(synchronous == 0);
     g_fake.commit_calls++;
-    if (g_fake.fail_commit) {
-        return kCGErrorFailure;
-    }
     g_fake.frame_count++;
-    return kCGErrorSuccess;
 }
 
 static void fake_release(CFTypeRef transaction)
@@ -209,57 +199,6 @@ static void test_shared_clock_atomic_frames_and_exact_endpoint(void)
     assert(g_fake.deadlines[3] == UINT64_C(1100000000));
 }
 
-static void test_failed_member_aborts_uncommitted_frame(void)
-{
-    memset(&g_fake, 0, sizeof(g_fake));
-    g_fake.now = 1;
-    g_fake.fail_set_call = 2;
-    hs2_dock_workspace_transition_member members[] = {
-        { .window_id = 1, .from = CGAffineTransformIdentity, .to = CGAffineTransformIdentity },
-        { .window_id = 2, .from = CGAffineTransformIdentity, .to = CGAffineTransformIdentity },
-    };
-    hs2_dock_workspace_transition_request request = {
-        .members = members,
-        .member_count = 2,
-        .duration_ns = UINT64_C(10000000),
-        .frame_interval_ns = UINT64_C(1000000),
-    };
-    hs2_dock_skylight_api api = complete_api();
-    hs2_dock_workspace_transition_clock clock = clock_for(&g_fake);
-
-    assert(hs2_dock_run_workspace_transition(&api, &request, &clock) ==
-           HS2_DOCK_WORKSPACE_TRANSITION_APPLY_FAILED);
-    assert(g_fake.create_calls == 1 && g_fake.set_calls == 2);
-    assert(g_fake.commit_calls == 0 && g_fake.release_calls == 1);
-    assert(g_fake.deadline_count == 0);
-}
-
-static void test_failed_commit_releases_transaction_and_stops(void)
-{
-    memset(&g_fake, 0, sizeof(g_fake));
-    g_fake.now = 1;
-    g_fake.fail_commit = true;
-    hs2_dock_workspace_transition_member member = {
-        .window_id = 1,
-        .from = CGAffineTransformIdentity,
-        .to = CGAffineTransformIdentity,
-    };
-    hs2_dock_workspace_transition_request request = {
-        .members = &member,
-        .member_count = 1,
-        .duration_ns = UINT64_C(10000000),
-        .frame_interval_ns = UINT64_C(1000000),
-    };
-    hs2_dock_skylight_api api = complete_api();
-    hs2_dock_workspace_transition_clock clock = clock_for(&g_fake);
-
-    assert(hs2_dock_run_workspace_transition(&api, &request, &clock) ==
-           HS2_DOCK_WORKSPACE_TRANSITION_COMMIT_UNCERTAIN);
-    assert(g_fake.create_calls == 1 && g_fake.set_calls == 1);
-    assert(g_fake.commit_calls == 1 && g_fake.release_calls == 1);
-    assert(g_fake.deadline_count == 0);
-}
-
 static void test_stalled_clock_stops_after_one_frame(void)
 {
     memset(&g_fake, 0, sizeof(g_fake));
@@ -325,8 +264,6 @@ static void test_validation_has_no_side_effects(void)
 int main(void)
 {
     test_shared_clock_atomic_frames_and_exact_endpoint();
-    test_failed_member_aborts_uncommitted_frame();
-    test_failed_commit_releases_transaction_and_stops();
     test_stalled_clock_stops_after_one_frame();
     test_initial_clock_failure_and_cancellation_do_not_mutate();
     test_validation_has_no_side_effects();

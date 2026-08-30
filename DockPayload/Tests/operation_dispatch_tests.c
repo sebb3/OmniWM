@@ -26,7 +26,6 @@ typedef struct {
     int transaction_set_calls;
     int transaction_commit_calls;
     int transaction_release_calls;
-    bool transaction_commit_fails;
     int first_transaction_event;
     int event_counter;
     struct {
@@ -126,23 +125,21 @@ static CFTypeRef fake_transaction_create(int connection)
     return (CFTypeRef)(uintptr_t)g_fake.transaction_create_calls;
 }
 
-static CGError fake_transaction_set(CFTypeRef transaction, uint32_t window_id,
-                                    int32_t unknown1, int32_t unknown2,
-                                    CGAffineTransform transform)
+static void fake_transaction_set(CFTypeRef transaction, uint32_t window_id,
+                                 int32_t unknown1, int32_t unknown2,
+                                 CGAffineTransform transform)
 {
     assert(transaction != NULL && unknown1 == 0 && unknown2 == 0);
     assert(g_fake.transaction_set_calls < 16);
     size_t index = (size_t)g_fake.transaction_set_calls++;
     g_fake.transaction_sets[index].window_id = window_id;
     g_fake.transaction_sets[index].transform = transform;
-    return kCGErrorSuccess;
 }
 
-static CGError fake_transaction_commit(CFTypeRef transaction, int32_t synchronous)
+static void fake_transaction_commit(CFTypeRef transaction, int32_t synchronous)
 {
     assert(transaction != NULL && synchronous == 0);
     g_fake.transaction_commit_calls++;
-    return g_fake.transaction_commit_fails ? kCGErrorFailure : kCGErrorSuccess;
 }
 
 static void fake_transaction_release(CFTypeRef transaction)
@@ -1199,14 +1196,6 @@ static void test_transition_route_success_validation_and_commit_failure(void)
     response = dispatch_status_and_decode(&api, &server, &peer, &envelope, payload);
     assert(response.error == HS2_DOCK_V2_MALFORMED_ENVELOPE && g_fake.main_calls == 0);
 
-    memset(&g_fake, 0, sizeof(g_fake));
-    g_fake.frame = CGRectMake(7, 8, 300, 400);
-    g_fake.transaction_commit_fails = true;
-    encode_transition(&handshake, 101, 11, 999, 12, payload, &bytes);
-    envelope.request_id = 9;
-    response = dispatch_status_and_decode(&api, &server, &peer, &envelope, payload);
-    assert(response.error == HS2_DOCK_V2_COMMIT_UNCERTAIN);
-    assert(g_fake.transaction_commit_calls == 1 && g_fake.transaction_release_calls == 1);
 }
 
 int main(void)
