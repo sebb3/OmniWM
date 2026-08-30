@@ -26,7 +26,10 @@ enum DockPayloadClient {
     let operation = Task.detached(priority: nil) {
       guard !Task.isCancelled,
         let transport = DockPayloadSocketTransport.connectDefault()
-      else { return false }
+      else {
+        Log.layout.error("Dock workspace transition could not connect")
+        return false
+      }
       return await withTaskCancellationHandler {
         DockPayloadSession(transport: transport).runTransition(
           members: members,
@@ -159,6 +162,11 @@ final class DockPayloadSocketTransport: DockPayloadTransport, @unchecked Sendabl
 struct DockPayloadSession {
   let transport: DockPayloadTransport
 
+  private func fail(_ stage: String) -> Bool {
+    Log.layout.error("Dock workspace transition failed at \(stage)")
+    return false
+  }
+
   func runTransition(
     members: [DockWorkspaceTransitionMember], durationNS: UInt64, frameIntervalNS: UInt64,
     nonce: Data = DockPayloadProtocol.randomNonce()
@@ -167,8 +175,8 @@ struct DockPayloadSession {
     guard
       DockPayloadProtocol.validate(
         members: members, durationNS: durationNS, frameIntervalNS: frameIntervalNS)
-    else { return false }
-    guard nonce.count == 16 else { return false }
+    else { return fail("validation") }
+    guard nonce.count == 16 else { return fail("nonce") }
     var requestID: UInt64 = 1
     guard
       send(
@@ -178,7 +186,7 @@ struct DockPayloadSession {
       let negotiated = DockPayloadProtocol.decodeHandshake(handshake.payload),
       handshake.envelope.sessionID == negotiated.sessionID,
       negotiated.valid(nonce: nonce)
-    else { return false }
+    else { return fail("handshake") }
     let sessionID = negotiated.sessionID
     var leases: [(UInt64, UInt64)] = []
     defer {
@@ -207,20 +215,29 @@ struct DockPayloadSession {
         let response = receive(expectedType: .response, requestID: requestID, sessionID: sessionID),
         let status = DockPayloadProtocol.decodeResponse(response.payload),
         status.0 == 0, status.1 == leaseID
-      else { return false }
+      else { return fail("lease \(index)") }
       leases.append((leaseID, windowID))
     }
     requestID &+= 1
-    guard
-      let payload = DockPayloadProtocol.transitionRequest(
-        nonce: nonce, leases: leases, members: members,
-        durationNS: durationNS, frameIntervalNS: frameIntervalNS),
-      send(type: .transitionRequest, requestID: requestID, sessionID: sessionID, payload: payload),
-      let response = receive(expectedType: .response, requestID: requestID, sessionID: sessionID),
-      let status = DockPayloadProtocol.decodeResponse(response.payload),
-      status.0 == 0,
-      status.1 == UInt64(members.count)
-    else { return false }
+    guard let payload = DockPayloadProtocol.transitionRequest(
+      nonce: nonce, leases: leases, members: members,
+      durationNS: durationNS, frameIntervalNS: frameIntervalNS)
+    else { return fail("transition encoding") }
+    guard send(type: .transitionRequest, requestID: requestID, sessionID: sessionID, payload: payload)
+    else { return fail("transition send") }
+    guard let response = receive(
+      expectedType: .response, requestID: requestID, sessionID: sessionID)
+    else { return fail("transition receive") }
+    guard let status = DockPayloadProtocol.decodeResponse(response.payload) else {
+      return fail("transition response decoding")
+    }
+    guard status.0 == 0 else {
+      return fail(
+        "transition server status \(status.0) detail \(response.payload.u16(2) ?? 0) value \(status.1)")
+    }
+    guard status.1 == UInt64(members.count) else {
+      return fail("transition member count \(status.1)")
+    }
     return true
   }
 
