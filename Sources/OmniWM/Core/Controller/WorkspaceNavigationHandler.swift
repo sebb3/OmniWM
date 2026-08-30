@@ -284,7 +284,9 @@ final class WorkspaceNavigationHandler {
             controller.layoutRefreshController.startWorkspaceSwitchTransition(visualTransition)
         }
         controller.layoutRefreshController.commitWorkspaceTransition(
+            affectedWorkspaces: [targetWorkspaceId],
             reason: .workspaceTransition,
+            postLayoutGateWorkspaceIds: [targetWorkspaceId],
             postLayout: handoffAction,
             postLayoutInvalidated: { [weak controller] in
                 guard let controller,
