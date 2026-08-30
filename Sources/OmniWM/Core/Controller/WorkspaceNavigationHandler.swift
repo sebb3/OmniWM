@@ -261,7 +261,9 @@ final class WorkspaceNavigationHandler {
             nil
         }
         controller.layoutRefreshController.commitWorkspaceTransition(
-            reason: .workspaceTransition
+            affectedWorkspaces: [targetWorkspaceId],
+            reason: .workspaceTransition,
+            postLayoutGateWorkspaceIds: [targetWorkspaceId]
         ) { [weak self, weak controller] in
             guard let controller else { return }
             if let focusToken = handoff.focusToken {
