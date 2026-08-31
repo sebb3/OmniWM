@@ -260,22 +260,39 @@ final class WorkspaceNavigationHandler {
         } else {
             nil
         }
-        controller.layoutRefreshController.commitWorkspaceTransition(
-            affectedWorkspaces: [targetWorkspaceId],
-            reason: .workspaceTransition,
-            postLayoutGateWorkspaceIds: [targetWorkspaceId]
-        ) { [weak self, weak controller] in
+        let commitPhysicalTransition: @MainActor @Sendable () -> Void = { [weak self, weak controller] in
             guard let controller else { return }
-            if let focusToken = handoff.focusToken {
-                controller.focusWindow(focusToken)
-            } else if handoff.shouldClearManagedFocus {
-                self?.clearManagedFocusAfterEmptyWorkspaceSwitch()
+            controller.layoutRefreshController.commitWorkspaceTransition(
+                affectedWorkspaces: [targetWorkspaceId],
+                reason: .workspaceTransition,
+                postLayoutGateWorkspaceIds: [targetWorkspaceId]
+            ) { [weak self, weak controller] in
+                guard let controller else { return }
+                if let focusToken = handoff.focusToken {
+                    controller.focusWindow(focusToken)
+                } else if handoff.shouldClearManagedFocus {
+                    self?.clearManagedFocusAfterEmptyWorkspaceSwitch()
+                }
+                if startScrollAnimation {
+                    controller.layoutRefreshController.startScrollAnimation(for: targetWorkspaceId)
+                }
             }
-            if startScrollAnimation {
-                controller.layoutRefreshController.startScrollAnimation(for: targetWorkspaceId)
-            }
-            controller.layoutRefreshController.startWorkspaceSwitchTransition(visualTransition)
         }
+        if let visualTransition {
+            let transitionEntries = controller.workspaceManager.entries(
+                in: sourceWorkspaceId ?? targetWorkspaceId
+            ) + controller.workspaceManager.entries(in: targetWorkspaceId)
+            controller.axManager.cancelPendingFrameJobs(
+                transitionEntries.map { ($0.pid, $0.windowId) }
+            )
+            if controller.layoutRefreshController.startWorkspaceSwitchTransition(
+                visualTransition,
+                completion: commitPhysicalTransition
+            ) {
+                return
+            }
+        }
+        commitPhysicalTransition()
     }
 
     func focusMonitorCyclic(previous: Bool) {

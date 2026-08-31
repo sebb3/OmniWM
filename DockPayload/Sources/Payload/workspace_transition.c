@@ -23,7 +23,7 @@ static bool valid_request(const hs2_dock_skylight_api *api,
 {
     if (api == NULL || api->main_connection_id == NULL ||
         api->transaction_create == NULL ||
-        api->transaction_set_window_transform == NULL ||
+        api->transaction_move_window_with_group == NULL ||
         api->transaction_commit == NULL || api->transaction_release == NULL ||
         request == NULL || request->members == NULL ||
         request->member_count == 0 ||
@@ -83,6 +83,11 @@ static CGAffineTransform interpolated_transform(
         interpolate(member->from.ty, member->to.ty, progress));
 }
 
+static CGPoint position_for_transform(CGAffineTransform transform)
+{
+    return CGPointMake(-transform.tx, -transform.ty);
+}
+
 static hs2_dock_workspace_transition_result apply_frame(
     const hs2_dock_skylight_api *api,
     int connection,
@@ -97,8 +102,9 @@ static hs2_dock_workspace_transition_result apply_frame(
     for (size_t index = 0; index < request->member_count; index++) {
         const hs2_dock_workspace_transition_member *member = &request->members[index];
         CGAffineTransform transform = interpolated_transform(member, progress);
-        api->transaction_set_window_transform(
-            transaction, member->window_id, 0, 0, transform);
+        CGPoint position = position_for_transform(transform);
+        api->transaction_move_window_with_group(
+            transaction, member->window_id, position.x, position.y);
     }
     api->transaction_commit(transaction, 0);
     api->transaction_release(transaction);

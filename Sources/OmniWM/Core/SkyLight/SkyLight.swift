@@ -130,7 +130,9 @@ final class SkyLight {
     private typealias TransactionCommitFunc = @convention(c) (CFTypeRef, Int32) -> CGError
     private typealias TransactionOrderWindowFunc = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Void
     private typealias WindowIsOrderedInFunc = @convention(c) (Int32, UInt32, UnsafeMutablePointer<UInt8>) -> CGError
-    private typealias TransactionMoveWindowWithGroupFunc = @convention(c) (CFTypeRef, UInt32, CGPoint) -> CGError
+    private typealias TransactionMoveWindowWithGroupFunc = @convention(c) (
+        CFTypeRef, UInt32, Double, Double
+    ) -> Void
     private typealias MoveWindowFunc = @convention(c) (Int32, UInt32, UnsafePointer<CGPoint>) -> CGError
     private typealias GetWindowBoundsFunc = @convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> CGError
     private typealias NewWindowFunc = @convention(c) (
@@ -874,7 +876,7 @@ final class SkyLight {
     func batchMoveWindows(_ positions: [(windowId: UInt32, origin: CGPoint)]) {
         withTransaction { transaction in
             for (windowId, origin) in positions {
-                _ = transactionMoveWindowWithGroup(transaction, windowId, origin)
+                transactionMoveWindowWithGroup(transaction, windowId, origin.x, origin.y)
             }
         }
     }
@@ -1154,7 +1156,7 @@ final class SkyLight {
 
     func transactionMove(_ wid: UInt32, origin: CGPoint) {
         withTransaction { transaction in
-            _ = transactionMoveWindowWithGroup(transaction, wid, origin)
+            transactionMoveWindowWithGroup(transaction, wid, origin.x, origin.y)
         }
     }
 
@@ -1166,7 +1168,7 @@ final class SkyLight {
         order: SkyLightWindowOrder
     ) {
         withTransaction { transaction in
-            _ = transactionMoveWindowWithGroup(transaction, wid, origin)
+            transactionMoveWindowWithGroup(transaction, wid, origin.x, origin.y)
             _ = transactionSetWindowLevel(transaction, wid, level)
             transactionOrderWindow(transaction, wid, order.rawValue, targetWid)
         }

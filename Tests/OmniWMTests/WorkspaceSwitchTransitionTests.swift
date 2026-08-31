@@ -13,12 +13,13 @@ import Testing
       monitorFrame: CGRect(x: 0, y: 0, width: 1600, height: 900),
       targetWorkspaceId: UUID(),
       outgoingFrames: [11: outgoingFrame],
+      incomingFrames: [12: incomingFrame],
       incomingOffsetY: -900,
       duration: .milliseconds(300),
       frameInterval: .milliseconds(16)
     )
 
-    let members = try #require(plan.members(incomingFrames: [12: incomingFrame]))
+    let members = try #require(plan.members())
     let outgoing = try #require(members.first(where: { $0.windowId == 11 }))
     let incoming = try #require(members.first(where: { $0.windowId == 12 }))
 
@@ -35,12 +36,13 @@ import Testing
       monitorFrame: CGRect(x: 0, y: 0, width: 1600, height: 900),
       targetWorkspaceId: UUID(),
       outgoingFrames: [1: frame],
+      incomingFrames: [2: frame],
       incomingOffsetY: 900,
       duration: .milliseconds(300),
       frameInterval: .milliseconds(16)
     )
 
-    let members = try #require(plan.members(incomingFrames: [2: frame]))
+    let members = try #require(plan.members())
     let outgoing = try #require(members.first(where: { $0.windowId == 1 }))
     let incoming = try #require(members.first(where: { $0.windowId == 2 }))
 
@@ -58,12 +60,40 @@ import Testing
       monitorFrame: CGRect(x: 0, y: 0, width: 1600, height: 900),
       targetWorkspaceId: UUID(),
       outgoingFrames: outgoing,
+      incomingFrames: [33: frame],
       incomingOffsetY: -900,
       duration: .milliseconds(300),
       frameInterval: .milliseconds(16)
     )
 
-    #expect(plan.members(incomingFrames: [33: frame]) == nil)
+    #expect(plan.members() == nil)
+  }
+
+  @Test func incomingWorkspaceUsesRestoreFrameWhenPhysicalWindowIsParked() throws {
+    let monitor = CGRect(x: 0, y: 0, width: 1600, height: 900)
+    let parked = CGRect(x: 1610, y: 200, width: 500, height: 400)
+    let restored = CGRect(x: 100, y: 200, width: 500, height: 400)
+
+    let frame = try #require(LayoutRefreshController.transitionFrame(
+      physicalFrame: parked,
+      restoreFrame: restored,
+      monitorFrame: monitor
+    ))
+
+    #expect(frame == restored)
+  }
+
+  @Test func outgoingWorkspaceStillUsesVisiblePhysicalFrame() throws {
+    let monitor = CGRect(x: 0, y: 0, width: 1600, height: 900)
+    let visible = CGRect(x: 100, y: 200, width: 500, height: 400)
+
+    let frame = try #require(LayoutRefreshController.transitionFrame(
+      physicalFrame: visible,
+      restoreFrame: nil,
+      monitorFrame: monitor
+    ))
+
+    #expect(frame == visible)
   }
 
   private func transform(for frame: CGRect) -> CGAffineTransform {

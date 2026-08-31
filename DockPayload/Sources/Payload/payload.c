@@ -69,6 +69,9 @@ static void resolve_skylight(hs2_dock_skylight_api *api)
         (hs2_sls_set_window_warp_fn)dlsym(skylight, "SLSSetWindowWarp");
     api->transaction_create =
         (hs2_sls_transaction_create_fn)dlsym(skylight, "SLSTransactionCreate");
+    api->transaction_move_window_with_group =
+        (hs2_sls_transaction_move_window_with_group_fn)dlsym(
+            skylight, "SLSTransactionMoveWindowWithGroup");
     api->transaction_set_window_transform =
         (hs2_sls_transaction_set_window_transform_fn)dlsym(
             skylight, "SLSTransactionSetWindowTransform");

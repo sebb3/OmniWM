@@ -24,6 +24,8 @@ typedef CGError (*hs2_sls_set_window_transform_fn)(int, uint32_t, CGAffineTransf
 typedef CGError (*hs2_sls_set_window_warp_fn)(int, uint32_t, int, int,
                                               const hs2_sls_warp_point *);
 typedef CFTypeRef (*hs2_sls_transaction_create_fn)(int);
+typedef void (*hs2_sls_transaction_move_window_with_group_fn)(
+    CFTypeRef, uint32_t, double, double);
 typedef void (*hs2_sls_transaction_set_window_transform_fn)(
     CFTypeRef, uint32_t, int32_t, int32_t, CGAffineTransform);
 typedef void (*hs2_sls_transaction_commit_fn)(CFTypeRef, int32_t);
@@ -38,6 +40,7 @@ typedef struct {
     hs2_sls_set_window_transform_fn set_window_transform;
     hs2_sls_set_window_warp_fn set_window_warp;
     hs2_sls_transaction_create_fn transaction_create;
+    hs2_sls_transaction_move_window_with_group_fn transaction_move_window_with_group;
     hs2_sls_transaction_set_window_transform_fn transaction_set_window_transform;
     hs2_sls_transaction_commit_fn transaction_commit;
     hs2_sls_transaction_release_fn transaction_release;

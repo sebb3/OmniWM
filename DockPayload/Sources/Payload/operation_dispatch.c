@@ -45,7 +45,7 @@ uint64_t hs2_dock_active_capabilities(const hs2_dock_skylight_api *api)
     }
     if (api->get_window_bounds != NULL && api->get_window_transform != NULL &&
         api->set_window_transform != NULL && api->transaction_create != NULL &&
-        api->transaction_set_window_transform != NULL && api->transaction_commit != NULL &&
+        api->transaction_move_window_with_group != NULL && api->transaction_commit != NULL &&
         api->transaction_release != NULL) {
         capabilities |= HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION;
     }
@@ -403,8 +403,6 @@ static bool dispatch_workspace_transition(const hs2_dock_skylight_api *api,
     hs2_dock_workspace_transition_member members[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS];
     hs2_dock_v2_lease *leases[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS] = {0};
     CGRect frames[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS] = {0};
-    CGAffineTransform observed[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS] = {0};
-    bool observed_captured[HS2_DOCK_V2_WORKSPACE_TRANSITION_MAX_MEMBERS] = {0};
 
     if (!hs2_dock_v2_decode_workspace_transition_request(payload, envelope->payload_bytes,
                                                           &wire) ||
@@ -454,8 +452,9 @@ static bool dispatch_workspace_transition(const hs2_dock_skylight_api *api,
 
     int connection = 0;
     connection = api->main_connection_id();
-    /* Finish every fallible observation before retaining notes or allowing the
-     * primitive to mutate WindowServer. */
+    /* Finish every fallible observation before allowing the primitive to
+     * mutate WindowServer. Workspace transitions move authoritative window
+     * positions and intentionally retain no presentation residue. */
     for (size_t index = 0; index < wire.member_count; index++) {
         uint32_t window_id = (uint32_t)wire.members[index].window_id;
         CGError error = api->get_window_bounds(connection, window_id, &frames[index]);
@@ -463,13 +462,6 @@ static bool dispatch_workspace_transition(const hs2_dock_skylight_api *api,
             encode_status_reply(reply, HS2_DOCK_V2_OPERATION_FAILED, (uint16_t)error, 0);
             return true;
         }
-        observed_captured[index] = api->get_window_transform(
-            connection, window_id, &observed[index]) == kCGErrorSuccess;
-    }
-    for (size_t index = 0; index < wire.member_count; index++) {
-        retain_transform_note(leases[index], frames[index], observed[index],
-                              observed_captured[index]);
-        leases[index]->note.transform_pending = true;
     }
 
     hs2_dock_workspace_transition_request request = {
