@@ -42,13 +42,12 @@ typedef enum {
     HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED,
 } hs2_dock_workspace_transition_result;
 
-/* Runs one bounded multi-window presentation transition on Dock's privileged
+/* Runs one bounded multi-window position transition on Dock's privileged
  * connection. Every frame is one WindowServer transaction, so all member
- * transforms share both a clock sample and a commit. The caller owns leases
- * and endpoint/rollback policy; this primitive only advances the leased
- * presentation transforms. A failed transform enqueue is definitely
- * uncommitted; a failed commit is reported separately because WindowServer may
- * already have applied some or all of that transaction.
+ * positions share both a clock sample and a commit. The transforms on the wire
+ * are canonical WindowServer placement transforms; their negated translation
+ * components are the authoritative physical origins advanced by the primitive.
+ * The caller owns leases and endpoint policy.
  *
  * The final frame always writes each exact `to` transform. No SkyLight call is
  * made when request or clock validation fails. */

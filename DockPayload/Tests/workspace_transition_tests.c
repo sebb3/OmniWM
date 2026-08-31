@@ -19,7 +19,7 @@ typedef struct {
     size_t deadline_count;
     struct {
         uint32_t window_ids[HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS];
-        CGAffineTransform transforms[HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS];
+        CGPoint positions[HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS];
         size_t count;
     } frames[MAX_RECORDED_FRAMES];
     size_t frame_count;
@@ -41,17 +41,14 @@ static CFTypeRef fake_create_transaction(int connection)
     return (CFTypeRef)(uintptr_t)(g_fake.frame_count + 1);
 }
 
-static void fake_set_transform(CFTypeRef transaction, uint32_t window_id,
-                               int32_t unknown_a, int32_t unknown_b,
-                               CGAffineTransform transform)
+static void fake_move_window(CFTypeRef transaction, uint32_t window_id, double x, double y)
 {
     assert(transaction != NULL);
-    assert(unknown_a == 0 && unknown_b == 0);
     g_fake.set_calls++;
     size_t index = g_fake.frames[g_fake.frame_count].count++;
     assert(index < HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS);
     g_fake.frames[g_fake.frame_count].window_ids[index] = window_id;
-    g_fake.frames[g_fake.frame_count].transforms[index] = transform;
+    g_fake.frames[g_fake.frame_count].positions[index] = CGPointMake(x, y);
 }
 
 static void fake_commit(CFTypeRef transaction, int32_t synchronous)
@@ -95,7 +92,7 @@ static hs2_dock_skylight_api complete_api(void)
     return (hs2_dock_skylight_api){
         .main_connection_id = fake_main_connection,
         .transaction_create = fake_create_transaction,
-        .transaction_set_window_transform = fake_set_transform,
+        .transaction_move_window_with_group = fake_move_window,
         .transaction_commit = fake_commit,
         .transaction_release = fake_release,
     };
@@ -141,16 +138,6 @@ static void test_initial_clock_failure_and_cancellation_do_not_mutate(void)
     assert(g_fake.connection_calls == 0 && g_fake.create_calls == 0);
 }
 
-static void assert_transform(CGAffineTransform value, CGAffineTransform expected)
-{
-    assert(fabs(value.a - expected.a) < 0.000001);
-    assert(fabs(value.b - expected.b) < 0.000001);
-    assert(fabs(value.c - expected.c) < 0.000001);
-    assert(fabs(value.d - expected.d) < 0.000001);
-    assert(fabs(value.tx - expected.tx) < 0.000001);
-    assert(fabs(value.ty - expected.ty) < 0.000001);
-}
-
 static void test_shared_clock_atomic_frames_and_exact_endpoint(void)
 {
     memset(&g_fake, 0, sizeof(g_fake));
@@ -187,13 +174,13 @@ static void test_shared_clock_atomic_frames_and_exact_endpoint(void)
         assert(g_fake.frames[frame].window_ids[0] == 11);
         assert(g_fake.frames[frame].window_ids[1] == 12);
     }
-    assert_transform(g_fake.frames[0].transforms[0], members[0].from);
-    assert(g_fake.frames[2].transforms[0].ty == -500.0);
-    assert(g_fake.frames[2].transforms[1].ty == 100.0);
-    assert(memcmp(&g_fake.frames[4].transforms[0], &members[0].to,
-                  sizeof(CGAffineTransform)) == 0);
-    assert(memcmp(&g_fake.frames[4].transforms[1], &members[1].to,
-                  sizeof(CGAffineTransform)) == 0);
+    assert(CGPointEqualToPoint(g_fake.frames[0].positions[0], CGPointMake(100, 900)));
+    assert(g_fake.frames[2].positions[0].y == 500.0);
+    assert(g_fake.frames[2].positions[1].y == -100.0);
+    assert(CGPointEqualToPoint(g_fake.frames[4].positions[0],
+                              CGPointMake(-members[0].to.tx, -members[0].to.ty)));
+    assert(CGPointEqualToPoint(g_fake.frames[4].positions[1],
+                              CGPointMake(-members[1].to.tx, -members[1].to.ty)));
     assert(g_fake.deadline_count == 4);
     assert(g_fake.deadlines[0] == UINT64_C(1025000000));
     assert(g_fake.deadlines[3] == UINT64_C(1100000000));
