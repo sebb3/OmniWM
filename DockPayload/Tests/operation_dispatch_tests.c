@@ -31,6 +31,7 @@ typedef struct {
     struct {
         uint32_t window_id;
         CGAffineTransform transform;
+        CGPoint position;
     } transaction_sets[16];
     struct {
         int columns;
@@ -136,6 +137,16 @@ static void fake_transaction_set(CFTypeRef transaction, uint32_t window_id,
     g_fake.transaction_sets[index].transform = transform;
 }
 
+static void fake_transaction_move(CFTypeRef transaction, uint32_t window_id,
+                                  double x, double y)
+{
+    assert(transaction != NULL);
+    assert(g_fake.transaction_set_calls < 16);
+    size_t index = (size_t)g_fake.transaction_set_calls++;
+    g_fake.transaction_sets[index].window_id = window_id;
+    g_fake.transaction_sets[index].position = CGPointMake(x, y);
+}
+
 static void fake_transaction_commit(CFTypeRef transaction, int32_t synchronous)
 {
     assert(transaction != NULL && synchronous == 0);
@@ -158,6 +169,7 @@ static hs2_dock_skylight_api complete_api(void)
         .set_window_transform = fake_set_window_transform,
         .set_window_warp = fake_set_window_warp,
         .transaction_create = fake_transaction_create,
+        .transaction_move_window_with_group = fake_transaction_move,
         .transaction_set_window_transform = fake_transaction_set,
         .transaction_commit = fake_transaction_commit,
         .transaction_release = fake_transaction_release,
@@ -1120,7 +1132,7 @@ static void test_transition_capability_exact_requirements(void)
     hs2_dock_skylight_api partial = api;
     void **required[] = { (void **)&partial.main_connection_id, (void **)&partial.get_window_bounds,
         (void **)&partial.get_window_transform, (void **)&partial.set_window_transform,
-        (void **)&partial.transaction_create, (void **)&partial.transaction_set_window_transform,
+        (void **)&partial.transaction_create, (void **)&partial.transaction_move_window_with_group,
         (void **)&partial.transaction_commit, (void **)&partial.transaction_release };
     for (size_t index = 0; index < sizeof(required) / sizeof(required[0]); index++) {
         partial = api;
@@ -1158,20 +1170,16 @@ static void test_transition_route_success_validation_and_commit_failure(void)
     hs2_dock_v2_response response = dispatch_status_and_decode(&api, &server, &peer,
                                                                 &envelope, payload);
     assert(response.error == HS2_DOCK_V2_OK && response.value == 2);
-    assert(g_fake.bounds_calls == 2 && g_fake.get_transform_calls == 2);
-    assert(g_fake.first_transaction_event > 4);
+    assert(g_fake.bounds_calls == 2 && g_fake.get_transform_calls == 0);
+    assert(g_fake.first_transaction_event > 2);
     assert(g_fake.transaction_commit_calls == 2 && g_fake.transaction_release_calls == 2);
     assert(g_fake.transaction_set_calls == 4);
     assert(g_fake.transaction_sets[2].window_id == 11 &&
-           memcmp(&g_fake.transaction_sets[2].transform,
-                  &(CGAffineTransform){1, 0, 0, 1, 110, 120}, sizeof(CGAffineTransform)) == 0);
+           CGPointEqualToPoint(g_fake.transaction_sets[2].position, CGPointMake(-110, -120)));
     assert(g_fake.transaction_sets[3].window_id == 12 &&
-           memcmp(&g_fake.transaction_sets[3].transform,
-                  &(CGAffineTransform){2, 0, 0, 2, 205, 206}, sizeof(CGAffineTransform)) == 0);
+           CGPointEqualToPoint(g_fake.transaction_sets[3].position, CGPointMake(-205, -206)));
     assert(hs2_dock_v2_pending_cleanup_leases(&server) == 0);
-    assert(server.leases[0].note.transform_pending && server.leases[1].note.transform_pending);
-    assert(server.leases[0].note.frame_captured && server.leases[1].note.frame_captured);
-    assert(server.leases[0].note.observed_captured && server.leases[1].note.observed_captured);
+    assert(!server.leases[0].note.transform_pending && !server.leases[1].note.transform_pending);
 
     memset(&g_fake, 0, sizeof(g_fake));
     encode_transition(&handshake, 101, 11, 999, 12, payload, &bytes);

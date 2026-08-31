@@ -920,6 +920,8 @@ final class WindowRuleEngineTests: XCTestCase {
             XCTAssertEqual(preciseDecision.disposition, .floating)
             XCTAssertEqual(preciseDecision.source, .userRule(preciseRule.id))
         }
+    }
+
     /// A one-shot that only names a workspace must not discard whatever the
     /// persistent rules already decided for layout, sizing, focus, or window
     /// level — it overlays per field, unlike `applyingManualOverride`'s full
