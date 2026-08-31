@@ -349,6 +349,8 @@ enum CLIParser {
         var layout: IPCRuleLayout = .auto
         var assignToWorkspace: String?
         var initialContainerPrimarySpan: Double?
+        var defaultWidth: Double?
+        var defaultHeight: Double?
         var minWidth: Double?
         var minHeight: Double?
         var focus: IPCRuleFocus?
@@ -390,6 +392,10 @@ enum CLIParser {
                 assignToWorkspace = value
             case "--initial-container-primary-span":
                 initialContainerPrimarySpan = try parseInitialContainerPrimarySpan(value)
+            case "--default-width":
+                defaultWidth = try parsePositiveDouble(value)
+            case "--default-height":
+                defaultHeight = try parsePositiveDouble(value)
             case "--min-width":
                 minWidth = try parsePositiveDouble(value)
             case "--min-height":
@@ -428,6 +434,8 @@ enum CLIParser {
             layout: layout,
             assignToWorkspace: assignToWorkspace,
             initialContainerPrimarySpan: initialContainerPrimarySpan,
+            defaultWidth: defaultWidth,
+            defaultHeight: defaultHeight,
             minWidth: minWidth,
             minHeight: minHeight,
             focus: focus,

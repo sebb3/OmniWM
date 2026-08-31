@@ -10,6 +10,7 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
     public let titleMatcherError: String?
     public let initialContainerPrimarySpanError: String?
     public let effectError: String?
+    public let defaultSizeError: String?
     public let minSizeError: String?
 
     public init(
@@ -19,6 +20,7 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
         titleMatcherError: String? = nil,
         initialContainerPrimarySpanError: String? = nil,
         effectError: String? = nil,
+        defaultSizeError: String? = nil,
         minSizeError: String? = nil
     ) {
         self.bundleIdError = bundleIdError
@@ -27,6 +29,7 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
         self.titleMatcherError = titleMatcherError
         self.initialContainerPrimarySpanError = initialContainerPrimarySpanError
         self.effectError = effectError
+        self.defaultSizeError = defaultSizeError
         self.minSizeError = minSizeError
     }
 
@@ -38,6 +41,7 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
             titleMatcherError,
             initialContainerPrimarySpanError,
             effectError,
+            defaultSizeError,
             minSizeError
         ]
         .compactMap { $0 }
@@ -86,13 +90,15 @@ public enum IPCRuleValidator {
         let hasEffect = rule.layout != .auto
             || nonEmpty(rule.assignToWorkspace)
             || rule.initialContainerPrimarySpan.map { initialContainerPrimarySpanError(for: $0) == nil } == true
+            || rule.defaultWidth != nil
+            || rule.defaultHeight != nil
             || rule.minWidth != nil
             || rule.minHeight != nil
             || rule.focus != nil
             || rule.windowLevel != nil
         return hasEffect
             ? nil
-            : "Set a layout, workspace, initial container primary span, minimum size, "
+            : "Set a layout, workspace, initial container primary span, default size, minimum size, "
             + "focus policy, or window level — this rule has no effect"
     }
 
@@ -110,6 +116,16 @@ public enum IPCRuleValidator {
         }
         if let height = rule.minHeight, !(height.isFinite && height > 0) {
             return "Minimum height must be a positive number"
+        }
+        return nil
+    }
+
+    public static func defaultSizeError(for rule: IPCRuleDefinition) -> String? {
+        if let width = rule.defaultWidth, !(width.isFinite && width > 0) {
+            return "Default width must be a positive number"
+        }
+        if let height = rule.defaultHeight, !(height.isFinite && height > 0) {
+            return "Default height must be a positive number"
         }
         return nil
     }
@@ -140,6 +156,7 @@ public enum IPCRuleValidator {
             titleMatcherError: titleMatcherError(for: rule),
             initialContainerPrimarySpanError: initialContainerPrimarySpanError(for: rule.initialContainerPrimarySpan),
             effectError: effectError(for: rule),
+            defaultSizeError: defaultSizeError(for: rule),
             minSizeError: minSizeError(for: rule)
         )
     }

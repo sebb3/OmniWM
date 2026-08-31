@@ -55,7 +55,7 @@ struct RuleApplicationSection: View {
                     useCurrentWindowSize(windowSize)
                 } label: {
                     Label(
-                        "Use current size: \(Int(windowSize.width)) × \(Int(windowSize.height)) px",
+                        "Use current size as default: \(Int(windowSize.width)) × \(Int(windowSize.height)) px",
                         systemImage: "arrow.down.doc"
                     )
                 }
@@ -97,10 +97,10 @@ struct RuleApplicationSection: View {
     }
 
     private func useCurrentWindowSize(_ size: CGSize) {
-        draft.minWidth = size.width
-        draft.minHeight = size.height
-        draft.minWidthEnabled = true
-        draft.minHeightEnabled = true
+        draft.defaultWidth = size.width
+        draft.defaultHeight = size.height
+        draft.defaultWidthEnabled = true
+        draft.defaultHeightEnabled = true
     }
 }
 

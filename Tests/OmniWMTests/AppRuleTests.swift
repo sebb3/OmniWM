@@ -44,6 +44,8 @@ final class AppRuleTests: XCTestCase {
         XCTAssertTrue(AppRule(bundleId: "com.test.app", assignToWorkspace: "2").hasEffect)
         XCTAssertTrue(AppRule(bundleId: "com.test.app", initialContainerPrimarySpan: 0.05).hasEffect)
         XCTAssertTrue(AppRule(bundleId: "com.test.app", initialContainerPrimarySpan: 1.0).hasEffect)
+        XCTAssertTrue(AppRule(bundleId: "com.test.app", defaultWidth: 800).hasEffect)
+        XCTAssertTrue(AppRule(bundleId: "com.test.app", defaultHeight: 600).hasEffect)
         XCTAssertTrue(AppRule(bundleId: "com.test.app", minWidth: 400).hasEffect)
         XCTAssertTrue(AppRule(bundleId: "com.test.app", minHeight: 300).hasEffect)
     }
@@ -64,6 +66,21 @@ final class AppRuleTests: XCTestCase {
         let toml = try XCTUnwrap(String(data: data, encoding: .utf8))
         XCTAssertTrue(toml.contains("initialContainerPrimarySpan = 0.5"))
         XCTAssertEqual(try SettingsTOMLCodec.decode(data).appRules.first?.initialContainerPrimarySpan, 0.5)
+    }
+
+    func testDefaultFloatingSizeRoundTripsThroughTOML() throws {
+        var export = SettingsExport.defaults()
+        export.appRules = [
+            AppRule(bundleId: "com.apple.finder", layout: .float, defaultWidth: 800, defaultHeight: 600)
+        ]
+
+        let data = try SettingsTOMLCodec.encode(export)
+        let toml = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertTrue(toml.contains("defaultWidth = 800"))
+        XCTAssertTrue(toml.contains("defaultHeight = 600"))
+        let decoded = try XCTUnwrap(SettingsTOMLCodec.decode(data).appRules.first)
+        XCTAssertEqual(decoded.defaultWidth, 800)
+        XCTAssertEqual(decoded.defaultHeight, 600)
     }
 
     func testNilInitialContainerPrimarySpanIsOmittedFromJSONAndTOML() throws {
@@ -135,7 +152,12 @@ final class AppRuleTests: XCTestCase {
 
     @MainActor
     func testIPCProjectionRoundTripsInitialContainerPrimarySpan() {
-        let rule = AppRule(bundleId: "com.test.app", initialContainerPrimarySpan: 0.5)
+        let rule = AppRule(
+            bundleId: "com.test.app",
+            initialContainerPrimarySpan: 0.5,
+            defaultWidth: 800,
+            defaultHeight: 600
+        )
         let definition = IPCRuleProjection.definition(from: rule)
         let projectedRule = IPCRuleProjection.appRule(from: definition, id: rule.id)
         let snapshot = IPCRuleProjection.snapshot(
@@ -145,8 +167,12 @@ final class AppRuleTests: XCTestCase {
         )
 
         XCTAssertEqual(definition.initialContainerPrimarySpan, 0.5)
+        XCTAssertEqual(definition.defaultWidth, 800)
+        XCTAssertEqual(definition.defaultHeight, 600)
         XCTAssertEqual(projectedRule, rule)
         XCTAssertEqual(snapshot.initialContainerPrimarySpan, 0.5)
+        XCTAssertEqual(snapshot.defaultWidth, 800)
+        XCTAssertEqual(snapshot.defaultHeight, 600)
         XCTAssertTrue(snapshot.isValid)
     }
 
@@ -173,6 +199,23 @@ final class AppRuleTests: XCTestCase {
         XCTAssertTrue(draft.initialContainerPrimarySpanEnabled)
         XCTAssertEqual(draft.initialContainerPrimarySpan, 0.75)
         XCTAssertNil(draft.initialContainerPrimarySpanError)
+        XCTAssertEqual(draft.makeRule(), rule)
+    }
+
+    func testDraftDefaultsAndRoundTripsDefaultFloatingSize() {
+        let emptyDraft = AppRuleDraft()
+        XCTAssertFalse(emptyDraft.defaultWidthEnabled)
+        XCTAssertFalse(emptyDraft.defaultHeightEnabled)
+        XCTAssertEqual(emptyDraft.defaultWidth, 800)
+        XCTAssertEqual(emptyDraft.defaultHeight, 600)
+
+        let rule = AppRule(bundleId: "com.apple.finder", layout: .float, defaultWidth: 720, defaultHeight: 480)
+        let draft = AppRuleDraft(rule: rule)
+        XCTAssertTrue(draft.defaultWidthEnabled)
+        XCTAssertTrue(draft.defaultHeightEnabled)
+        XCTAssertEqual(draft.defaultWidth, 720)
+        XCTAssertEqual(draft.defaultHeight, 480)
+        XCTAssertNil(draft.defaultSizeError)
         XCTAssertEqual(draft.makeRule(), rule)
     }
 
@@ -264,6 +307,10 @@ final class AppRuleTests: XCTestCase {
         draft.assignToWorkspace = "work"
         draft.initialContainerPrimarySpanEnabled = true
         draft.initialContainerPrimarySpan = 0.7
+        draft.defaultWidthEnabled = true
+        draft.defaultWidth = 720
+        draft.defaultHeightEnabled = true
+        draft.defaultHeight = 480
         draft.minWidthEnabled = true
         draft.minWidth = 640
         draft.minHeightEnabled = true
@@ -286,6 +333,10 @@ final class AppRuleTests: XCTestCase {
         XCTAssertEqual(draft.assignToWorkspace, "work")
         XCTAssertTrue(draft.initialContainerPrimarySpanEnabled)
         XCTAssertEqual(draft.initialContainerPrimarySpan, 0.7)
+        XCTAssertTrue(draft.defaultWidthEnabled)
+        XCTAssertEqual(draft.defaultWidth, 720)
+        XCTAssertTrue(draft.defaultHeightEnabled)
+        XCTAssertEqual(draft.defaultHeight, 480)
         XCTAssertTrue(draft.minWidthEnabled)
         XCTAssertEqual(draft.minWidth, 640)
         XCTAssertTrue(draft.minHeightEnabled)

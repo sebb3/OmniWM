@@ -1494,6 +1494,27 @@ final class WMController {
         return clampedFloatingFrame(offsetFrame, in: monitor.visibleFrame)
     }
 
+    func defaultSizedFloatingFrame(
+        _ frame: CGRect,
+        hints: ManagedWindowAdmissionHints,
+        preferredMonitor: Monitor?
+    ) -> CGRect {
+        guard hints.defaultWidth != nil || hints.defaultHeight != nil else { return frame }
+
+        var target = frame
+        target.size.width = hints.defaultWidth.map { CGFloat($0) } ?? target.width
+        target.size.height = hints.defaultHeight.map { CGFloat($0) } ?? target.height
+
+        guard let visibleFrame = preferredMonitor?.visibleFrame else { return target }
+        if hints.defaultWidth != nil {
+            target.size.width = min(target.width, visibleFrame.width)
+        }
+        if hints.defaultHeight != nil {
+            target.size.height = min(target.height, visibleFrame.height)
+        }
+        return clampedFloatingFrame(target, in: visibleFrame)
+    }
+
     private func shouldApplyFloatingFrameImmediately(
         for workspaceId: WorkspaceDescriptor.ID
     ) -> Bool {
@@ -2318,6 +2339,8 @@ final class WMController {
             minWidth: evaluation.decision.ruleEffects.minWidth,
             minHeight: evaluation.decision.ruleEffects.minHeight,
             initialNiriContainerPrimarySpan: evaluation.decision.admissionHints.initialNiriContainerPrimarySpan,
+            defaultWidth: evaluation.decision.admissionHints.defaultWidth,
+            defaultHeight: evaluation.decision.admissionHints.defaultHeight,
             matchedRuleId: evaluation.decision.ruleEffects.matchedRuleId,
             heuristicReasons: evaluation.decision.heuristicReasons,
             attributeFetchSucceeded: evaluation.facts.ax.attributeFetchSucceeded

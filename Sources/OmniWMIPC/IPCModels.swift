@@ -1587,6 +1587,8 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
     public let layout: IPCRuleLayout
     public let assignToWorkspace: String?
     public let initialContainerPrimarySpan: Double?
+    public let defaultWidth: Double?
+    public let defaultHeight: Double?
     public let minWidth: Double?
     public let minHeight: Double?
     /// Unlike the fields above, `focus` and `windowLevel` cascade per field, so
@@ -1610,6 +1612,8 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         layout: IPCRuleLayout = .auto,
         assignToWorkspace: String? = nil,
         initialContainerPrimarySpan: Double? = nil,
+        defaultWidth: Double? = nil,
+        defaultHeight: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
         focus: IPCRuleFocus? = nil,
@@ -1625,6 +1629,8 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         self.layout = layout
         self.assignToWorkspace = assignToWorkspace
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
+        self.defaultWidth = defaultWidth
+        self.defaultHeight = defaultHeight
         self.minWidth = minWidth
         self.minHeight = minHeight
         self.focus = focus
@@ -2479,6 +2485,8 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     public let layout: IPCRuleLayout
     public let assignToWorkspace: String?
     public let initialContainerPrimarySpan: Double?
+    public let defaultWidth: Double?
+    public let defaultHeight: Double?
     public let minWidth: Double?
     public let minHeight: Double?
     public let focus: IPCRuleFocus?
@@ -2493,7 +2501,8 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, position, bundleId, appNameSubstring, titleSubstring, titleRegex, axRole, axSubrole
-        case layout, assignToWorkspace, initialContainerPrimarySpan, minWidth, minHeight, specificity, isValid
+        case layout, assignToWorkspace, initialContainerPrimarySpan, defaultWidth, defaultHeight
+        case minWidth, minHeight, specificity, isValid
         case focus, windowLevel, isOneShot
         case invalidRegexMessage, validationMessages
     }
@@ -2510,6 +2519,8 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         layout: IPCRuleLayout,
         assignToWorkspace: String? = nil,
         initialContainerPrimarySpan: Double? = nil,
+        defaultWidth: Double? = nil,
+        defaultHeight: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
         focus: IPCRuleFocus? = nil,
@@ -2531,6 +2542,8 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         self.layout = layout
         self.assignToWorkspace = assignToWorkspace
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
+        self.defaultWidth = defaultWidth
+        self.defaultHeight = defaultHeight
         self.minWidth = minWidth
         self.minHeight = minHeight
         self.focus = focus
@@ -2555,6 +2568,8 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         layout = try container.decode(IPCRuleLayout.self, forKey: .layout)
         assignToWorkspace = try container.decodeIfPresent(String.self, forKey: .assignToWorkspace)
         initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
+        defaultWidth = try container.decodeIfPresent(Double.self, forKey: .defaultWidth)
+        defaultHeight = try container.decodeIfPresent(Double.self, forKey: .defaultHeight)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
         focus = try container.decodeIfPresent(IPCRuleFocus.self, forKey: .focus)

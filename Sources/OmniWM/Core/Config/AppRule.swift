@@ -89,6 +89,8 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         case layout
         case assignToWorkspace
         case initialContainerPrimarySpan
+        case defaultWidth
+        case defaultHeight
         case minWidth
         case minHeight
         case focus
@@ -105,6 +107,8 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
     var layout: WindowRuleLayoutAction?
     var assignToWorkspace: String?
     var initialContainerPrimarySpan: Double?
+    var defaultWidth: Double?
+    var defaultHeight: Double?
     var minWidth: Double?
     var minHeight: Double?
     var focus: WindowRuleFocusPolicy?
@@ -121,6 +125,8 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         layout: WindowRuleLayoutAction? = nil,
         assignToWorkspace: String? = nil,
         initialContainerPrimarySpan: Double? = nil,
+        defaultWidth: Double? = nil,
+        defaultHeight: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
         focus: WindowRuleFocusPolicy? = nil,
@@ -136,6 +142,8 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         self.layout = layout
         self.assignToWorkspace = assignToWorkspace
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
+        self.defaultWidth = defaultWidth
+        self.defaultHeight = defaultHeight
         self.minWidth = minWidth
         self.minHeight = minHeight
         self.focus = focus
@@ -161,6 +169,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         effectiveLayoutAction != .auto ||
             assignToWorkspace?.isEmpty == false ||
             validInitialContainerPrimarySpan != nil ||
+            defaultWidth != nil || defaultHeight != nil ||
             minWidth != nil || minHeight != nil ||
             focus != nil || windowLevel != nil
     }
@@ -214,6 +223,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         effectiveLayoutAction != .auto ||
             assignToWorkspace != nil ||
             initialContainerPrimarySpan != nil ||
+            defaultWidth != nil || defaultHeight != nil ||
             minWidth != nil || minHeight != nil ||
             focus != nil || windowLevel != nil ||
             hasAdvancedMatchers
@@ -231,6 +241,8 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         layout = try container.decodeIfPresent(WindowRuleLayoutAction.self, forKey: .layout)
         assignToWorkspace = try container.decodeIfPresent(String.self, forKey: .assignToWorkspace)
         initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
+        defaultWidth = try container.decodeIfPresent(Double.self, forKey: .defaultWidth)
+        defaultHeight = try container.decodeIfPresent(Double.self, forKey: .defaultHeight)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
         focus = try container.decodeIfPresent(WindowRuleFocusPolicy.self, forKey: .focus)
@@ -250,6 +262,8 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         try container.encodeIfPresent(layout, forKey: .layout)
         try container.encodeIfPresent(assignToWorkspace, forKey: .assignToWorkspace)
         try container.encodeIfPresent(initialContainerPrimarySpan, forKey: .initialContainerPrimarySpan)
+        try container.encodeIfPresent(defaultWidth, forKey: .defaultWidth)
+        try container.encodeIfPresent(defaultHeight, forKey: .defaultHeight)
         try container.encodeIfPresent(minWidth, forKey: .minWidth)
         try container.encodeIfPresent(minHeight, forKey: .minHeight)
         try container.encodeIfPresent(focus, forKey: .focus)

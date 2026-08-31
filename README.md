@@ -768,11 +768,23 @@ Configure per-application behavior in Settings > App Rules:
 - **Always Float** - Force specific apps to always float (e.g., calculators, preferences windows)
 - **Assign to Workspace** - Use a valid workspace assignment as the initial default whenever the matching app currently has no tracked windows. Additional windows open on the workspace active when creation began. Automatic rule reevaluation leaves managed windows in place, while explicit rule application can move them. Readmission, structural replacements, tracked transient children, and unique persisted boot-restore matches preserve their existing placement continuity.
 - **Initial Container Primary Span (Niri)** - Start matching resizable windows at 5–100% when they create or claim a new container; the container remains freely resizable afterward
+- **Default Floating Size** - Set the width and/or height applied when a matching floating window first opens; the window remains freely resizable afterward
 - **Minimum Size** - Prevent the layout engine from sizing windows below a threshold
 
 Initial container primary span is a one-time seed. It controls width in horizontal orientation and height in
 vertical orientation. Niri's Single Window Fit still takes visual precedence for a lone window, and physical
 minimum-size constraints can clamp the resolved pixel size without changing the stored initial proportion.
+
+Default floating size is also a one-time seed, not a constraint. For example, this keeps new Finder windows
+small without preventing later resizing:
+
+```toml
+[[appRules]]
+bundleId = "com.apple.finder"
+layout = "float"
+defaultWidth = 800
+defaultHeight = 600
+```
 
 The equivalent TOML rule uses a proportion:
 

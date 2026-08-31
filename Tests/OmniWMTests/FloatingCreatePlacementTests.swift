@@ -10,6 +10,46 @@ import XCTest
 
 @MainActor
 final class FloatingCreatePlacementTests: XCTestCase {
+    func testDefaultFloatingSizeReplacesConfiguredAxesAndPreservesOrigin() throws {
+        let fixture = try makeTwoMonitorFixture()
+        let source = CGRect(x: 200, y: 120, width: 1500, height: 900)
+
+        let target = fixture.controller.defaultSizedFloatingFrame(
+            source,
+            hints: ManagedWindowAdmissionHints(defaultWidth: 720, defaultHeight: 480),
+            preferredMonitor: fixture.primary
+        )
+
+        XCTAssertEqual(target, CGRect(x: 200, y: 120, width: 720, height: 480))
+    }
+
+    func testDefaultFloatingSizeClampsToVisibleFrame() throws {
+        let fixture = try makeTwoMonitorFixture()
+        let source = CGRect(x: 1700, y: 1100, width: 300, height: 200)
+
+        let target = fixture.controller.defaultSizedFloatingFrame(
+            source,
+            hints: ManagedWindowAdmissionHints(defaultWidth: 3000, defaultHeight: 2000),
+            preferredMonitor: fixture.primary
+        )
+
+        XCTAssertEqual(target, fixture.primary.visibleFrame)
+    }
+
+    func testNoDefaultFloatingSizeLeavesNativeFrameUntouched() throws {
+        let fixture = try makeTwoMonitorFixture()
+        let source = CGRect(x: -100, y: -100, width: 3000, height: 2000)
+
+        XCTAssertEqual(
+            fixture.controller.defaultSizedFloatingFrame(
+                source,
+                hints: .none,
+                preferredMonitor: fixture.primary
+            ),
+            source
+        )
+    }
+
     func testTiledFocusConfirmationSetsLastTiledFocusedToken() {
         let workspaceId = WorkspaceDescriptor.ID()
         let token = WindowToken(pid: 5001, windowId: 11)
