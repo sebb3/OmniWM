@@ -2324,6 +2324,7 @@ final class AXEventHandler {
                 }
                 let preserveViewport = controller.workspaceManager.animationDriver.hasMotion(in: wsId)
                     || preservesPointerViewport
+                    || hasRecentMouseFocusIntent(for: entry.token)
                     || preservesAppTerminationRecoveryViewport(for: entry.token)
                 let preserveReplacementViewport = isProtectedManagedReplacementFocus(
                     token: entry.token,
