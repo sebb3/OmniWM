@@ -12,15 +12,14 @@ typedef struct {
     int set_calls;
     int commit_calls;
     int release_calls;
-    int fail_set_call;
-    bool fail_commit;
     bool stall_clock;
+    bool cancelled;
     uint64_t now;
     uint64_t deadlines[MAX_RECORDED_FRAMES];
     size_t deadline_count;
     struct {
         uint32_t window_ids[HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS];
-        CGAffineTransform transforms[HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS];
+        CGPoint positions[HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS];
         size_t count;
     } frames[MAX_RECORDED_FRAMES];
     size_t frame_count;
@@ -42,33 +41,22 @@ static CFTypeRef fake_create_transaction(int connection)
     return (CFTypeRef)(uintptr_t)(g_fake.frame_count + 1);
 }
 
-static CGError fake_set_transform(CFTypeRef transaction, uint32_t window_id,
-                                  int32_t unknown_a, int32_t unknown_b,
-                                  CGAffineTransform transform)
+static void fake_move_window(CFTypeRef transaction, uint32_t window_id, double x, double y)
 {
     assert(transaction != NULL);
-    assert(unknown_a == 0 && unknown_b == 0);
     g_fake.set_calls++;
-    if (g_fake.fail_set_call != 0 && g_fake.set_calls == g_fake.fail_set_call) {
-        return kCGErrorFailure;
-    }
     size_t index = g_fake.frames[g_fake.frame_count].count++;
     assert(index < HS2_DOCK_WORKSPACE_TRANSITION_MAX_WINDOWS);
     g_fake.frames[g_fake.frame_count].window_ids[index] = window_id;
-    g_fake.frames[g_fake.frame_count].transforms[index] = transform;
-    return kCGErrorSuccess;
+    g_fake.frames[g_fake.frame_count].positions[index] = CGPointMake(x, y);
 }
 
-static CGError fake_commit(CFTypeRef transaction, int32_t synchronous)
+static void fake_commit(CFTypeRef transaction, int32_t synchronous)
 {
     assert(transaction != NULL);
     assert(synchronous == 0);
     g_fake.commit_calls++;
-    if (g_fake.fail_commit) {
-        return kCGErrorFailure;
-    }
     g_fake.frame_count++;
-    return kCGErrorSuccess;
 }
 
 static void fake_release(CFTypeRef transaction)
@@ -93,12 +81,18 @@ static void fake_wait(uint64_t deadline, void *context)
     }
 }
 
+static bool fake_should_cancel(void *context)
+{
+    transition_fake *fake = context;
+    return fake->cancelled;
+}
+
 static hs2_dock_skylight_api complete_api(void)
 {
     return (hs2_dock_skylight_api){
         .main_connection_id = fake_main_connection,
         .transaction_create = fake_create_transaction,
-        .transaction_set_window_transform = fake_set_transform,
+        .transaction_move_window_with_group = fake_move_window,
         .transaction_commit = fake_commit,
         .transaction_release = fake_release,
     };
@@ -109,18 +103,39 @@ static hs2_dock_workspace_transition_clock clock_for(transition_fake *fake)
     return (hs2_dock_workspace_transition_clock){
         .now_ns = fake_now,
         .wait_until_ns = fake_wait,
+        .should_cancel = fake_should_cancel,
         .context = fake,
     };
 }
 
-static void assert_transform(CGAffineTransform value, CGAffineTransform expected)
+static void test_initial_clock_failure_and_cancellation_do_not_mutate(void)
 {
-    assert(fabs(value.a - expected.a) < 0.000001);
-    assert(fabs(value.b - expected.b) < 0.000001);
-    assert(fabs(value.c - expected.c) < 0.000001);
-    assert(fabs(value.d - expected.d) < 0.000001);
-    assert(fabs(value.tx - expected.tx) < 0.000001);
-    assert(fabs(value.ty - expected.ty) < 0.000001);
+    hs2_dock_workspace_transition_member member = {
+        .window_id = 1,
+        .from = CGAffineTransformIdentity,
+        .to = CGAffineTransformMakeTranslation(0, 100),
+    };
+    hs2_dock_workspace_transition_request request = {
+        .members = &member,
+        .member_count = 1,
+        .duration_ns = UINT64_C(10000000),
+        .frame_interval_ns = UINT64_C(1000000),
+    };
+    hs2_dock_skylight_api api = complete_api();
+
+    memset(&g_fake, 0, sizeof(g_fake));
+    hs2_dock_workspace_transition_clock clock = clock_for(&g_fake);
+    assert(hs2_dock_run_workspace_transition(&api, &request, &clock) ==
+           HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED);
+    assert(g_fake.connection_calls == 0 && g_fake.create_calls == 0);
+
+    memset(&g_fake, 0, sizeof(g_fake));
+    g_fake.now = 1;
+    g_fake.cancelled = true;
+    clock = clock_for(&g_fake);
+    assert(hs2_dock_run_workspace_transition(&api, &request, &clock) ==
+           HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED);
+    assert(g_fake.connection_calls == 0 && g_fake.create_calls == 0);
 }
 
 static void test_shared_clock_atomic_frames_and_exact_endpoint(void)
@@ -159,67 +174,16 @@ static void test_shared_clock_atomic_frames_and_exact_endpoint(void)
         assert(g_fake.frames[frame].window_ids[0] == 11);
         assert(g_fake.frames[frame].window_ids[1] == 12);
     }
-    assert_transform(g_fake.frames[0].transforms[0], members[0].from);
-    assert(g_fake.frames[2].transforms[0].ty == -500.0);
-    assert(g_fake.frames[2].transforms[1].ty == 100.0);
-    assert(memcmp(&g_fake.frames[4].transforms[0], &members[0].to,
-                  sizeof(CGAffineTransform)) == 0);
-    assert(memcmp(&g_fake.frames[4].transforms[1], &members[1].to,
-                  sizeof(CGAffineTransform)) == 0);
+    assert(CGPointEqualToPoint(g_fake.frames[0].positions[0], CGPointMake(100, 900)));
+    assert(g_fake.frames[2].positions[0].y == 500.0);
+    assert(g_fake.frames[2].positions[1].y == -100.0);
+    assert(CGPointEqualToPoint(g_fake.frames[4].positions[0],
+                              CGPointMake(-members[0].to.tx, -members[0].to.ty)));
+    assert(CGPointEqualToPoint(g_fake.frames[4].positions[1],
+                              CGPointMake(-members[1].to.tx, -members[1].to.ty)));
     assert(g_fake.deadline_count == 4);
     assert(g_fake.deadlines[0] == UINT64_C(1025000000));
     assert(g_fake.deadlines[3] == UINT64_C(1100000000));
-}
-
-static void test_failed_member_aborts_uncommitted_frame(void)
-{
-    memset(&g_fake, 0, sizeof(g_fake));
-    g_fake.now = 1;
-    g_fake.fail_set_call = 2;
-    hs2_dock_workspace_transition_member members[] = {
-        { .window_id = 1, .from = CGAffineTransformIdentity, .to = CGAffineTransformIdentity },
-        { .window_id = 2, .from = CGAffineTransformIdentity, .to = CGAffineTransformIdentity },
-    };
-    hs2_dock_workspace_transition_request request = {
-        .members = members,
-        .member_count = 2,
-        .duration_ns = UINT64_C(10000000),
-        .frame_interval_ns = UINT64_C(1000000),
-    };
-    hs2_dock_skylight_api api = complete_api();
-    hs2_dock_workspace_transition_clock clock = clock_for(&g_fake);
-
-    assert(hs2_dock_run_workspace_transition(&api, &request, &clock) ==
-           HS2_DOCK_WORKSPACE_TRANSITION_APPLY_FAILED);
-    assert(g_fake.create_calls == 1 && g_fake.set_calls == 2);
-    assert(g_fake.commit_calls == 0 && g_fake.release_calls == 1);
-    assert(g_fake.deadline_count == 0);
-}
-
-static void test_failed_commit_releases_transaction_and_stops(void)
-{
-    memset(&g_fake, 0, sizeof(g_fake));
-    g_fake.now = 1;
-    g_fake.fail_commit = true;
-    hs2_dock_workspace_transition_member member = {
-        .window_id = 1,
-        .from = CGAffineTransformIdentity,
-        .to = CGAffineTransformIdentity,
-    };
-    hs2_dock_workspace_transition_request request = {
-        .members = &member,
-        .member_count = 1,
-        .duration_ns = UINT64_C(10000000),
-        .frame_interval_ns = UINT64_C(1000000),
-    };
-    hs2_dock_skylight_api api = complete_api();
-    hs2_dock_workspace_transition_clock clock = clock_for(&g_fake);
-
-    assert(hs2_dock_run_workspace_transition(&api, &request, &clock) ==
-           HS2_DOCK_WORKSPACE_TRANSITION_COMMIT_UNCERTAIN);
-    assert(g_fake.create_calls == 1 && g_fake.set_calls == 1);
-    assert(g_fake.commit_calls == 1 && g_fake.release_calls == 1);
-    assert(g_fake.deadline_count == 0);
 }
 
 static void test_stalled_clock_stops_after_one_frame(void)
@@ -287,9 +251,8 @@ static void test_validation_has_no_side_effects(void)
 int main(void)
 {
     test_shared_clock_atomic_frames_and_exact_endpoint();
-    test_failed_member_aborts_uncommitted_frame();
-    test_failed_commit_releases_transaction_and_stops();
     test_stalled_clock_stops_after_one_frame();
+    test_initial_clock_failure_and_cancellation_do_not_mutate();
     test_validation_has_no_side_effects();
     return 0;
 }

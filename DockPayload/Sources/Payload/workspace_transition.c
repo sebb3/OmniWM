@@ -23,7 +23,7 @@ static bool valid_request(const hs2_dock_skylight_api *api,
 {
     if (api == NULL || api->main_connection_id == NULL ||
         api->transaction_create == NULL ||
-        api->transaction_set_window_transform == NULL ||
+        api->transaction_move_window_with_group == NULL ||
         api->transaction_commit == NULL || api->transaction_release == NULL ||
         request == NULL || request->members == NULL ||
         request->member_count == 0 ||
@@ -83,6 +83,11 @@ static CGAffineTransform interpolated_transform(
         interpolate(member->from.ty, member->to.ty, progress));
 }
 
+static CGPoint position_for_transform(CGAffineTransform transform)
+{
+    return CGPointMake(-transform.tx, -transform.ty);
+}
+
 static hs2_dock_workspace_transition_result apply_frame(
     const hs2_dock_skylight_api *api,
     int connection,
@@ -97,17 +102,13 @@ static hs2_dock_workspace_transition_result apply_frame(
     for (size_t index = 0; index < request->member_count; index++) {
         const hs2_dock_workspace_transition_member *member = &request->members[index];
         CGAffineTransform transform = interpolated_transform(member, progress);
-        if (api->transaction_set_window_transform(
-                transaction, member->window_id, 0, 0, transform) != kCGErrorSuccess) {
-            api->transaction_release(transaction);
-            return HS2_DOCK_WORKSPACE_TRANSITION_APPLY_FAILED;
-        }
+        CGPoint position = position_for_transform(transform);
+        api->transaction_move_window_with_group(
+            transaction, member->window_id, position.x, position.y);
     }
-    CGError commit_result = api->transaction_commit(transaction, 0);
+    api->transaction_commit(transaction, 0);
     api->transaction_release(transaction);
-    return commit_result == kCGErrorSuccess
-        ? HS2_DOCK_WORKSPACE_TRANSITION_COMPLETED
-        : HS2_DOCK_WORKSPACE_TRANSITION_COMMIT_UNCERTAIN;
+    return HS2_DOCK_WORKSPACE_TRANSITION_COMPLETED;
 }
 
 hs2_dock_workspace_transition_result hs2_dock_run_workspace_transition(
@@ -119,15 +120,22 @@ hs2_dock_workspace_transition_result hs2_dock_run_workspace_transition(
         return HS2_DOCK_WORKSPACE_TRANSITION_INVALID;
     }
 
-    int connection = api->main_connection_id();
-    if (connection <= 0) {
-        return HS2_DOCK_WORKSPACE_TRANSITION_INVALID;
-    }
-
     uint64_t start = clock->now_ns(clock->context);
+    bool initially_cancelled =
+        clock->should_cancel != NULL && clock->should_cancel(clock->context);
+    if (start == 0 || initially_cancelled) {
+        return initially_cancelled
+            ? HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED
+            : HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED;
+    }
     uint64_t end = start + request->duration_ns;
     if (end < start) {
         return HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED;
+    }
+
+    int connection = api->main_connection_id();
+    if (connection <= 0) {
+        return HS2_DOCK_WORKSPACE_TRANSITION_INVALID;
     }
 
     uint64_t frame = 0;
@@ -135,6 +143,9 @@ hs2_dock_workspace_transition_result hs2_dock_run_workspace_transition(
     uint64_t maximum_frames =
         request->duration_ns / request->frame_interval_ns + 2;
     for (;;) {
+        if (clock->should_cancel != NULL && clock->should_cancel(clock->context)) {
+            return HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED;
+        }
         uint64_t now = clock->now_ns(clock->context);
         if (now < previous_now || frame >= maximum_frames) {
             return HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED;
@@ -159,6 +170,9 @@ hs2_dock_workspace_transition_result hs2_dock_run_workspace_transition(
             deadline = end;
         }
         clock->wait_until_ns(deadline, clock->context);
+        if (clock->should_cancel != NULL && clock->should_cancel(clock->context)) {
+            return HS2_DOCK_WORKSPACE_TRANSITION_CANCELLED;
+        }
         uint64_t after_wait = clock->now_ns(clock->context);
         if (after_wait <= now || after_wait < deadline) {
             return HS2_DOCK_WORKSPACE_TRANSITION_CLOCK_FAILED;

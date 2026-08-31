@@ -69,10 +69,10 @@ $(V2_TEST_HARNESS): Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_
 	$(CC) $(CFLAGS) -I Sources/Protocol -arch arm64 -o $@ Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/protocol_v2_tests.c
 
 $(OPERATION_TEST_HARNESS): Sources/Payload/operation_dispatch.c Sources/Payload/operation_dispatch.h Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Sources/Protocol/protocol_v2.h Sources/Protocol/protocol_v2_server.h Tests/operation_dispatch_tests.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreGraphics -o $@ Sources/Payload/operation_dispatch.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/operation_dispatch_tests.c
+	$(CC) $(CFLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreGraphics -o $@ Sources/Payload/operation_dispatch.c Sources/Payload/workspace_transition.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/operation_dispatch_tests.c
 
 $(V2_SOCKET_TEST_HARNESS): Sources/Payload/payload_server.c Sources/Payload/payload_server.h Sources/Payload/operation_dispatch.c Sources/Payload/operation_dispatch.h Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Sources/Protocol/protocol_v2.h Sources/Protocol/protocol_v2_server.h Tests/protocol_v2_socket_tests.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreGraphics -o $@ Sources/Payload/payload_server.c Sources/Payload/operation_dispatch.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/protocol_v2_socket_tests.c
+	$(CC) $(CFLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreGraphics -o $@ Sources/Payload/payload_server.c Sources/Payload/operation_dispatch.c Sources/Payload/workspace_transition.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/protocol_v2_socket_tests.c
 
 $(PAYLOAD_LIFECYCLE_TEST): Tests/payload_lifecycle_tests.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2.h $(PAYLOAD) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I Sources/Protocol -arch arm64 -o $@ Tests/payload_lifecycle_tests.c Sources/Protocol/protocol_v2.c
@@ -84,10 +84,10 @@ $(V2_TEST_ASAN): Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_ser
 	$(CC) $(CFLAGS) $(SANITIZE_FLAGS) -I Sources/Protocol -arch arm64 -o $@ Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/protocol_v2_tests.c
 
 $(OPERATION_TEST_ASAN): Sources/Payload/operation_dispatch.c Sources/Payload/operation_dispatch.h Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Sources/Protocol/protocol_v2.h Sources/Protocol/protocol_v2_server.h Tests/operation_dispatch_tests.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(SANITIZE_FLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreGraphics -o $@ Sources/Payload/operation_dispatch.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/operation_dispatch_tests.c
+	$(CC) $(CFLAGS) $(SANITIZE_FLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreGraphics -o $@ Sources/Payload/operation_dispatch.c Sources/Payload/workspace_transition.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/operation_dispatch_tests.c
 
 $(V2_SOCKET_TEST_ASAN): Sources/Payload/payload_server.c Sources/Payload/payload_server.h Sources/Payload/operation_dispatch.c Sources/Payload/operation_dispatch.h Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Sources/Protocol/protocol_v2.h Sources/Protocol/protocol_v2_server.h Tests/protocol_v2_socket_tests.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(SANITIZE_FLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreGraphics -o $@ Sources/Payload/payload_server.c Sources/Payload/operation_dispatch.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/protocol_v2_socket_tests.c
+	$(CC) $(CFLAGS) $(SANITIZE_FLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreGraphics -o $@ Sources/Payload/payload_server.c Sources/Payload/operation_dispatch.c Sources/Payload/workspace_transition.c Sources/Protocol/protocol_v2.c Sources/Protocol/protocol_v2_server.c Tests/protocol_v2_socket_tests.c
 
 $(WORKSPACE_TRANSITION_TEST): Sources/Payload/workspace_transition.c Sources/Payload/workspace_transition.h Sources/Payload/operation_dispatch.h Tests/workspace_transition_tests.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I Sources/Protocol -I Sources/Payload -arch arm64 -framework CoreFoundation -framework CoreGraphics -o $@ Sources/Payload/workspace_transition.c Tests/workspace_transition_tests.c

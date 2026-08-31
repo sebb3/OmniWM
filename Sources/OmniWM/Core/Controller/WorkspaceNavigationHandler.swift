@@ -241,6 +241,7 @@ final class WorkspaceNavigationHandler {
     }
 
     private func commitWorkspaceTransitionFocusHandoff(
+        sourceWorkspaceId: WorkspaceDescriptor.ID?,
         targetWorkspaceId: WorkspaceDescriptor.ID,
         monitor: Monitor?,
         startScrollAnimation: Bool
@@ -250,19 +251,48 @@ final class WorkspaceNavigationHandler {
         if let monitor {
             controller.layoutRefreshController.stopScrollAnimation(for: monitor.displayId)
         }
-        controller.layoutRefreshController.commitWorkspaceTransition(
-            reason: .workspaceTransition
-        ) { [weak self, weak controller] in
+        let visualTransition: WorkspaceSwitchTransitionPlan? = if let sourceWorkspaceId, let monitor {
+            controller.layoutRefreshController.prepareWorkspaceSwitchTransition(
+                sourceWorkspaceId: sourceWorkspaceId,
+                targetWorkspaceId: targetWorkspaceId,
+                monitor: monitor
+            )
+        } else {
+            nil
+        }
+        let commitPhysicalTransition: @MainActor @Sendable () -> Void = { [weak self, weak controller] in
             guard let controller else { return }
-            if let focusToken = handoff.focusToken {
-                controller.focusWindow(focusToken)
-            } else if handoff.shouldClearManagedFocus {
-                self?.clearManagedFocusAfterEmptyWorkspaceSwitch()
-            }
-            if startScrollAnimation {
-                controller.layoutRefreshController.startScrollAnimation(for: targetWorkspaceId)
+            controller.layoutRefreshController.commitWorkspaceTransition(
+                affectedWorkspaces: [targetWorkspaceId],
+                reason: .workspaceTransition,
+                postLayoutGateWorkspaceIds: [targetWorkspaceId]
+            ) { [weak self, weak controller] in
+                guard let controller else { return }
+                if let focusToken = handoff.focusToken {
+                    controller.focusWindow(focusToken)
+                } else if handoff.shouldClearManagedFocus {
+                    self?.clearManagedFocusAfterEmptyWorkspaceSwitch()
+                }
+                if startScrollAnimation {
+                    controller.layoutRefreshController.startScrollAnimation(for: targetWorkspaceId)
+                }
             }
         }
+        if let visualTransition {
+            let transitionEntries = controller.workspaceManager.entries(
+                in: sourceWorkspaceId ?? targetWorkspaceId
+            ) + controller.workspaceManager.entries(in: targetWorkspaceId)
+            controller.axManager.cancelPendingFrameJobs(
+                transitionEntries.map { ($0.pid, $0.windowId) }
+            )
+            if controller.layoutRefreshController.startWorkspaceSwitchTransition(
+                visualTransition,
+                completion: commitPhysicalTransition
+            ) {
+                return
+            }
+        }
+        commitPhysicalTransition()
     }
 
     func focusMonitorCyclic(previous: Bool) {
@@ -571,6 +601,7 @@ final class WorkspaceNavigationHandler {
         guard let result = controller.workspaceManager.focusWorkspace(named: rawWorkspaceID) else { return }
 
         commitWorkspaceTransitionFocusHandoff(
+            sourceWorkspaceId: currentWorkspace?.id,
             targetWorkspaceId: result.workspace.id,
             monitor: result.monitor,
             startScrollAnimation: false
@@ -614,6 +645,7 @@ final class WorkspaceNavigationHandler {
         let monitor = controller.workspaceManager.monitor(for: targetWorkspace.id)
             ?? controller.workspaceManager.monitor(byId: currentMonitorId)
         commitWorkspaceTransitionFocusHandoff(
+            sourceWorkspaceId: currentWorkspace.id,
             targetWorkspaceId: targetWorkspace.id,
             monitor: monitor,
             startScrollAnimation: false
@@ -648,6 +680,7 @@ final class WorkspaceNavigationHandler {
 
         guard let targetWsId = controller.workspaceManager.workspaceId(named: rawWorkspaceID) else { return }
         guard let targetMonitor = controller.workspaceManager.monitorForWorkspace(targetWsId) else { return }
+        let sourceWorkspaceId = controller.workspaceManager.activeWorkspace(on: targetMonitor.id)?.id
 
         if let currentWorkspace {
             saveNiriViewportState(for: currentWorkspace.id)
@@ -666,6 +699,7 @@ final class WorkspaceNavigationHandler {
         controller.syncMonitorsToNiriEngine()
 
         commitWorkspaceTransitionFocusHandoff(
+            sourceWorkspaceId: sourceWorkspaceId,
             targetWorkspaceId: targetWsId,
             monitor: targetMonitor,
             startScrollAnimation: false
@@ -693,6 +727,7 @@ final class WorkspaceNavigationHandler {
         let monitor = controller.workspaceManager.monitor(for: prevWorkspace.id)
             ?? controller.workspaceManager.monitor(byId: currentMonitorId)
         commitWorkspaceTransitionFocusHandoff(
+            sourceWorkspaceId: currentWorkspace?.id,
             targetWorkspaceId: prevWorkspace.id,
             monitor: monitor,
             startScrollAnimation: false

@@ -186,6 +186,7 @@ import QuartzCore
 
     private(set) lazy var niriHandler = NiriLayoutHandler(controller: controller)
     private(set) lazy var dwindleHandler = DwindleLayoutHandler(controller: controller)
+    private(set) lazy var workspaceSwitchTransitionCoordinator = WorkspaceSwitchTransitionCoordinator()
     private lazy var diffExecutor = LayoutDiffExecutor(refreshController: self)
 
     var isDiscoveryInProgress: Bool {
@@ -230,6 +231,7 @@ import QuartzCore
     }
 
     func cleanupForMonitorDisconnect(displayId: CGDirectDisplayID, migrateAnimations: Bool) {
+        workspaceSwitchTransitionCoordinator.cancel(displayId: displayId)
         if let link = layoutState.displayLinksByDisplay.removeValue(forKey: displayId) {
             link.invalidate()
         }

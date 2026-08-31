@@ -53,6 +53,12 @@ uint16_t hs2_dock_v2_handle_lease(hs2_dock_v2_server *, const hs2_dock_v2_peer *
 uint16_t hs2_dock_v2_authorize_operation(hs2_dock_v2_server *, const hs2_dock_v2_peer *, const hs2_dock_v2_envelope *, const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES], uint64_t capability);
 uint16_t hs2_dock_v2_authorize_leased_operation(hs2_dock_v2_server *, const hs2_dock_v2_peer *, const hs2_dock_v2_envelope *, const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES], uint64_t capability, uint64_t lease_id, uint64_t window_id, hs2_dock_v2_lease **lease);
 uint16_t hs2_dock_v2_authorize_move(hs2_dock_v2_server *, const hs2_dock_v2_peer *, const hs2_dock_v2_envelope *, const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES], uint64_t lease_id, uint64_t window_id);
+/* Authorizes one transition request and resolves every dedicated member lease
+ * without replaying or re-running the session authorizer per member. */
+uint16_t hs2_dock_v2_authorize_workspace_transition(
+    hs2_dock_v2_server *, const hs2_dock_v2_peer *, const hs2_dock_v2_envelope *,
+    const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES],
+    const hs2_dock_v2_workspace_transition_request *, hs2_dock_v2_lease **leases);
 uint16_t hs2_dock_v2_disconnect(hs2_dock_v2_server *, const hs2_dock_v2_peer *, uint64_t session_id, const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES]);
 uint16_t hs2_dock_v2_unload(hs2_dock_v2_server *);
 size_t hs2_dock_v2_active_leases(const hs2_dock_v2_server *);
