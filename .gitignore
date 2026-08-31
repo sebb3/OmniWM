@@ -23,6 +23,7 @@ DerivedData/
 
 # Build output
 dist/
+/DockPayload/build/
 
 # External frameworks (downloaded/built separately)
 Frameworks/
