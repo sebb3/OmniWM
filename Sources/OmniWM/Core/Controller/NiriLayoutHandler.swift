@@ -49,6 +49,7 @@ enum StructuralMutationOutcome: Equatable {
 
 @MainActor final class NiriLayoutHandler {
     weak var controller: WMController?
+    private var workingAreaAnimationFrames: [WorkspaceDescriptor.ID: [WindowToken: CGRect]] = [:]
 
     struct NiriLayoutPass {
         let wsId: WorkspaceDescriptor.ID
@@ -471,6 +472,20 @@ enum StructuralMutationOutcome: Equatable {
         }
 
         return plans
+    }
+
+    func prepareWorkingAreaAnimation(on displayIds: Set<CGDirectDisplayID>) {
+        guard let controller, let engine = controller.niriEngine else { return }
+        for monitor in controller.workspaceManager.monitors where displayIds.contains(monitor.displayId) {
+            guard let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id,
+                  controller.settings.layoutType(
+                      for: controller.workspaceManager.descriptor(for: workspaceId)?.name ?? ""
+                  ) == .niri
+            else {
+                continue
+            }
+            workingAreaAnimationFrames[workspaceId] = engine.captureWindowFrames(in: workspaceId)
+        }
     }
 
     private func makeWorkspaceSnapshot(
@@ -1256,6 +1271,21 @@ enum StructuralMutationOutcome: Equatable {
             let hasWindowAnimations = pass.engine.hasAnyWindowAnimationsRunning(in: pass.wsId)
             let hasColumnAnimations = pass.engine.hasAnyColumnAnimationsRunning(in: pass.wsId)
             if animationsTriggered || hasWindowAnimations || hasColumnAnimations {
+                directives.append(.startNiriScroll(workspaceId: pass.wsId))
+            }
+        }
+
+        if let oldFrames = workingAreaAnimationFrames.removeValue(forKey: pass.wsId), !oldFrames.isEmpty {
+            let newFrames = pass.engine.captureWindowFrames(
+                in: pass.wsId,
+                excluding: snapshot.excludedTokens
+            )
+            if pass.engine.triggerMoveAnimations(
+                in: pass.wsId,
+                oldFrames: oldFrames,
+                newFrames: newFrames,
+                motion: motion
+            ) {
                 directives.append(.startNiriScroll(workspaceId: pass.wsId))
             }
         }

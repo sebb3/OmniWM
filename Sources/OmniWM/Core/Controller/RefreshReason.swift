@@ -100,6 +100,7 @@ enum RefreshReason: String, Sendable {
     case workspaceConfigChanged
     case layoutConfigChanged
     case monitorSettingsChanged
+    case quakeTerminalReservedEdgeChanged
     case gapsChanged
     case workspaceTransition
     case appActivationTransition
@@ -130,6 +131,7 @@ enum RefreshReason: String, Sendable {
             .fullRescan
         case .layoutConfigChanged,
              .monitorSettingsChanged,
+             .quakeTerminalReservedEdgeChanged,
              .gapsChanged,
              .workspaceConfigChanged,
              .workspaceLayoutToggled,
@@ -165,6 +167,7 @@ enum RefreshReason: String, Sendable {
              .workspaceConfigChanged,
              .layoutConfigChanged,
              .monitorSettingsChanged,
+             .quakeTerminalReservedEdgeChanged,
              .gapsChanged,
              .workspaceTransition,
              .appActivationTransition,
