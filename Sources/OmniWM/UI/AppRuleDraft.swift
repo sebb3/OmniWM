@@ -63,6 +63,10 @@ struct AppRuleDraft: Identifiable, Equatable {
     var defaultWidth: Double
     var defaultHeightEnabled: Bool
     var defaultHeight: Double
+    var defaultPositionXEnabled: Bool
+    var defaultPositionX: Double
+    var defaultPositionYEnabled: Bool
+    var defaultPositionY: Double
     var minWidthEnabled: Bool
     var minWidth: Double
     var minHeightEnabled: Bool
@@ -79,6 +83,7 @@ struct AppRuleDraft: Identifiable, Equatable {
     /// `nil` means cascade: inherit from the most specific rule that sets it.
     var focus: WindowRuleFocusPolicy?
     var windowLevel: WindowRuleWindowLevel?
+    var displayOnAllWorkspaces: Bool?
 
     init(id: UUID = UUID(), bundleId: String = "") {
         self.id = id
@@ -92,6 +97,10 @@ struct AppRuleDraft: Identifiable, Equatable {
         defaultWidth = 800
         defaultHeightEnabled = false
         defaultHeight = 600
+        defaultPositionXEnabled = false
+        defaultPositionX = 0.5
+        defaultPositionYEnabled = false
+        defaultPositionY = 0.5
         minWidthEnabled = false
         minWidth = 400
         minHeightEnabled = false
@@ -107,6 +116,7 @@ struct AppRuleDraft: Identifiable, Equatable {
         axSubrole = ""
         focus = nil
         windowLevel = nil
+        displayOnAllWorkspaces = nil
     }
 
     init(rule: AppRule) {
@@ -121,6 +131,10 @@ struct AppRuleDraft: Identifiable, Equatable {
         defaultWidth = rule.defaultWidth ?? 800
         defaultHeightEnabled = rule.defaultHeight != nil
         defaultHeight = rule.defaultHeight ?? 600
+        defaultPositionXEnabled = rule.defaultPositionX != nil
+        defaultPositionX = rule.defaultPositionX ?? 0.5
+        defaultPositionYEnabled = rule.defaultPositionY != nil
+        defaultPositionY = rule.defaultPositionY ?? 0.5
         minWidthEnabled = rule.minWidth != nil
         minWidth = rule.minWidth ?? 400
         minHeightEnabled = rule.minHeight != nil
@@ -142,6 +156,7 @@ struct AppRuleDraft: Identifiable, Equatable {
         axSubrole = rule.axSubrole ?? ""
         focus = rule.focus
         windowLevel = rule.windowLevel
+        displayOnAllWorkspaces = rule.displayOnAllWorkspaces
     }
 
     static func == (lhs: AppRuleDraft, rhs: AppRuleDraft) -> Bool {
@@ -156,6 +171,10 @@ struct AppRuleDraft: Identifiable, Equatable {
             nanStableEqual(lhs.defaultWidth, rhs.defaultWidth) &&
             lhs.defaultHeightEnabled == rhs.defaultHeightEnabled &&
             nanStableEqual(lhs.defaultHeight, rhs.defaultHeight) &&
+            lhs.defaultPositionXEnabled == rhs.defaultPositionXEnabled &&
+            nanStableEqual(lhs.defaultPositionX, rhs.defaultPositionX) &&
+            lhs.defaultPositionYEnabled == rhs.defaultPositionYEnabled &&
+            nanStableEqual(lhs.defaultPositionY, rhs.defaultPositionY) &&
             lhs.minWidthEnabled == rhs.minWidthEnabled &&
             nanStableEqual(lhs.minWidth, rhs.minWidth) &&
             lhs.minHeightEnabled == rhs.minHeightEnabled &&
@@ -170,7 +189,8 @@ struct AppRuleDraft: Identifiable, Equatable {
             lhs.axSubroleEnabled == rhs.axSubroleEnabled &&
             lhs.axSubrole == rhs.axSubrole &&
             lhs.focus == rhs.focus &&
-            lhs.windowLevel == rhs.windowLevel
+            lhs.windowLevel == rhs.windowLevel &&
+            lhs.displayOnAllWorkspaces == rhs.displayOnAllWorkspaces
     }
 
     static func guided(from snapshot: WindowDecisionDebugSnapshot) -> AppRuleDraft? {
@@ -240,6 +260,14 @@ struct AppRuleDraft: Identifiable, Equatable {
         return nil
     }
 
+    var defaultPositionError: String? {
+        guard (!defaultPositionXEnabled || defaultPositionX.isFinite && (0 ... 1).contains(defaultPositionX)),
+              (!defaultPositionYEnabled || defaultPositionY.isFinite && (0 ... 1).contains(defaultPositionY)) else {
+            return "Default position must be between 0 and 100 percent."
+        }
+        return nil
+    }
+
     var initialContainerPrimarySpanError: String? {
         IPCRuleValidator.initialContainerPrimarySpanError(
             for: initialContainerPrimarySpanEnabled ? initialContainerPrimarySpan : nil
@@ -250,13 +278,13 @@ struct AppRuleDraft: Identifiable, Equatable {
         let rule = makeRule()
         guard rule.hasIdentifyingMatcher, !rule.hasEffect else { return nil }
         return "This rule matches windows but has no effect — set a layout, focus policy, window level, workspace, "
-            + "initial container primary span, default size, or minimum size."
+            + "initial container primary span, default size or position, workspace visibility, or minimum size."
     }
 
     var isValid: Bool {
         let rule = makeRule()
         return bundleIdError == nil && titleRegexError == nil && initialContainerPrimarySpanError == nil &&
-            defaultSizeError == nil && minSizeError == nil
+            defaultSizeError == nil && defaultPositionError == nil && minSizeError == nil
             && rule.hasIdentifyingMatcher && rule.hasEffect
     }
 
@@ -290,10 +318,13 @@ struct AppRuleDraft: Identifiable, Equatable {
             initialContainerPrimarySpan: initialContainerPrimarySpanEnabled ? initialContainerPrimarySpan : nil,
             defaultWidth: defaultWidthEnabled ? defaultWidth : nil,
             defaultHeight: defaultHeightEnabled ? defaultHeight : nil,
+            defaultPositionX: defaultPositionXEnabled ? defaultPositionX : nil,
+            defaultPositionY: defaultPositionYEnabled ? defaultPositionY : nil,
             minWidth: minWidthEnabled ? minWidth : nil,
             minHeight: minHeightEnabled ? minHeight : nil,
             focus: focus,
-            windowLevel: windowLevel
+            windowLevel: windowLevel,
+            displayOnAllWorkspaces: displayOnAllWorkspaces
         )
     }
 

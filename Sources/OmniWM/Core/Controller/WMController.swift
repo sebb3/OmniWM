@@ -1528,12 +1528,14 @@ final class WMController {
         return clampedFloatingFrame(offsetFrame, in: monitor.visibleFrame)
     }
 
-    func defaultSizedFloatingFrame(
+    func defaultFloatingFrame(
         _ frame: CGRect,
         hints: ManagedWindowAdmissionHints,
         preferredMonitor: Monitor?
     ) -> CGRect {
-        guard hints.defaultWidth != nil || hints.defaultHeight != nil else { return frame }
+        guard hints.defaultWidth != nil || hints.defaultHeight != nil ||
+            hints.defaultPositionX != nil || hints.defaultPositionY != nil
+        else { return frame }
 
         var target = frame
         target.size.width = hints.defaultWidth.map { CGFloat($0) } ?? target.width
@@ -1546,7 +1548,23 @@ final class WMController {
         if hints.defaultHeight != nil {
             target.size.height = min(target.height, visibleFrame.height)
         }
+        let availableWidth = max(0, visibleFrame.width - target.width)
+        let availableHeight = max(0, visibleFrame.height - target.height)
+        if let x = hints.defaultPositionX {
+            target.origin.x = visibleFrame.minX + CGFloat(x) * availableWidth
+        }
+        if let y = hints.defaultPositionY {
+            target.origin.y = visibleFrame.minY + CGFloat(y) * availableHeight
+        }
         return clampedFloatingFrame(target, in: visibleFrame)
+    }
+
+    func defaultSizedFloatingFrame(
+        _ frame: CGRect,
+        hints: ManagedWindowAdmissionHints,
+        preferredMonitor: Monitor?
+    ) -> CGRect {
+        defaultFloatingFrame(frame, hints: hints, preferredMonitor: preferredMonitor)
     }
 
     private func shouldApplyFloatingFrameImmediately(
@@ -2585,6 +2603,7 @@ final class WMController {
                    bundleId: evaluation.facts.ax.bundleId,
                    mode: effectiveTrackedMode,
                    facts: evaluation.facts,
+                   ruleEffects: evaluation.decision.ruleEffects,
                    admissionHints: evaluation.decision.admissionHints
                )
             {

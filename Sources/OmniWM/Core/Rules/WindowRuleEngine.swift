@@ -47,6 +47,7 @@ struct ManagedWindowRuleEffects: Equatable, Sendable {
     var matchedRuleId: UUID?
     var focus: WindowRuleFocusPolicy?
     var windowLevel: WindowRuleWindowLevel?
+    var displayOnAllWorkspaces: Bool?
 
     static let none = ManagedWindowRuleEffects()
 }
@@ -55,6 +56,8 @@ struct ManagedWindowAdmissionHints: Equatable, Sendable {
     var initialNiriContainerPrimarySpan: Double?
     var defaultWidth: Double?
     var defaultHeight: Double?
+    var defaultPositionX: Double?
+    var defaultPositionY: Double?
 
     static let none = ManagedWindowAdmissionHints()
 }
@@ -472,13 +475,17 @@ final class WindowRuleEngine {
                 minHeight: oneShot.minHeight ?? decision.ruleEffects.minHeight,
                 matchedRuleId: oneShot.id,
                 focus: oneShot.focus ?? decision.ruleEffects.focus,
-                windowLevel: oneShot.windowLevel ?? decision.ruleEffects.windowLevel
+                windowLevel: oneShot.windowLevel ?? decision.ruleEffects.windowLevel,
+                displayOnAllWorkspaces: oneShot.displayOnAllWorkspaces
+                    ?? decision.ruleEffects.displayOnAllWorkspaces
             ),
             admissionHints: ManagedWindowAdmissionHints(
                 initialNiriContainerPrimarySpan: oneShot.validInitialContainerPrimarySpan
                     ?? decision.admissionHints.initialNiriContainerPrimarySpan,
                 defaultWidth: oneShot.defaultWidth ?? decision.admissionHints.defaultWidth,
-                defaultHeight: oneShot.defaultHeight ?? decision.admissionHints.defaultHeight
+                defaultHeight: oneShot.defaultHeight ?? decision.admissionHints.defaultHeight,
+            defaultPositionX: oneShot.validDefaultPositionX ?? decision.admissionHints.defaultPositionX,
+            defaultPositionY: oneShot.validDefaultPositionY ?? decision.admissionHints.defaultPositionY
             ),
             heuristicReasons: decision.heuristicReasons,
             deferredReason: decision.deferredReason
@@ -537,12 +544,17 @@ final class WindowRuleEngine {
             minHeight: userRule?.rule.minHeight,
             matchedRuleId: userRule?.rule.id,
             focus: cascade(in: compiledUserRules, facts: facts) { $0.focus },
-            windowLevel: cascade(in: compiledUserRules, facts: facts) { $0.windowLevel }
+            windowLevel: cascade(in: compiledUserRules, facts: facts) { $0.windowLevel },
+            displayOnAllWorkspaces: cascade(in: compiledUserRules, facts: facts) {
+                $0.displayOnAllWorkspaces
+            }
         )
         let admissionHints = ManagedWindowAdmissionHints(
             initialNiriContainerPrimarySpan: userRule?.rule.validInitialContainerPrimarySpan,
             defaultWidth: cascade(in: compiledUserRules, facts: facts) { $0.defaultWidth },
-            defaultHeight: cascade(in: compiledUserRules, facts: facts) { $0.defaultHeight }
+            defaultHeight: cascade(in: compiledUserRules, facts: facts) { $0.defaultHeight },
+            defaultPositionX: cascade(in: compiledUserRules, facts: facts) { $0.validDefaultPositionX },
+            defaultPositionY: cascade(in: compiledUserRules, facts: facts) { $0.validDefaultPositionY }
         )
 
         if let userRule,

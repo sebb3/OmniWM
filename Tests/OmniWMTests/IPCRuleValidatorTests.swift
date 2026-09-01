@@ -119,6 +119,48 @@ final class IPCRuleValidatorTests: XCTestCase {
         XCTAssertTrue(flags.contains("--default-height"))
     }
 
+    func testDefaultPositionAndWorkspaceVisibilityValidateAndRoundTrip() throws {
+        for value in [-0.001, 1.001, .nan, .infinity, -.infinity] {
+            let report = IPCRuleValidator.validate(
+                IPCRuleDefinition(bundleId: "com.test.app", defaultPositionX: value)
+            )
+            XCTAssertNotNil(report.defaultPositionError)
+            XCTAssertFalse(report.isValid)
+        }
+
+        let definition = IPCRuleDefinition(
+            bundleId: "com.apple.finder",
+            layout: .float,
+            defaultPositionX: 0.25,
+            defaultPositionY: 0.75,
+            displayOnAllWorkspaces: false
+        )
+        XCTAssertTrue(IPCRuleValidator.validate(definition).isValid)
+        let data = try JSONEncoder().encode(definition)
+        XCTAssertEqual(try JSONDecoder().decode(IPCRuleDefinition.self, from: data), definition)
+
+        let snapshot = IPCRuleSnapshot(
+            id: "position",
+            position: 1,
+            bundleId: "com.apple.finder",
+            layout: .float,
+            defaultPositionX: 0.25,
+            defaultPositionY: 0.75,
+            displayOnAllWorkspaces: false,
+            specificity: 2,
+            isValid: true
+        )
+        let snapshotData = try JSONEncoder().encode(snapshot)
+        XCTAssertEqual(try JSONDecoder().decode(IPCRuleSnapshot.self, from: snapshotData), snapshot)
+    }
+
+    func testDefaultPositionAndWorkspaceVisibilityManifestOptions() {
+        let flags = Set(IPCAutomationManifest.ruleDefinitionOptionDescriptors.map(\.flag))
+        XCTAssertTrue(flags.contains("--default-position-x"))
+        XCTAssertTrue(flags.contains("--default-position-y"))
+        XCTAssertTrue(flags.contains("--display-on-all-workspaces"))
+    }
+
     func testInitialContainerPrimarySpanInclusiveBoundsAccepted() {
         for value in [0.05, 0.5, 1.0] {
             let report = IPCRuleValidator.validate(

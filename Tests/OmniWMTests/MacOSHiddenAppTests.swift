@@ -204,6 +204,31 @@ final class MacOSHiddenAppTests: XCTestCase {
         XCTAssertGreaterThan(frameReadCount, frameReadsBeforeUnhide)
     }
 
+    func testFloatingWindowDisplayedOnAllWorkspacesIsNotParked() throws {
+        let controller = makeController()
+        let sourceWorkspaceId = try XCTUnwrap(
+            controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
+        )
+        _ = try XCTUnwrap(
+            controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        )
+        _ = controller.workspaceManager.focusWorkspace(named: "1")
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateApplication(880_046), windowId: 880_146),
+            pid: 880_046,
+            windowId: 880_146,
+            to: sourceWorkspaceId,
+            ruleEffects: ManagedWindowRuleEffects(displayOnAllWorkspaces: true)
+        )
+        XCTAssertTrue(controller.workspaceManager.setWindowMode(.floating, for: token))
+        _ = controller.workspaceManager.focusWorkspace(named: "2")
+
+        controller.layoutRefreshController.hideInactiveWorkspacesSync()
+
+        XCTAssertNil(controller.workspaceManager.hiddenState(for: token))
+        XCTAssertNil(controller.axManager.pendingParkFrameRequest(for: token.windowId))
+    }
+
     func testNativeFullscreenReasonSurvivesAppHideAndUnhide() throws {
         let controller = makeController()
         let workspaceId = try XCTUnwrap(controller.workspaceManager.workspaceId(for: "1", createIfMissing: true))

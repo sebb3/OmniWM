@@ -985,6 +985,16 @@ public enum IPCAutomationManifest {
             valuePlaceholder: "<points>"
         ),
         .init(
+            flag: "--default-position-x",
+            summary: "Set the initial horizontal floating-window position as a 0–1 monitor proportion.",
+            valuePlaceholder: "<proportion>"
+        ),
+        .init(
+            flag: "--default-position-y",
+            summary: "Set the initial vertical floating-window position as a 0–1 monitor proportion.",
+            valuePlaceholder: "<proportion>"
+        ),
+        .init(
             flag: "--min-width",
             summary: "Set the minimum floating width in points.",
             valuePlaceholder: "<points>"
@@ -1003,6 +1013,11 @@ public enum IPCAutomationManifest {
             flag: "--window-level",
             summary: "Set the window stacking level. Omit to cascade to a less specific rule.",
             valuePlaceholder: "<auto|below|normal|floating>"
+        ),
+        .init(
+            flag: "--display-on-all-workspaces",
+            summary: "Keep matching floating windows visible across OmniWM workspaces; omit to cascade.",
+            valuePlaceholder: "<on|off>"
         ),
         .init(
             flag: "--one-shot",

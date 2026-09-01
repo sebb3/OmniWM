@@ -656,6 +656,7 @@ final class AXEventHandler {
         bundleId: String?,
         mode: TrackedWindowMode,
         facts: WindowRuleFacts,
+        ruleEffects: ManagedWindowRuleEffects? = nil,
         admissionHints: ManagedWindowAdmissionHints? = nil,
         sizeConstraints: WindowSizeConstraints? = nil
     ) -> Bool {
@@ -676,6 +677,21 @@ final class AXEventHandler {
         )
         guard rebindResult.isHandled else {
             return false
+        }
+        if let ruleEffects,
+           let reboundEntry = controller?.workspaceManager.entry(for: token)
+        {
+            _ = controller?.workspaceManager.addWindow(
+                reboundEntry.axRef,
+                pid: reboundEntry.pid,
+                windowId: reboundEntry.windowId,
+                to: reboundEntry.workspaceId,
+                mode: reboundEntry.mode,
+                ruleEffects: ruleEffects,
+                admissionHints: admissionHints ?? reboundEntry.admissionHints,
+                interactionPolicy: reboundEntry.interactionPolicy,
+                managedReplacementMetadata: reboundEntry.managedReplacementMetadata
+            )
         }
         return true
     }
@@ -2205,7 +2221,9 @@ final class AXEventHandler {
         let entry = controller.workspaceManager.entry(for: entry.token) ?? entry
         let wsId = entry.workspaceId
         let monitorId = controller.workspaceManager.monitorId(for: wsId)
-        let shouldActivateWorkspace = !isWorkspaceActive && !controller.isTransferringWindow
+        let shouldActivateWorkspace = !isWorkspaceActive
+            && !entry.displaysOnAllWorkspaces
+            && !controller.isTransferringWindow
         let isRetriedAuthoritativeSystemModalFocus = source.isAuthoritative
             && origin == .retry
             && controller.workspaceManager.systemModalFocusToken == entry.token

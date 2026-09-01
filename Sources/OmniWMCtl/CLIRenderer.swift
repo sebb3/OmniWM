@@ -385,6 +385,8 @@ enum CLIRenderer {
                 rule.layout.rawValue,
                 rule.assignToWorkspace ?? "-",
                 percentageDescription(rule.initialContainerPrimarySpan),
+                defaultPositionDescription(x: rule.defaultPositionX, y: rule.defaultPositionY),
+                optionalBoolDescription(rule.displayOnAllWorkspaces),
                 rule.titleRegex ?? "-",
                 String(rule.specificity),
                 ruleValidityDescription(rule)
@@ -399,6 +401,8 @@ enum CLIRenderer {
                 "LAYOUT",
                 "WORKSPACE",
                 "INITIAL PRIMARY SPAN",
+                "DEFAULT POSITION",
+                "ALL WORKSPACES",
                 "TITLE REGEX",
                 "SPECIFICITY",
                 "VALID"
@@ -406,6 +410,15 @@ enum CLIRenderer {
             rows: rows,
             format: format
         )
+    }
+
+    private static func defaultPositionDescription(x: Double?, y: Double?) -> String {
+        guard x != nil || y != nil else { return "-" }
+        return "x=\(percentageDescription(x)) y=\(percentageDescription(y))"
+    }
+
+    private static func optionalBoolDescription(_ value: Bool?) -> String {
+        value.map(boolDescription) ?? "-"
     }
 
     private static func percentageDescription(_ proportion: Double?) -> String {

@@ -1751,6 +1751,7 @@ import QuartzCore
                    bundleId: bundleId ?? evaluation.facts.ax.bundleId,
                    mode: trackedMode,
                    facts: evaluation.facts,
+                   ruleEffects: evaluation.decision.ruleEffects,
                    admissionHints: evaluation.decision.admissionHints,
                    sizeConstraints: candidate.enumeratedWindow.decisionEvidence.sizeConstraints
                )
@@ -2739,6 +2740,7 @@ import QuartzCore
         var allEntries: [(workspaceId: WorkspaceDescriptor.ID, windowId: Int)] = []
         for workspace in controller.workspaceManager.workspaces {
             for entry in controller.workspaceManager.entries(in: workspace.id) {
+                guard !entry.displaysOnAllWorkspaces else { continue }
                 allEntries.append((workspace.id, entry.windowId))
             }
         }
@@ -2832,6 +2834,7 @@ import QuartzCore
         allEntries.reserveCapacity(workspaceEntries.reduce(into: 0) { $0 += $1.entries.count })
         for snapshot in workspaceEntries {
             for entry in snapshot.entries {
+                guard !entry.displaysOnAllWorkspaces else { continue }
                 allEntries.append((snapshot.workspace.id, entry.windowId))
             }
         }
@@ -2847,6 +2850,7 @@ import QuartzCore
         let hiddenPlacementMonitors = controller.workspaceManager.monitors.map(HiddenPlacementMonitorContext.init)
         for snapshot in workspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
             for entry in snapshot.entries {
+                guard !entry.displaysOnAllWorkspaces else { continue }
                 inactiveWindowJobs.append((entry.pid, entry.windowId))
             }
         }
@@ -2887,6 +2891,13 @@ import QuartzCore
     ) {
         guard let controller else { return }
         for entry in entries {
+            if entry.displaysOnAllWorkspaces {
+                controller.axManager.markWindowActive(entry.windowId)
+                if controller.workspaceManager.hiddenState(for: entry.token)?.workspaceInactive == true {
+                    unhideWindow(entry, monitor: monitor)
+                }
+                continue
+            }
             guard controller.workspaceManager.layoutReason(for: entry.token) != .nativeFullscreen else {
                 continue
             }

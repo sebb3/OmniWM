@@ -505,6 +505,25 @@ final class RuntimeArchitectureTests: XCTestCase {
     }
 
     @MainActor
+    func testAllWorkspaceFloatingSurfaceFocusKeepsCurrentWorkspaceActive() throws {
+        let fixture = try Self.inactiveWorkspaceFocusFixture(
+            policy: .full,
+            pid: 765_762,
+            windowId: 765_862,
+            ruleEffects: ManagedWindowRuleEffects(displayOnAllWorkspaces: true),
+            mode: .floating
+        )
+
+        fixture.controller.axEventHandler.handleActivationFactsResolved(fixture.facts)
+
+        XCTAssertEqual(
+            fixture.controller.workspaceManager.activeWorkspace(on: fixture.monitorId)?.id,
+            fixture.activeWorkspaceId
+        )
+        XCTAssertEqual(fixture.controller.workspaceManager.focusedToken, fixture.token)
+    }
+
+    @MainActor
     func testNiriPointerHoverConfirmedFocusDoesNotMoveMouseToFocusedWindowAfterAnimationSettles() throws {
         let fixture = try Self.managedNiriActivationFixture(
             origin: .pointerHover,
@@ -7499,6 +7518,8 @@ final class RuntimeArchitectureTests: XCTestCase {
         policy: WindowInteractionPolicy,
         pid: pid_t,
         windowId: Int,
+        ruleEffects: ManagedWindowRuleEffects = .none,
+        mode: TrackedWindowMode = .tiling,
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> (
@@ -7525,7 +7546,9 @@ final class RuntimeArchitectureTests: XCTestCase {
             axRef,
             pid: pid,
             windowId: windowId,
-            to: surfaceWorkspaceId
+            to: surfaceWorkspaceId,
+            mode: mode,
+            ruleEffects: ruleEffects
         )
         controller.workspaceManager.setInteractionPolicy(policy, for: token)
         _ = controller.workspaceManager.focusWorkspace(named: "1")

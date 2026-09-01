@@ -59,6 +59,32 @@ final class WindowRuleCascadeTests: XCTestCase {
         XCTAssertEqual(other.ruleEffects.focus, .never)
     }
 
+    func testPositionAndAllWorkspaceVisibilityCascadePerField() {
+        let engine = WindowRuleEngine()
+        engine.rebuild(rules: [
+            AppRule(
+                bundleId: AppRule.wildcardBundleId,
+                defaultPositionX: 0.1,
+                defaultPositionY: 0.9,
+                displayOnAllWorkspaces: true
+            ),
+            AppRule(
+                bundleId: "com.spotify.client",
+                defaultPositionX: 0.25,
+                displayOnAllWorkspaces: false
+            ),
+        ])
+
+        let decision = engine.decision(
+            for: facts(bundleId: "com.spotify.client"),
+            token: nil,
+            appFullscreen: false
+        )
+        XCTAssertEqual(decision.admissionHints.defaultPositionX, 0.25)
+        XCTAssertEqual(decision.admissionHints.defaultPositionY, 0.9)
+        XCTAssertEqual(decision.ruleEffects.displayOnAllWorkspaces, false)
+    }
+
     func testNarrowRuleWithUnrelatedEffectDoesNotShadowDefault() {
         // The winner-takes-all path would drop the wildcard's level here, since
         // the float rule is more specific and says nothing about the level.

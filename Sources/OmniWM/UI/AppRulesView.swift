@@ -276,6 +276,12 @@ struct AppRuleSidebarRow: View {
         if rule.defaultWidth != nil || rule.defaultHeight != nil {
             RuleBadge(text: "Default", color: .mint, accessibilityLabel: "Default floating size set")
         }
+        if rule.defaultPositionX != nil || rule.defaultPositionY != nil {
+            RuleBadge(text: "Position", color: .cyan, accessibilityLabel: "Default floating position set")
+        }
+        if rule.displayOnAllWorkspaces == true {
+            RuleBadge(text: "All WS", color: .pink, accessibilityLabel: "Displayed on all workspaces")
+        }
         if rule.hasAdvancedMatchers {
             RuleBadge(text: "Advanced", color: .purple, accessibilityLabel: "Advanced matchers")
         }
