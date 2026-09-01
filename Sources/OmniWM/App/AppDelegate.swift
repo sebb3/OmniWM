@@ -151,6 +151,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     func finishBootstrap() {
         guard !didFinishBootstrap else { return }
         didFinishBootstrap = true
+        DockPayloadInjector.injectOnStartup()
 
         let storagePaths = OmniWMStoragePaths.live
         let runtimeState = RuntimeStateStore(directory: storagePaths.stateDirectory)

@@ -372,6 +372,31 @@ final class GapSettingsTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testLeftQuakeTerminalShiftsNiriWorkingAreaWithoutShrinkingIt() throws {
+        let settings = makeSettingsStore()
+        settings.outerGapLeft = 12
+        let controller = WMController(settings: settings)
+        let monitor = makeMonitor(displayId: 1, name: "Left")
+
+        let widthBeforeQuake = controller.niriWorkingFrame(for: monitor).width
+        controller.updateQuakeTerminalReservedEdge(.init(displayId: monitor.displayId, width: 500))
+
+        let expectedFrame = CGRect(x: 512, y: 0, width: widthBeforeQuake, height: 900)
+        XCTAssertEqual(controller.niriWorkingFrame(for: monitor), expectedFrame)
+
+        let workspaceId = try XCTUnwrap(
+            controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
+        )
+        XCTAssertEqual(
+            controller.layoutRefreshController.buildMonitorSnapshot(
+                for: monitor,
+                workspaceId: workspaceId
+            ).workingFrame,
+            expectedFrame
+        )
+    }
+
     private func makeMonitor(displayId: CGDirectDisplayID, name: String, originX: CGFloat = 0) -> Monitor {
         Monitor(
             id: .init(displayId: displayId),

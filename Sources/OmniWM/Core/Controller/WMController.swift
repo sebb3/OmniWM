@@ -1018,12 +1018,25 @@ final class WMController {
     }
 
     func insetWorkingFrame(for monitor: Monitor) -> CGRect {
+        workingFrame(
+            for: monitor,
+            reservedLeftInset: quakeTerminalReservedLeftInset(for: monitor)
+        )
+    }
+
+    func niriWorkingFrame(for monitor: Monitor) -> CGRect {
+        var frame = insetWorkingFrame(for: monitor)
+        frame.size.width = workingFrame(for: monitor, reservedLeftInset: 0).width
+        return frame
+    }
+
+    private func workingFrame(for monitor: Monitor, reservedLeftInset: CGFloat) -> CGRect {
         let scale = NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
         let reservedTopInset = workspaceBarReservedTopInset(for: monitor)
         let gaps = settings.resolvedGapSettings(for: monitor)
         let menuBarInset = max(0, monitor.frame.maxY - monitor.visibleFrame.maxY)
         let struts = Struts(
-            left: gaps.outerGapLeft + quakeTerminalReservedLeftInset(for: monitor),
+            left: gaps.outerGapLeft + reservedLeftInset,
             right: gaps.outerGapRight,
             top: normalizedTopStrut(
                 top: gaps.outerGapTop,

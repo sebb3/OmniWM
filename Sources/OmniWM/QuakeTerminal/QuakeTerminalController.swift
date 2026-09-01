@@ -149,6 +149,20 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         runtimeConfig.action_cb = { app, target, action in
             guard let app, let userdata = ghostty_app_userdata(app) else { return false }
             switch action.tag {
+            case GHOSTTY_ACTION_NEW_TAB,
+                 GHOSTTY_ACTION_CLOSE_TAB,
+                 GHOSTTY_ACTION_NEW_SPLIT,
+                 GHOSTTY_ACTION_GOTO_SPLIT,
+                 GHOSTTY_ACTION_GOTO_TAB,
+                 GHOSTTY_ACTION_MOVE_TAB,
+                 GHOSTTY_ACTION_EQUALIZE_SPLITS,
+                 GHOSTTY_ACTION_CLOSE_WINDOW,
+                 GHOSTTY_ACTION_OPEN_CONFIG:
+                return MainActor.assumeIsolated {
+                    let context = Unmanaged<GhosttyAppCallbackContext>.fromOpaque(userdata).takeUnretainedValue()
+                    guard let controller = context.controller else { return false }
+                    return controller.handleGhosttyHostAction(action)
+                }
             case GHOSTTY_ACTION_CONFIG_CHANGE:
                 guard target.tag == GHOSTTY_TARGET_APP,
                       let config = action.action.config_change.config else { return false }
@@ -282,6 +296,89 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
             opacity: settings.quakeTerminalOpacity,
             backgroundEffect: settings.quakeTerminalBackgroundEffect
         )
+    }
+
+    private func handleGhosttyHostAction(_ action: ghostty_action_s) -> Bool {
+        let hostAction: QuakeGhosttyHostAction
+        switch action.tag {
+        case GHOSTTY_ACTION_NEW_TAB:
+            hostAction = .newTab
+        case GHOSTTY_ACTION_CLOSE_TAB:
+            hostAction = .closeTab(action.action.close_tab_mode)
+        case GHOSTTY_ACTION_NEW_SPLIT:
+            hostAction = .newSplit(QuakeGhosttyHostAction.splitPlacement(action.action.new_split))
+        case GHOSTTY_ACTION_GOTO_SPLIT:
+            hostAction = .gotoSplit(QuakeGhosttyHostAction.splitTarget(action.action.goto_split))
+        case GHOSTTY_ACTION_GOTO_TAB:
+            guard let target = QuakeGhosttyHostAction.tabTarget(action.action.goto_tab) else { return false }
+            hostAction = .gotoTab(target)
+        case GHOSTTY_ACTION_MOVE_TAB:
+            hostAction = .moveTab(Int(action.action.move_tab.amount))
+        case GHOSTTY_ACTION_EQUALIZE_SPLITS:
+            hostAction = .equalizeSplits
+        case GHOSTTY_ACTION_CLOSE_WINDOW:
+            hostAction = .closeWindow
+        case GHOSTTY_ACTION_OPEN_CONFIG:
+            hostAction = .openConfig
+        default:
+            return false
+        }
+        performGhosttyHostAction(hostAction)
+        return true
+    }
+
+    private func performGhosttyHostAction(_ action: QuakeGhosttyHostAction) {
+        switch action {
+        case .newTab:
+            requestNewTab()
+        case let .closeTab(mode):
+            switch mode {
+            case GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER:
+                for index in tabs.indices.reversed() where index != activeTabIndex {
+                    closeTab(at: index)
+                }
+            case GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT:
+                guard activeTabIndex + 1 < tabs.count else { return }
+                for index in stride(from: tabs.count - 1, through: activeTabIndex + 1, by: -1) {
+                    closeTab(at: index)
+                }
+            default:
+                requestCloseActiveTab()
+            }
+        case let .newSplit(placement):
+            splitActivePane(
+                direction: placement.direction,
+                newViewFirst: placement.newViewFirst
+            )
+        case let .gotoSplit(target):
+            switch target {
+            case .previous: activeTab?.splitContainer.navigateByTraversalOffset(-1)
+            case .next: activeTab?.splitContainer.navigateByTraversalOffset(1)
+            case let .direction(direction): navigatePane(direction: direction)
+            }
+        case let .gotoTab(target):
+            switch target {
+            case .previous: selectPreviousTab()
+            case .next: selectNextTab()
+            case .last: switchToTab(at: tabs.count - 1)
+            case let .index(index): switchToTab(at: index)
+            }
+        case let .moveTab(amount):
+            moveActiveTab(by: amount)
+        case .equalizeSplits:
+            equalizeSplits()
+        case .closeWindow:
+            if visible { animateOut() }
+        case .openConfig:
+            let path = ghostty_config_open_path()
+            defer { ghostty_string_free(path) }
+            guard let pointer = path.ptr, path.len > 0 else { return }
+            let url = URL(fileURLWithPath: String(decoding: UnsafeBufferPointer(
+                start: UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self),
+                count: Int(path.len)
+            ), as: UTF8.self))
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func reloadOpacityConfig() {
@@ -476,7 +573,6 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     private func createWindow() {
         let win = QuakeTerminalWindow()
         win.delegate = self
-        win.tabController = self
         self.window = win
         surfaceCoordinator.register(
             window: win,
@@ -536,11 +632,16 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         return tab
     }
 
-    func splitActivePane(direction: SplitDirection) {
+    func splitActivePane(direction: SplitDirection, newViewFirst: Bool = false) {
         guard let tab = activeTab,
               let focused = tab.focusedSurfaceView,
               let newView = createSurfaceView() else { return }
-        tab.splitContainer.split(view: focused, direction: direction, newView: newView)
+        tab.splitContainer.split(
+            view: focused,
+            direction: direction,
+            newViewFirst: newViewFirst,
+            newView: newView
+        )
         window?.makeFirstResponder(newView)
     }
 
@@ -650,6 +751,16 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     func requestCloseActiveTab() {
         guard !tabs.isEmpty else { return }
         closeTab(at: activeTabIndex)
+    }
+
+    private func moveActiveTab(by amount: Int) {
+        guard tabs.count > 1, amount != 0 else { return }
+        let destination = (activeTabIndex + amount).quotientAndRemainder(dividingBy: tabs.count).remainder
+        let normalizedDestination = destination >= 0 ? destination : destination + tabs.count
+        let tab = tabs.remove(at: activeTabIndex)
+        tabs.insert(tab, at: normalizedDestination)
+        activeTabIndex = normalizedDestination
+        switchToTab(at: activeTabIndex)
     }
 
     private func updateTabBarVisibility() {
