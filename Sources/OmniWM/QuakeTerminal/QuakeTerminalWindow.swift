@@ -3,6 +3,52 @@
 
 import Cocoa
 
+@MainActor
+final class QuakeTerminalFocusBorderWindow: NSPanel {
+    static let borderWidth: CGFloat = 3
+
+    convenience init() {
+        self.init(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        ignoresMouseEvents = true
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let border = NSView(frame: .zero)
+        border.autoresizingMask = [.width, .height]
+        border.wantsLayer = true
+        border.layer?.borderWidth = Self.borderWidth
+        border.layer?.borderColor = NSColor.systemYellow.cgColor
+        border.layer?.cornerRadius = 9 + Self.borderWidth
+        contentView = border
+    }
+
+    static func frame(around frame: CGRect) -> CGRect {
+        frame.insetBy(dx: -borderWidth, dy: -borderWidth)
+    }
+
+    func show(around target: NSWindow) {
+        setFrame(Self.frame(around: target.frame), display: true)
+        level = target.level
+        if parent !== target {
+            parent?.removeChildWindow(self)
+            target.addChildWindow(self, ordered: .above)
+        }
+        orderFront(nil)
+    }
+
+    func hide() {
+        parent?.removeChildWindow(self)
+        orderOut(nil)
+    }
+}
+
 final class QuakeTerminalWindow: NSPanel {
     override var canBecomeKey: Bool {
         true
@@ -14,15 +60,6 @@ final class QuakeTerminalWindow: NSPanel {
 
     var initialFrame: NSRect?
     var isAnimating: Bool = false
-    weak var tabController: QuakeTerminalController?
-
-    private static let tabIndexByDigitKeyCode: [UInt16: Int] = [
-        18: 0, 19: 1, 20: 2, 21: 3, 23: 4, 22: 5, 26: 6, 28: 7, 25: 8
-    ]
-
-    static func tabIndex(forDigitKeyCode keyCode: UInt16) -> Int? {
-        tabIndexByDigitKeyCode[keyCode]
-    }
 
     convenience init() {
         self.init(
@@ -54,83 +91,4 @@ final class QuakeTerminalWindow: NSPanel {
         }
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
-
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let keyCode = event.keyCode
-
-        if flags == .command {
-            if let tabIndex = Self.tabIndex(forDigitKeyCode: keyCode) {
-                tabController?.selectTab(at: tabIndex)
-                return true
-            }
-            switch keyCode {
-            case 2:
-                tabController?.splitActivePane(direction: .horizontal)
-                return true
-            case 13:
-                tabController?.requestCloseActiveTab()
-                return true
-            case 17:
-                tabController?.requestNewTab()
-                return true
-            default:
-                break
-            }
-        }
-
-        if flags == [.command, .option] {
-            switch keyCode {
-            case 123: // Cmd+Option+Left
-                tabController?.navigatePane(direction: .left)
-                return true
-            case 124: // Cmd+Option+Right
-                tabController?.navigatePane(direction: .right)
-                return true
-            case 125: // Cmd+Option+Down
-                tabController?.navigatePane(direction: .down)
-                return true
-            case 126: // Cmd+Option+Up
-                tabController?.navigatePane(direction: .up)
-                return true
-            default:
-                break
-            }
-        }
-
-        if flags == [.command, .shift] {
-            switch keyCode {
-            case 30: // Cmd+Shift+]
-                tabController?.selectNextTab()
-                return true
-            case 33: // Cmd+Shift+[
-                tabController?.selectPreviousTab()
-                return true
-            case 2: // Cmd+Shift+D
-                tabController?.splitActivePane(direction: .vertical)
-                return true
-            case 13: // Cmd+Shift+W
-                tabController?.closeActivePane()
-                return true
-            case 24: // Cmd+Shift+= (equalize)
-                tabController?.equalizeSplits()
-                return true
-            default:
-                break
-            }
-        }
-
-        if flags == .control && keyCode == 48 { // Ctrl+Tab
-            tabController?.selectNextTab()
-            return true
-        }
-
-        if flags == [.control, .shift] && keyCode == 48 { // Ctrl+Shift+Tab
-            tabController?.selectPreviousTab()
-            return true
-        }
-
-        return super.performKeyEquivalent(with: event)
-    }
 }

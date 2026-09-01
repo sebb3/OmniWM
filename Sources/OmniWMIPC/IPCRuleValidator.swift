@@ -11,6 +11,7 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
     public let initialContainerPrimarySpanError: String?
     public let effectError: String?
     public let defaultSizeError: String?
+    public let defaultPositionError: String?
     public let minSizeError: String?
 
     public init(
@@ -21,6 +22,7 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
         initialContainerPrimarySpanError: String? = nil,
         effectError: String? = nil,
         defaultSizeError: String? = nil,
+        defaultPositionError: String? = nil,
         minSizeError: String? = nil
     ) {
         self.bundleIdError = bundleIdError
@@ -30,6 +32,7 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
         self.initialContainerPrimarySpanError = initialContainerPrimarySpanError
         self.effectError = effectError
         self.defaultSizeError = defaultSizeError
+        self.defaultPositionError = defaultPositionError
         self.minSizeError = minSizeError
     }
 
@@ -42,6 +45,7 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
             initialContainerPrimarySpanError,
             effectError,
             defaultSizeError,
+            defaultPositionError,
             minSizeError
         ]
         .compactMap { $0 }
@@ -92,14 +96,17 @@ public enum IPCRuleValidator {
             || rule.initialContainerPrimarySpan.map { initialContainerPrimarySpanError(for: $0) == nil } == true
             || rule.defaultWidth != nil
             || rule.defaultHeight != nil
+            || rule.defaultPositionX != nil
+            || rule.defaultPositionY != nil
             || rule.minWidth != nil
             || rule.minHeight != nil
             || rule.focus != nil
             || rule.windowLevel != nil
+            || rule.displayOnAllWorkspaces != nil
         return hasEffect
             ? nil
-            : "Set a layout, workspace, initial container primary span, default size, minimum size, "
-            + "focus policy, or window level — this rule has no effect"
+            : "Set a layout, workspace, initial container primary span, default size or position, "
+            + "minimum size, focus policy, window level, or workspace visibility — this rule has no effect"
     }
 
     public static func initialContainerPrimarySpanError(for value: Double?) -> String? {
@@ -126,6 +133,15 @@ public enum IPCRuleValidator {
         }
         if let height = rule.defaultHeight, !(height.isFinite && height > 0) {
             return "Default height must be a positive number"
+        }
+        return nil
+    }
+
+    public static func defaultPositionError(for rule: IPCRuleDefinition) -> String? {
+        for value in [rule.defaultPositionX, rule.defaultPositionY].compactMap({ $0 }) {
+            if !(value.isFinite && (0 ... 1).contains(value)) {
+                return "Default position must be a finite proportion from 0 through 1"
+            }
         }
         return nil
     }
@@ -157,6 +173,7 @@ public enum IPCRuleValidator {
             initialContainerPrimarySpanError: initialContainerPrimarySpanError(for: rule.initialContainerPrimarySpan),
             effectError: effectError(for: rule),
             defaultSizeError: defaultSizeError(for: rule),
+            defaultPositionError: defaultPositionError(for: rule),
             minSizeError: minSizeError(for: rule)
         )
     }

@@ -72,6 +72,7 @@ enum IPCRuleProjection {
             validation.initialContainerPrimarySpanError,
             validation.effectError,
             validation.defaultSizeError,
+            validation.defaultPositionError,
             validation.minSizeError
         ].compactMap { $0 }
         let isValid = validationMessages.isEmpty
@@ -90,10 +91,13 @@ enum IPCRuleProjection {
             initialContainerPrimarySpan: definition.initialContainerPrimarySpan,
             defaultWidth: definition.defaultWidth,
             defaultHeight: definition.defaultHeight,
+            defaultPositionX: definition.defaultPositionX,
+            defaultPositionY: definition.defaultPositionY,
             minWidth: definition.minWidth,
             minHeight: definition.minHeight,
             focus: definition.focus,
             windowLevel: definition.windowLevel,
+            displayOnAllWorkspaces: definition.displayOnAllWorkspaces,
             isOneShot: isOneShot,
             specificity: rule.specificity,
             isValid: isValid,
@@ -116,10 +120,13 @@ enum IPCRuleProjection {
                 initialContainerPrimarySpan: rule.initialContainerPrimarySpan,
                 defaultWidth: rule.defaultWidth,
                 defaultHeight: rule.defaultHeight,
+                defaultPositionX: rule.defaultPositionX,
+                defaultPositionY: rule.defaultPositionY,
                 minWidth: rule.minWidth,
                 minHeight: rule.minHeight,
                 focus: ipcRuleFocus(from: rule.focus),
-                windowLevel: ipcRuleWindowLevel(from: rule.windowLevel)
+                windowLevel: ipcRuleWindowLevel(from: rule.windowLevel),
+                displayOnAllWorkspaces: rule.displayOnAllWorkspaces
             )
         )
     }
@@ -139,10 +146,13 @@ enum IPCRuleProjection {
             initialContainerPrimarySpan: normalized.initialContainerPrimarySpan,
             defaultWidth: normalized.defaultWidth,
             defaultHeight: normalized.defaultHeight,
+            defaultPositionX: normalized.defaultPositionX,
+            defaultPositionY: normalized.defaultPositionY,
             minWidth: normalized.minWidth,
             minHeight: normalized.minHeight,
             focus: windowRuleFocus(from: normalized.focus),
-            windowLevel: windowRuleWindowLevel(from: normalized.windowLevel)
+            windowLevel: windowRuleWindowLevel(from: normalized.windowLevel),
+            displayOnAllWorkspaces: normalized.displayOnAllWorkspaces
         )
     }
 
@@ -159,10 +169,13 @@ enum IPCRuleProjection {
             initialContainerPrimarySpan: definition.initialContainerPrimarySpan,
             defaultWidth: definition.defaultWidth,
             defaultHeight: definition.defaultHeight,
+            defaultPositionX: definition.defaultPositionX,
+            defaultPositionY: definition.defaultPositionY,
             minWidth: definition.minWidth,
             minHeight: definition.minHeight,
             focus: definition.focus,
-            windowLevel: definition.windowLevel
+            windowLevel: definition.windowLevel,
+            displayOnAllWorkspaces: definition.displayOnAllWorkspaces
         )
     }
 

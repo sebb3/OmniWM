@@ -505,6 +505,25 @@ final class RuntimeArchitectureTests: XCTestCase {
     }
 
     @MainActor
+    func testAllWorkspaceFloatingSurfaceFocusKeepsCurrentWorkspaceActive() throws {
+        let fixture = try Self.inactiveWorkspaceFocusFixture(
+            policy: .full,
+            pid: 765_762,
+            windowId: 765_862,
+            ruleEffects: ManagedWindowRuleEffects(displayOnAllWorkspaces: true),
+            mode: .floating
+        )
+
+        fixture.controller.axEventHandler.handleActivationFactsResolved(fixture.facts)
+
+        XCTAssertEqual(
+            fixture.controller.workspaceManager.activeWorkspace(on: fixture.monitorId)?.id,
+            fixture.activeWorkspaceId
+        )
+        XCTAssertEqual(fixture.controller.workspaceManager.focusedToken, fixture.token)
+    }
+
+    @MainActor
     func testNiriPointerHoverConfirmedFocusDoesNotMoveMouseToFocusedWindowAfterAnimationSettles() throws {
         let fixture = try Self.managedNiriActivationFixture(
             origin: .pointerHover,
@@ -626,6 +645,61 @@ final class RuntimeArchitectureTests: XCTestCase {
         )
 
         XCTAssertTrue(warpedPoints.isEmpty)
+    }
+
+    @MainActor
+    func testClickObservedManagedFocusPreservesViewportWithHiddenProjectedColumn() throws {
+        let controller = Self.controller()
+        let workspaceId = try XCTUnwrap(
+            controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
+        )
+        _ = controller.workspaceManager.focusWorkspace(named: "1")
+        controller.niriLayoutHandler.enableNiriLayout()
+        let engine = try XCTUnwrap(controller.niriEngine)
+
+        var nodes: [NiriWindow] = []
+        for index in 0 ..< 4 {
+            let pid = pid_t(765_720 + index)
+            let windowId = 765_820 + index
+            let token = controller.workspaceManager.addWindow(
+                AXWindowRef(element: AXUIElementCreateApplication(pid), windowId: windowId),
+                pid: pid,
+                windowId: windowId,
+                to: workspaceId
+            )
+            let node = engine.addWindow(
+                token: token,
+                to: workspaceId,
+                afterSelection: nodes.last?.id,
+                focusedToken: nodes.last?.token
+            )
+            nodes.append(node)
+        }
+        for column in engine.columns(in: workspaceId) {
+            column.cachedWidth = 350
+        }
+
+        let hiddenNode = nodes[1]
+        let targetNode = nodes[3]
+        controller.workspaceManager.setAppHidden(true, pid: hiddenNode.token.pid, source: .ax)
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = nodes[0].id
+            state.activeColumnIndex = 0
+            state.jumpOffset(to: 0)
+        }
+        let viewportBeforeClick = controller.workspaceManager.niriViewportState(for: workspaceId)
+        let targetEntry = try XCTUnwrap(controller.workspaceManager.entry(for: targetNode.token))
+        controller.axEventHandler.noteMouseFocusIntent(token: targetNode.token)
+
+        controller.axEventHandler.handleManagedAppActivation(
+            entry: targetEntry,
+            isWorkspaceActive: true,
+            appFullscreen: false
+        )
+
+        let viewportAfterClick = controller.workspaceManager.niriViewportState(for: workspaceId)
+        XCTAssertEqual(viewportAfterClick.selectedNodeId, targetNode.id)
+        XCTAssertEqual(viewportAfterClick.viewOffset, viewportBeforeClick.viewOffset, accuracy: 0.001)
     }
 
     @MainActor
@@ -7444,6 +7518,8 @@ final class RuntimeArchitectureTests: XCTestCase {
         policy: WindowInteractionPolicy,
         pid: pid_t,
         windowId: Int,
+        ruleEffects: ManagedWindowRuleEffects = .none,
+        mode: TrackedWindowMode = .tiling,
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> (
@@ -7470,7 +7546,9 @@ final class RuntimeArchitectureTests: XCTestCase {
             axRef,
             pid: pid,
             windowId: windowId,
-            to: surfaceWorkspaceId
+            to: surfaceWorkspaceId,
+            mode: mode,
+            ruleEffects: ruleEffects
         )
         controller.workspaceManager.setInteractionPolicy(policy, for: token)
         _ = controller.workspaceManager.focusWorkspace(named: "1")

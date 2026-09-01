@@ -183,8 +183,15 @@ struct WindowClassificationRulesSnapshot: Codable, Equatable, Sendable {
             layout: rule.layout,
             assignToWorkspace: rule.assignToWorkspace.map(RuntimeTraceLimits.boundedString),
             initialContainerPrimarySpan: rule.initialContainerPrimarySpan,
+            defaultWidth: rule.defaultWidth,
+            defaultHeight: rule.defaultHeight,
+            defaultPositionX: rule.defaultPositionX,
+            defaultPositionY: rule.defaultPositionY,
             minWidth: rule.minWidth,
-            minHeight: rule.minHeight
+            minHeight: rule.minHeight,
+            focus: rule.focus,
+            windowLevel: rule.windowLevel,
+            displayOnAllWorkspaces: rule.displayOnAllWorkspaces
         )
     }
 

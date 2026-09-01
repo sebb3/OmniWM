@@ -280,6 +280,18 @@ final class WindowRuleEngineTests: XCTestCase {
         XCTAssertEqual(decision.admissionHints.defaultHeight, 600)
     }
 
+    func testInvalidDefaultPositionDoesNotShadowValidCascade() {
+        let engine = WindowRuleEngine()
+        engine.rebuild(rules: [
+            AppRule(bundleId: AppRule.wildcardBundleId, defaultPositionX: 0.4),
+            AppRule(bundleId: "com.test.app", layout: .float, defaultPositionX: 2),
+        ])
+
+        let decision = evaluate(engine, facts(appName: "Test", bundleId: "com.test.app"))
+
+        XCTAssertEqual(decision.admissionHints.defaultPositionX, 0.4)
+    }
+
     func testSystemTextInputPanelStaysUnmanagedWithWildcard() {
         let engine = WindowRuleEngine()
         let wildcard = AppRule(bundleId: "", appNameSubstring: "Input", layout: .float)
@@ -693,10 +705,13 @@ final class WindowRuleEngineTests: XCTestCase {
             assignToWorkspace: "2",
             defaultWidth: 800,
             defaultHeight: 600,
+            defaultPositionX: 0.25,
+            defaultPositionY: 0.75,
             minWidth: 500,
             minHeight: 350,
             focus: .userInitiated,
-            windowLevel: .floating
+            windowLevel: .floating,
+            displayOnAllWorkspaces: true
         )
 
         let merged = WindowRuleEngine.applyingOneShotOverride(persistentDecision, oneShot: oneShot)
@@ -706,10 +721,13 @@ final class WindowRuleEngineTests: XCTestCase {
         XCTAssertEqual(merged.workspaceName, "2")
         XCTAssertEqual(merged.admissionHints.defaultWidth, 800)
         XCTAssertEqual(merged.admissionHints.defaultHeight, 600)
+        XCTAssertEqual(merged.admissionHints.defaultPositionX, 0.25)
+        XCTAssertEqual(merged.admissionHints.defaultPositionY, 0.75)
         XCTAssertEqual(merged.ruleEffects.minWidth, 500)
         XCTAssertEqual(merged.ruleEffects.minHeight, 350)
         XCTAssertEqual(merged.ruleEffects.focus, .userInitiated)
         XCTAssertEqual(merged.ruleEffects.windowLevel, .floating)
+        XCTAssertEqual(merged.ruleEffects.displayOnAllWorkspaces, true)
     }
 
     /// A help tag, a system panel, an app's transient pre-window surface — none

@@ -1076,6 +1076,7 @@ final class WindowActionHandler {
 
         for entry in controller.workspaceManager.allEntries() {
             guard entry.layoutReason == .standard else { continue }
+            guard controller.workspaceManager.hiddenState(for: entry.token)?.workspaceInactive != true else { continue }
 
             let cachedInfo = controller.appInfoCache.info(for: entry.pid)
             let bundleId = cachedInfo?.bundleId
@@ -1091,7 +1092,10 @@ final class WindowActionHandler {
                 bundleId: bundleId,
                 appName: cachedInfo?.name ?? "Unknown",
                 icon: cachedInfo?.icon,
-                windowSize: frame.size
+                windowFrame: frame,
+                monitorVisibleFrame: frame.center.monitorApproximation(
+                    in: controller.workspaceManager.monitors
+                )?.visibleFrame
             )
         }
 

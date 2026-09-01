@@ -41,6 +41,12 @@ if command -v plutil >/dev/null 2>&1; then
 fi
 cp "$ROOT_DIR/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 cp -R "$BUILD_DIR/OmniWM_OmniWM.bundle" "$APP_DIR/Contents/Resources/"
+if [ "$SIGN_AND_NOTARIZE" = "dev" ]; then
+  make -C "$ROOT_DIR/DockPayload" all
+  mkdir -p "$APP_DIR/Contents/Resources/DockPayload"
+  cp "$ROOT_DIR/DockPayload/build/libHS2DockWindowSpike.dylib" "$APP_DIR/Contents/Resources/DockPayload/libOmniWMDockPayload.dylib"
+  cp "$ROOT_DIR/DockPayload/build/hs2-dock-window-spike" "$APP_DIR/Contents/Resources/DockPayload/omniwm-dock-payload-status"
+fi
 
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$APP_DIR/Contents/Info.plist" >/dev/null
@@ -88,6 +94,8 @@ elif [ "$SIGN_AND_NOTARIZE" = "dev" ]; then
     IDENTITY="-"
   fi
   echo "Signing $APP_DIR for development (identity: $IDENTITY)..."
+  codesign --force --sign - "$APP_DIR/Contents/Resources/DockPayload/libOmniWMDockPayload.dylib"
+  codesign --force --sign "$IDENTITY" "$APP_DIR/Contents/Resources/DockPayload/omniwm-dock-payload-status"
   codesign --force --sign "$IDENTITY" "$APP_DIR/Contents/MacOS/omniwmctl"
   codesign --force --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP_DIR/Contents/MacOS/OmniWM"
   codesign --force --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP_DIR"

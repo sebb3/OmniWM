@@ -215,6 +215,12 @@ struct RuleWindowBehaviorSection: View {
                 }
             }
 
+            Picker("Display on all workspaces", selection: $draft.displayOnAllWorkspaces) {
+                Text("Cascade").tag(Bool?.none)
+                Text("Yes").tag(Bool?.some(true))
+                Text("No").tag(Bool?.some(false))
+            }
+
             SettingsCaption(
                 "Cascade takes the value from the most specific rule that sets it, so a narrow "
                     + "rule can override one of these without discarding the others. The settings "
@@ -350,7 +356,43 @@ struct RuleDefaultSizeSection: View {
             }
 
             SettingsCaption("Sets the initial size when a matching window first opens floating. You can resize it afterwards.")
+
+            Toggle("Default Horizontal Position", isOn: $draft.defaultPositionXEnabled)
+            if draft.defaultPositionXEnabled {
+                LabeledContent("Horizontal") {
+                    TextField(
+                        "Horizontal position",
+                        value: percentageBinding($draft.defaultPositionX),
+                        format: .number
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+                    Text("%")
+                }
+            }
+            Toggle("Default Vertical Position", isOn: $draft.defaultPositionYEnabled)
+            if draft.defaultPositionYEnabled {
+                LabeledContent("Vertical") {
+                    TextField(
+                        "Vertical position",
+                        value: percentageBinding($draft.defaultPositionY),
+                        format: .number
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+                    Text("%")
+                }
+            }
+            if let error = draft.defaultPositionError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
+    }
+
+    private func percentageBinding(_ value: Binding<Double>) -> Binding<Double> {
+        Binding(get: { value.wrappedValue * 100 }, set: { value.wrappedValue = $0 / 100 })
     }
 }
 

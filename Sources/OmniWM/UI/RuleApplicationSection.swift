@@ -62,6 +62,13 @@ struct RuleApplicationSection: View {
                 .buttonStyle(.bordered)
             }
 
+            if let windowPosition = selectedAppInfo?.trackedWindowPosition {
+                Button("Use current position as the default") {
+                    useCurrentWindowPosition(windowPosition)
+                }
+                .buttonStyle(.bordered)
+            }
+
             Toggle("Also match by app name", isOn: $draft.appNameMatcherEnabled)
             if draft.appNameMatcherEnabled {
                 TextField("App name contains, e.g. Preview", text: $draft.appNameSubstring)
@@ -101,6 +108,13 @@ struct RuleApplicationSection: View {
         draft.defaultHeight = size.height
         draft.defaultWidthEnabled = true
         draft.defaultHeightEnabled = true
+    }
+
+    private func useCurrentWindowPosition(_ position: CGPoint) {
+        draft.defaultPositionX = position.x
+        draft.defaultPositionY = position.y
+        draft.defaultPositionXEnabled = true
+        draft.defaultPositionYEnabled = true
     }
 }
 

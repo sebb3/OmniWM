@@ -10,11 +10,61 @@ struct RunningAppInfo: Identifiable {
     let bundleId: String?
     let appName: String
     let icon: NSImage?
-    let windowSize: CGSize
+    let windowFrame: CGRect
+    let monitorVisibleFrame: CGRect?
+
+    init(
+        id: String,
+        pid: pid_t?,
+        bundleId: String?,
+        appName: String,
+        icon: NSImage?,
+        windowFrame: CGRect,
+        monitorVisibleFrame: CGRect?
+    ) {
+        self.id = id
+        self.pid = pid
+        self.bundleId = bundleId
+        self.appName = appName
+        self.icon = icon
+        self.windowFrame = windowFrame
+        self.monitorVisibleFrame = monitorVisibleFrame
+    }
+
+    init(
+        id: String,
+        pid: pid_t?,
+        bundleId: String?,
+        appName: String,
+        icon: NSImage?,
+        windowSize: CGSize
+    ) {
+        self.init(
+            id: id,
+            pid: pid,
+            bundleId: bundleId,
+            appName: appName,
+            icon: icon,
+            windowFrame: CGRect(origin: .zero, size: windowSize),
+            monitorVisibleFrame: nil
+        )
+    }
+
+    var windowSize: CGSize { windowFrame.size }
 
     var trackedWindowSize: CGSize? {
-        guard windowSize.width > 0, windowSize.height > 0 else { return nil }
-        return windowSize
+        guard windowFrame.width > 0, windowFrame.height > 0 else { return nil }
+        return windowFrame.size
+    }
+
+    var trackedWindowPosition: CGPoint? {
+        guard trackedWindowSize != nil, let monitorVisibleFrame else { return nil }
+        let availableWidth = max(1, monitorVisibleFrame.width - windowFrame.width)
+        let availableHeight = max(1, monitorVisibleFrame.height - windowFrame.height)
+        return CGPoint(
+            x: min(max(0, (windowFrame.minX - monitorVisibleFrame.minX) / availableWidth), 1),
+            y: min(max(0, (windowFrame.minY - monitorVisibleFrame.minY) / availableHeight), 1)
+        )
     }
 }
 
@@ -36,7 +86,8 @@ enum RunningAppInventory {
                     ?? bundleId
                     ?? "Process \(app.processIdentifier)",
                 icon: app.icon,
-                windowSize: .zero
+                windowFrame: .zero,
+                monitorVisibleFrame: nil
             )
         }
         return merge(systemApplications: systemApplications, trackedApplications: trackedApplications)
@@ -70,7 +121,8 @@ enum RunningAppInventory {
                 bundleId: tracked.bundleId ?? system.bundleId,
                 appName: tracked.appName == "Unknown" ? system.appName : tracked.appName,
                 icon: tracked.icon ?? system.icon,
-                windowSize: tracked.windowSize
+                windowFrame: tracked.windowFrame,
+                monitorVisibleFrame: tracked.monitorVisibleFrame
             )
         }
 

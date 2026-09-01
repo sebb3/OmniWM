@@ -36,6 +36,40 @@ final class FloatingCreatePlacementTests: XCTestCase {
         XCTAssertEqual(target, fixture.primary.visibleFrame)
     }
 
+    func testDefaultFloatingPositionUsesFinalSizeAndMonitorRelativeCoordinates() throws {
+        let fixture = try makeTwoMonitorFixture()
+        let source = CGRect(x: 10, y: 20, width: 300, height: 200)
+
+        let target = fixture.controller.defaultFloatingFrame(
+            source,
+            hints: ManagedWindowAdmissionHints(
+                defaultWidth: 720,
+                defaultHeight: 480,
+                defaultPositionX: 0.5,
+                defaultPositionY: 1
+            ),
+            preferredMonitor: fixture.primary
+        )
+
+        XCTAssertEqual(target.width, 720)
+        XCTAssertEqual(target.height, 480)
+        XCTAssertEqual(target.midX, fixture.primary.visibleFrame.midX)
+        XCTAssertEqual(target.maxY, fixture.primary.visibleFrame.maxY)
+    }
+
+    func testDefaultFloatingPositionDoesNotChangeSizeWhenSizeIsUnset() throws {
+        let fixture = try makeTwoMonitorFixture()
+        let source = CGRect(x: 10, y: 20, width: 300, height: 200)
+
+        let target = fixture.controller.defaultFloatingFrame(
+            source,
+            hints: ManagedWindowAdmissionHints(defaultPositionX: 0, defaultPositionY: 0),
+            preferredMonitor: fixture.primary
+        )
+
+        XCTAssertEqual(target, CGRect(origin: fixture.primary.visibleFrame.origin, size: source.size))
+    }
+
     func testNoDefaultFloatingSizeLeavesNativeFrameUntouched() throws {
         let fixture = try makeTwoMonitorFixture()
         let source = CGRect(x: -100, y: -100, width: 3000, height: 2000)

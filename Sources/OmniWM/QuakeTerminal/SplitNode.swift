@@ -53,21 +53,34 @@ indirect enum SplitNode {
     func inserting(
         at targetView: GhosttySurfaceView,
         direction: SplitDirection,
+        newViewFirst: Bool = false,
         newView: GhosttySurfaceView
     ) -> SplitNode {
         switch self {
         case let .leaf(view):
             if view === targetView {
-                return .split(direction, 0.5, .leaf(view), .leaf(newView))
+                return newViewFirst
+                    ? .split(direction, 0.5, .leaf(newView), .leaf(view))
+                    : .split(direction, 0.5, .leaf(view), .leaf(newView))
             }
             return self
 
         case let .split(dir, ratio, left, right):
-            let newLeft = left.inserting(at: targetView, direction: direction, newView: newView)
+            let newLeft = left.inserting(
+                at: targetView,
+                direction: direction,
+                newViewFirst: newViewFirst,
+                newView: newView
+            )
             if !areIdentical(newLeft, left) {
                 return .split(dir, ratio, newLeft, right)
             }
-            let newRight = right.inserting(at: targetView, direction: direction, newView: newView)
+            let newRight = right.inserting(
+                at: targetView,
+                direction: direction,
+                newViewFirst: newViewFirst,
+                newView: newView
+            )
             return .split(dir, ratio, left, newRight)
         }
     }

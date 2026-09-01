@@ -351,10 +351,13 @@ enum CLIParser {
         var initialContainerPrimarySpan: Double?
         var defaultWidth: Double?
         var defaultHeight: Double?
+        var defaultPositionX: Double?
+        var defaultPositionY: Double?
         var minWidth: Double?
         var minHeight: Double?
         var focus: IPCRuleFocus?
         var windowLevel: IPCRuleWindowLevel?
+        var displayOnAllWorkspaces: Bool?
         var oneShot: Bool?
         var seenFlags: Set<String> = []
         var index = 0
@@ -396,6 +399,10 @@ enum CLIParser {
                 defaultWidth = try parsePositiveDouble(value)
             case "--default-height":
                 defaultHeight = try parsePositiveDouble(value)
+            case "--default-position-x":
+                defaultPositionX = try parseUnitProportion(value)
+            case "--default-position-y":
+                defaultPositionY = try parseUnitProportion(value)
             case "--min-width":
                 minWidth = try parsePositiveDouble(value)
             case "--min-height":
@@ -410,6 +417,11 @@ enum CLIParser {
                     throw CLIParseError.usage(usageText)
                 }
                 windowLevel = parsedLevel
+            case "--display-on-all-workspaces":
+                guard value == "on" || value == "off" else {
+                    throw CLIParseError.usage(usageText)
+                }
+                displayOnAllWorkspaces = value == "on"
             case "--one-shot":
                 // Mirrors yabai's own `one-shot=on` rule flag rather than a bare
                 // switch, so it fits this parser's uniform `--flag value` shape.
@@ -436,10 +448,13 @@ enum CLIParser {
             initialContainerPrimarySpan: initialContainerPrimarySpan,
             defaultWidth: defaultWidth,
             defaultHeight: defaultHeight,
+            defaultPositionX: defaultPositionX,
+            defaultPositionY: defaultPositionY,
             minWidth: minWidth,
             minHeight: minHeight,
             focus: focus,
             windowLevel: windowLevel,
+            displayOnAllWorkspaces: displayOnAllWorkspaces,
             oneShot: oneShot
         )
 
@@ -448,6 +463,13 @@ enum CLIParser {
         }
 
         return definition
+    }
+
+    private static func parseUnitProportion(_ value: String) throws -> Double {
+        guard let number = Double(value), number.isFinite, (0 ... 1).contains(number) else {
+            throw CLIParseError.usage(usageText)
+        }
+        return number
     }
 
     private static func parseRuleApplyTarget(arguments: [String]) throws -> IPCRuleApplyTarget {

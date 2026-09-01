@@ -9,6 +9,11 @@ enum QuakeTerminalRestoreTarget: Equatable {
     case external(KeyboardFocusTarget)
 }
 
+struct QuakeTerminalReservedEdge: Equatable {
+    let displayId: CGDirectDisplayID
+    let width: CGFloat
+}
+
 @MainActor
 private final class GhosttyAppCallbackContext {
     weak var controller: QuakeTerminalController?
@@ -20,6 +25,12 @@ private final class GhosttyAppCallbackContext {
 
 @MainActor
 final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTabBarDelegate {
+    enum HotkeyAction: Equatable {
+        case summon
+        case focus
+        case hide
+    }
+
     private enum HideBehavior {
         case restoreLatestTarget
         case preserveCurrentFocus
@@ -53,6 +64,8 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     private var isHandlingResize: Bool = false
     private var isTransitioning = false
     private var animationGeneration: UInt64 = 0
+    private var publishedReservedEdge: QuakeTerminalReservedEdge?
+    private var focusBorderWindow: QuakeTerminalFocusBorderWindow?
     private var appearanceObserver: NSKeyValueObservation?
     private var appliedColorScheme: ghostty_color_scheme_e?
     private var appliedBackgroundBlurRadius: Int?
@@ -66,6 +79,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     private let restoreFocusTarget: @MainActor (QuakeTerminalRestoreTarget) -> Void
     private let isWindowFocused: @MainActor (NSWindow) -> Bool
     private let focusedWindowScreenProvider: @MainActor () -> NSScreen?
+    private let reservedEdgeChanged: @MainActor (QuakeTerminalReservedEdge?) -> Void
 
     private static var ghosttyInitialized = false
 
@@ -76,6 +90,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         restoreFocusTarget: @escaping @MainActor (QuakeTerminalRestoreTarget) -> Void = { _ in },
         isWindowFocused: @escaping @MainActor (NSWindow) -> Bool = { $0.isKeyWindow },
         focusedWindowScreenProvider: @escaping @MainActor () -> NSScreen? = { nil },
+        reservedEdgeChanged: @escaping @MainActor (QuakeTerminalReservedEdge?) -> Void = { _ in },
         ghosttyConfigBuilder: QuakeGhosttyConfigBuilder = QuakeGhosttyConfigBuilder()
     ) {
         self.settings = settings
@@ -85,6 +100,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         self.restoreFocusTarget = restoreFocusTarget
         self.isWindowFocused = isWindowFocused
         self.focusedWindowScreenProvider = focusedWindowScreenProvider
+        self.reservedEdgeChanged = reservedEdgeChanged
         super.init()
     }
 
@@ -133,6 +149,20 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         runtimeConfig.action_cb = { app, target, action in
             guard let app, let userdata = ghostty_app_userdata(app) else { return false }
             switch action.tag {
+            case GHOSTTY_ACTION_NEW_TAB,
+                 GHOSTTY_ACTION_CLOSE_TAB,
+                 GHOSTTY_ACTION_NEW_SPLIT,
+                 GHOSTTY_ACTION_GOTO_SPLIT,
+                 GHOSTTY_ACTION_GOTO_TAB,
+                 GHOSTTY_ACTION_MOVE_TAB,
+                 GHOSTTY_ACTION_EQUALIZE_SPLITS,
+                 GHOSTTY_ACTION_CLOSE_WINDOW,
+                 GHOSTTY_ACTION_OPEN_CONFIG:
+                return MainActor.assumeIsolated {
+                    let context = Unmanaged<GhosttyAppCallbackContext>.fromOpaque(userdata).takeUnretainedValue()
+                    guard let controller = context.controller else { return false }
+                    return controller.handleGhosttyHostAction(action)
+                }
             case GHOSTTY_ACTION_CONFIG_CHANGE:
                 guard target.tag == GHOSTTY_TARGET_APP,
                       let config = action.action.config_change.config else { return false }
@@ -221,6 +251,9 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     }
 
     func cleanup() {
+        focusBorderWindow?.hide()
+        focusBorderWindow = nil
+        publishReservedEdge(nil)
         stopGhosttyAppearanceSync()
         clipboardPrompts.cancelActivePrompt()
         for tab in tabs {
@@ -263,6 +296,89 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
             opacity: settings.quakeTerminalOpacity,
             backgroundEffect: settings.quakeTerminalBackgroundEffect
         )
+    }
+
+    private func handleGhosttyHostAction(_ action: ghostty_action_s) -> Bool {
+        let hostAction: QuakeGhosttyHostAction
+        switch action.tag {
+        case GHOSTTY_ACTION_NEW_TAB:
+            hostAction = .newTab
+        case GHOSTTY_ACTION_CLOSE_TAB:
+            hostAction = .closeTab(action.action.close_tab_mode)
+        case GHOSTTY_ACTION_NEW_SPLIT:
+            hostAction = .newSplit(QuakeGhosttyHostAction.splitPlacement(action.action.new_split))
+        case GHOSTTY_ACTION_GOTO_SPLIT:
+            hostAction = .gotoSplit(QuakeGhosttyHostAction.splitTarget(action.action.goto_split))
+        case GHOSTTY_ACTION_GOTO_TAB:
+            guard let target = QuakeGhosttyHostAction.tabTarget(action.action.goto_tab) else { return false }
+            hostAction = .gotoTab(target)
+        case GHOSTTY_ACTION_MOVE_TAB:
+            hostAction = .moveTab(Int(action.action.move_tab.amount))
+        case GHOSTTY_ACTION_EQUALIZE_SPLITS:
+            hostAction = .equalizeSplits
+        case GHOSTTY_ACTION_CLOSE_WINDOW:
+            hostAction = .closeWindow
+        case GHOSTTY_ACTION_OPEN_CONFIG:
+            hostAction = .openConfig
+        default:
+            return false
+        }
+        performGhosttyHostAction(hostAction)
+        return true
+    }
+
+    private func performGhosttyHostAction(_ action: QuakeGhosttyHostAction) {
+        switch action {
+        case .newTab:
+            requestNewTab()
+        case let .closeTab(mode):
+            switch mode {
+            case GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER:
+                for index in tabs.indices.reversed() where index != activeTabIndex {
+                    closeTab(at: index)
+                }
+            case GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT:
+                guard activeTabIndex + 1 < tabs.count else { return }
+                for index in stride(from: tabs.count - 1, through: activeTabIndex + 1, by: -1) {
+                    closeTab(at: index)
+                }
+            default:
+                requestCloseActiveTab()
+            }
+        case let .newSplit(placement):
+            splitActivePane(
+                direction: placement.direction,
+                newViewFirst: placement.newViewFirst
+            )
+        case let .gotoSplit(target):
+            switch target {
+            case .previous: activeTab?.splitContainer.navigateByTraversalOffset(-1)
+            case .next: activeTab?.splitContainer.navigateByTraversalOffset(1)
+            case let .direction(direction): navigatePane(direction: direction)
+            }
+        case let .gotoTab(target):
+            switch target {
+            case .previous: selectPreviousTab()
+            case .next: selectNextTab()
+            case .last: switchToTab(at: tabs.count - 1)
+            case let .index(index): switchToTab(at: index)
+            }
+        case let .moveTab(amount):
+            moveActiveTab(by: amount)
+        case .equalizeSplits:
+            equalizeSplits()
+        case .closeWindow:
+            if visible { animateOut() }
+        case .openConfig:
+            let path = ghostty_config_open_path()
+            defer { ghostty_string_free(path) }
+            guard let pointer = path.ptr, path.len > 0 else { return }
+            let url = URL(fileURLWithPath: String(decoding: UnsafeBufferPointer(
+                start: UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self),
+                count: Int(path.len)
+            ), as: UTF8.self))
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func reloadOpacityConfig() {
@@ -432,6 +548,8 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
 
         if let customFrame = customFrameForShow(on: screen) {
             window.setFrame(customFrame, display: true)
+            publishReservedEdge(on: screen)
+            updateFocusBorder(isFocused: isWindowFocused(window))
             refreshSurfacesForCurrentScreen()
             return
         }
@@ -442,6 +560,8 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
             widthPercent: settings.quakeTerminalWidthPercent,
             heightPercent: settings.quakeTerminalHeightPercent
         )
+        publishReservedEdge(on: screen)
+        updateFocusBorder(isFocused: isWindowFocused(window))
         refreshSurfacesForCurrentScreen()
     }
 
@@ -453,7 +573,6 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     private func createWindow() {
         let win = QuakeTerminalWindow()
         win.delegate = self
-        win.tabController = self
         self.window = win
         surfaceCoordinator.register(
             window: win,
@@ -513,11 +632,16 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         return tab
     }
 
-    func splitActivePane(direction: SplitDirection) {
+    func splitActivePane(direction: SplitDirection, newViewFirst: Bool = false) {
         guard let tab = activeTab,
               let focused = tab.focusedSurfaceView,
               let newView = createSurfaceView() else { return }
-        tab.splitContainer.split(view: focused, direction: direction, newView: newView)
+        tab.splitContainer.split(
+            view: focused,
+            direction: direction,
+            newViewFirst: newViewFirst,
+            newView: newView
+        )
         window?.makeFirstResponder(newView)
     }
 
@@ -629,6 +753,16 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         closeTab(at: activeTabIndex)
     }
 
+    private func moveActiveTab(by amount: Int) {
+        guard tabs.count > 1, amount != 0 else { return }
+        let destination = (activeTabIndex + amount).quotientAndRemainder(dividingBy: tabs.count).remainder
+        let normalizedDestination = destination >= 0 ? destination : destination + tabs.count
+        let tab = tabs.remove(at: activeTabIndex)
+        tabs.insert(tab, at: normalizedDestination)
+        activeTabIndex = normalizedDestination
+        switchToTab(at: activeTabIndex)
+    }
+
     private func updateTabBarVisibility() {
         guard let tabBar, let containerView else { return }
         let showBar = tabs.count > 1
@@ -675,11 +809,24 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     }
 
     func toggle() {
-        if visible {
-            animateOut()
-        } else {
+        guard !isTransitioning else { return }
+        let action = Self.hotkeyAction(
+            isVisible: visible,
+            isFocused: window.map(isWindowFocused) ?? false
+        )
+        switch action {
+        case .summon:
             animateIn()
+        case .focus:
+            focusVisibleWindow()
+        case .hide:
+            animateOut()
         }
+    }
+
+    static func hotkeyAction(isVisible: Bool, isFocused: Bool) -> HotkeyAction {
+        guard isVisible else { return .summon }
+        return isFocused ? .hide : .focus
     }
 
     func animateIn() {
@@ -729,6 +876,9 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
 
         settings.quakeTerminalUseCustomFrame = true
         settings.quakeTerminalCustomFrame = customFrame
+        if let screen = window?.screen ?? NSScreen.main {
+            publishReservedEdge(on: screen)
+        }
     }
 
     private func animateWindowIn(window: NSWindow) {
@@ -737,6 +887,37 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         let generation = beginAnimationTransition()
 
         if let customFrame = customFrameForShow(on: screen) {
+            if settings.quakeTerminalPosition == .left,
+               Self.isLeftAnchored(customFrame, in: screen.visibleFrame)
+            {
+                let initialFrame = customFrame.offsetBy(dx: -customFrame.width, dy: 0)
+                window.setFrame(initialFrame, display: false)
+                window.alphaValue = 1
+                window.level = .popUpMenu
+                orderFront(window)
+
+                if !motionPolicy.animationsEnabled {
+                    window.setFrame(customFrame, display: true)
+                    publishReservedEdge(on: screen)
+                    finishWindowIn(window)
+                    return
+                }
+
+                publishReservedEdge(on: screen)
+                quakeWindow?.isAnimating = true
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = settings.quakeTerminalAnimationDuration
+                    context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                    window.animator().setFrame(customFrame, display: true)
+                }, completionHandler: { [weak self] in
+                    Task { @MainActor in
+                        guard let self, self.animationGeneration == generation, self.visible else { return }
+                        self.finishWindowIn(window)
+                    }
+                })
+                return
+            }
+
             window.setFrame(customFrame, display: false)
             window.level = .popUpMenu
             orderFront(window)
@@ -763,6 +944,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         let position = settings.quakeTerminalPosition
         let widthPercent = settings.quakeTerminalWidthPercent
         let heightPercent = settings.quakeTerminalHeightPercent
+        publishReservedEdge(on: screen)
 
         position.setInitial(
             in: window,
@@ -809,6 +991,34 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
 
         window.level = .popUpMenu
 
+        if let customFrame = customFrameForShow(on: window.screen ?? targetScreen()),
+           settings.quakeTerminalPosition == .left,
+           let screen = window.screen ?? NSScreen.main,
+           Self.isLeftAnchored(customFrame, in: screen.visibleFrame)
+        {
+            let hiddenFrame = customFrame.offsetBy(dx: -customFrame.width, dy: 0)
+            if !motionPolicy.animationsEnabled {
+                window.setFrame(hiddenFrame, display: true)
+                finishWindowOut(window)
+                return
+            }
+
+            publishReservedEdge(nil)
+            quakeWindow?.isAnimating = true
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = settings.quakeTerminalAnimationDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                window.animator().setFrame(hiddenFrame, display: true)
+            }, completionHandler: { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.animationGeneration == generation, !self.visible else { return }
+                    quakeWindow?.isAnimating = false
+                    self.finishWindowOut(window)
+                }
+            })
+            return
+        }
+
         if settings.quakeTerminalUseCustomFrame {
             if !motionPolicy.animationsEnabled {
                 finishWindowOut(window)
@@ -832,6 +1042,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         let position = settings.quakeTerminalPosition
         let widthPercent = settings.quakeTerminalWidthPercent
         let heightPercent = settings.quakeTerminalHeightPercent
+        publishReservedEdge(nil)
 
         if !motionPolicy.animationsEnabled {
             position.setInitial(
@@ -869,6 +1080,62 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         return animationGeneration
     }
 
+    private func publishReservedEdge(on screen: NSScreen) {
+        publishReservedEdge(resolvedReservedEdge(on: screen))
+    }
+
+    private func resolvedReservedEdge(on screen: NSScreen) -> QuakeTerminalReservedEdge? {
+        let configuredWidth = settings.quakeTerminalPosition.configuredFrameSize(
+            on: screen,
+            widthPercent: settings.quakeTerminalWidthPercent,
+            heightPercent: settings.quakeTerminalHeightPercent
+        ).width
+        return Self.reservedEdge(
+            position: settings.quakeTerminalPosition,
+            customFrame: customFrameForShow(on: screen),
+            displayId: screen.displayId,
+            configuredWidth: configuredWidth,
+            visibleFrame: screen.visibleFrame
+        )
+    }
+
+    private func publishReservedEdge(_ edge: QuakeTerminalReservedEdge?) {
+        guard publishedReservedEdge != edge else { return }
+        publishedReservedEdge = edge
+        reservedEdgeChanged(edge)
+    }
+
+    static func reservedEdge(
+        position: QuakeTerminalPosition,
+        customFrame: CGRect?,
+        displayId: CGDirectDisplayID?,
+        configuredWidth: CGFloat,
+        visibleFrame: CGRect
+    ) -> QuakeTerminalReservedEdge? {
+        guard position == .left,
+              let displayId,
+              configuredWidth > 0,
+              visibleFrame.width > 0
+        else {
+            return nil
+        }
+        let width: CGFloat
+        if let customFrame {
+            guard abs(customFrame.minX - visibleFrame.minX) <= 1 else { return nil }
+            width = customFrame.width
+        } else {
+            width = configuredWidth
+        }
+        return QuakeTerminalReservedEdge(
+            displayId: displayId,
+            width: min(max(0, width), visibleFrame.width)
+        )
+    }
+
+    static func isLeftAnchored(_ frame: CGRect, in visibleFrame: CGRect) -> Bool {
+        abs(frame.minX - visibleFrame.minX) <= 1
+    }
+
     private func refreshSurfacesForCurrentScreen() {
         guard let container = activeTab?.splitContainer else { return }
         for view in container.allSurfaceViews() {
@@ -882,8 +1149,15 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         isTransitioning = false
         window.alphaValue = 1
         window.level = .floating
-        makeWindowKey(window)
+        focusVisibleWindow()
+        updateFocusBorder(isFocused: isWindowFocused(window))
         refreshSurfacesForCurrentScreen()
+    }
+
+    private func focusVisibleWindow() {
+        guard visible, let window else { return }
+
+        makeWindowKey(window)
 
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
@@ -900,6 +1174,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         isTransitioning = false
         window.orderOut(nil)
         window.alphaValue = 1
+        publishReservedEdge(nil)
 
         if let pendingRestoreTarget {
             self.pendingRestoreTarget = nil
@@ -1272,6 +1547,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         Task { @MainActor in
             guard notificationWindow === window else { return }
             updateGlassKeyStatus(notificationWindow.isKeyWindow)
+            updateFocusBorder(isFocused: false)
             guard visible else { return }
             guard window?.attachedSheet == nil else { return }
 
@@ -1290,6 +1566,19 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         Task { @MainActor in
             guard notificationWindow === window else { return }
             updateGlassKeyStatus(notificationWindow.isKeyWindow)
+            updateFocusBorder(isFocused: true)
+        }
+    }
+
+    private func updateFocusBorder(isFocused: Bool) {
+        guard let window else { return }
+        if isFocused {
+            if focusBorderWindow == nil {
+                focusBorderWindow = QuakeTerminalFocusBorderWindow()
+            }
+            focusBorderWindow?.show(around: window)
+        } else {
+            focusBorderWindow?.hide()
         }
     }
 
@@ -1321,6 +1610,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
             }
 
             updateTabBarVisibility()
+            updateFocusBorder(isFocused: isWindowFocused(window))
         }
     }
 

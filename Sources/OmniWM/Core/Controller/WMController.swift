@@ -69,6 +69,7 @@ final class WMController {
     private(set) var moveMouseToFocusedWindowEnabled: Bool = false
     private(set) var displaySpacesMode: DisplaySpacesMode = .enabled
     private var displaySpacesAlertShown = false
+    private var quakeTerminalReservedEdge: QuakeTerminalReservedEdge?
     var pendingCrashReport: FatalCapture.PendingCrashReport?
     var diagnosticsIssues: [DiagnosticsIssue] = []
 
@@ -175,6 +176,9 @@ final class WMController {
         },
         focusedWindowScreenProvider: { [weak self] in
             self?.focusedManagedWindowScreenForQuakeTerminal()
+        },
+        reservedEdgeChanged: { [weak self] edge in
+            self?.updateQuakeTerminalReservedEdge(edge)
         }
     )
     @ObservationIgnored
@@ -1014,12 +1018,25 @@ final class WMController {
     }
 
     func insetWorkingFrame(for monitor: Monitor) -> CGRect {
+        workingFrame(
+            for: monitor,
+            reservedLeftInset: quakeTerminalReservedLeftInset(for: monitor)
+        )
+    }
+
+    func niriWorkingFrame(for monitor: Monitor) -> CGRect {
+        var frame = insetWorkingFrame(for: monitor)
+        frame.size.width = workingFrame(for: monitor, reservedLeftInset: 0).width
+        return frame
+    }
+
+    private func workingFrame(for monitor: Monitor, reservedLeftInset: CGFloat) -> CGRect {
         let scale = NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
         let reservedTopInset = workspaceBarReservedTopInset(for: monitor)
         let gaps = settings.resolvedGapSettings(for: monitor)
         let menuBarInset = max(0, monitor.frame.maxY - monitor.visibleFrame.maxY)
         let struts = Struts(
-            left: gaps.outerGapLeft,
+            left: gaps.outerGapLeft + reservedLeftInset,
             right: gaps.outerGapRight,
             top: normalizedTopStrut(
                 top: gaps.outerGapTop,
@@ -1029,6 +1046,23 @@ final class WMController {
             bottom: gaps.outerGapBottom
         )
         return computeWorkingArea(parentArea: monitor.visibleFrame, scale: scale, struts: struts)
+    }
+
+    func updateQuakeTerminalReservedEdge(_ edge: QuakeTerminalReservedEdge?) {
+        guard quakeTerminalReservedEdge != edge else { return }
+        let affectedDisplayIds = Set([quakeTerminalReservedEdge?.displayId, edge?.displayId].compactMap { $0 })
+        layoutRefreshController.niriHandler.prepareWorkingAreaAnimation(on: affectedDisplayIds)
+        quakeTerminalReservedEdge = edge
+        layoutRefreshController.requestRelayout(reason: .quakeTerminalReservedEdgeChanged)
+    }
+
+    private func quakeTerminalReservedLeftInset(for monitor: Monitor) -> CGFloat {
+        guard let edge = quakeTerminalReservedEdge,
+              edge.displayId == monitor.displayId
+        else {
+            return 0
+        }
+        return min(max(0, edge.width), monitor.visibleFrame.width)
     }
 
     func fullscreenLayoutFrame(for monitor: Monitor) -> CGRect {
@@ -1494,12 +1528,14 @@ final class WMController {
         return clampedFloatingFrame(offsetFrame, in: monitor.visibleFrame)
     }
 
-    func defaultSizedFloatingFrame(
+    func defaultFloatingFrame(
         _ frame: CGRect,
         hints: ManagedWindowAdmissionHints,
         preferredMonitor: Monitor?
     ) -> CGRect {
-        guard hints.defaultWidth != nil || hints.defaultHeight != nil else { return frame }
+        guard hints.defaultWidth != nil || hints.defaultHeight != nil ||
+            hints.defaultPositionX != nil || hints.defaultPositionY != nil
+        else { return frame }
 
         var target = frame
         target.size.width = hints.defaultWidth.map { CGFloat($0) } ?? target.width
@@ -1512,7 +1548,23 @@ final class WMController {
         if hints.defaultHeight != nil {
             target.size.height = min(target.height, visibleFrame.height)
         }
+        let availableWidth = max(0, visibleFrame.width - target.width)
+        let availableHeight = max(0, visibleFrame.height - target.height)
+        if let x = hints.defaultPositionX {
+            target.origin.x = visibleFrame.minX + CGFloat(x) * availableWidth
+        }
+        if let y = hints.defaultPositionY {
+            target.origin.y = visibleFrame.minY + CGFloat(y) * availableHeight
+        }
         return clampedFloatingFrame(target, in: visibleFrame)
+    }
+
+    func defaultSizedFloatingFrame(
+        _ frame: CGRect,
+        hints: ManagedWindowAdmissionHints,
+        preferredMonitor: Monitor?
+    ) -> CGRect {
+        defaultFloatingFrame(frame, hints: hints, preferredMonitor: preferredMonitor)
     }
 
     private func shouldApplyFloatingFrameImmediately(
@@ -2551,6 +2603,7 @@ final class WMController {
                    bundleId: evaluation.facts.ax.bundleId,
                    mode: effectiveTrackedMode,
                    facts: evaluation.facts,
+                   ruleEffects: evaluation.decision.ruleEffects,
                    admissionHints: evaluation.decision.admissionHints
                )
             {

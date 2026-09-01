@@ -167,7 +167,6 @@ import QuartzCore
     private var closingAnimationIdsByObjectId: [ObjectIdentifier: UUID] = [:]
     /// Last sub-level pushed per window, so a pass only sends on change.
     private var appliedSubLevels: [WindowToken: ScriptingAddition.LevelKey] = [:]
-    private var scriptingAdditionAlertShown = false
     private var lastSubmittedClosingFramesByAnimationId: [UUID: CGRect] = [:]
     var nativeFullscreenRestoredFrameApplyTokens: Set<WindowToken> = []
 
@@ -512,8 +511,6 @@ import QuartzCore
     /// the steady state and means z-order never depends on activation.
     private func applyWindowLevels(controller: WMController, activeWorkspaceIds: Set<WorkspaceDescriptor.ID>) {
         var liveTokens: Set<WindowToken> = []
-        var sendFailed = false
-        var sendSucceeded = false
         for ws in controller.workspaceManager.workspaces where activeWorkspaceIds.contains(ws.id) {
             for entry in controller.workspaceManager.entries(in: ws.id) {
                 liveTokens.insert(entry.token)
@@ -524,9 +521,6 @@ import QuartzCore
                 guard appliedSubLevels[entry.token] != desired else { continue }
                 if ScriptingAddition.setSubLevel(windowId: UInt32(entry.windowId), level: desired) {
                     appliedSubLevels[entry.token] = desired
-                    sendSucceeded = true
-                } else {
-                    sendFailed = true
                 }
             }
         }
@@ -534,34 +528,7 @@ import QuartzCore
         appliedSubLevels = appliedSubLevels.filter { liveTokens.contains($0.key) }
 
         // A window whose level never applied stays out of appliedSubLevels, so
-        // it is retried on the next pass and ordering repairs itself once the
-        // addition is back.
-        if sendFailed {
-            presentScriptingAdditionAlert()
-        } else if sendSucceeded {
-            scriptingAdditionAlertShown = false
-        }
-    }
-
-    /// Dock unloads the scripting addition whenever it restarts, which leaves
-    /// stacking silently following macOS defaults. Say so once per outage
-    /// rather than on every failed window, and re-arm only after a send works
-    /// again so a later outage is still reported.
-    private func presentScriptingAdditionAlert() {
-        guard !scriptingAdditionAlertShown else { return }
-        scriptingAdditionAlertShown = true
-
-        Task { @MainActor in
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Reload the yabai scripting addition"
-            alert.informativeText = "OmniWM keeps floating windows above tiled ones through yabai's "
-                + "scripting addition, which runs inside Dock and is unloaded whenever Dock restarts. "
-                + "Reload it in a terminal with:\n\n    sudo yabai --load-sa\n\n"
-                + "Until then, window stacking follows macOS defaults."
-            alert.addButton(withTitle: "OK")
-            _ = alert.runModal()
-        }
+        // it is retried on the next pass without interrupting the user.
     }
 
     /// Restores WindowServer sub-levels before OmniWM relinquishes ownership.
@@ -849,14 +816,22 @@ import QuartzCore
 
     func buildMonitorSnapshot(
         for monitor: Monitor,
-        orientation: Monitor.Orientation? = nil
+        orientation: Monitor.Orientation? = nil,
+        workspaceId: WorkspaceDescriptor.ID? = nil
     ) -> LayoutMonitorSnapshot {
-        LayoutMonitorSnapshot(
+        let workingFrame = if let workspaceId,
+                              controller?.workspaceManager.activeLayoutKind(for: workspaceId) == .niri
+        {
+            controller?.niriWorkingFrame(for: monitor) ?? monitor.visibleFrame
+        } else {
+            controller?.insetWorkingFrame(for: monitor) ?? monitor.visibleFrame
+        }
+        return LayoutMonitorSnapshot(
             monitorId: monitor.id,
             displayId: monitor.displayId,
             frame: monitor.frame,
             visibleFrame: monitor.visibleFrame,
-            workingFrame: controller?.insetWorkingFrame(for: monitor) ?? monitor.visibleFrame,
+            workingFrame: workingFrame,
             fullscreenLayoutFrame: controller?.fullscreenLayoutFrame(for: monitor) ?? monitor.visibleFrame,
             scale: backingScale(for: monitor),
             orientation: orientation ?? monitor.autoOrientation
@@ -872,7 +847,11 @@ import QuartzCore
     ) -> WorkspaceRefreshInput? {
         guard let controller else { return nil }
 
-        let monitorSnapshot = buildMonitorSnapshot(for: monitor, orientation: orientation)
+        let monitorSnapshot = buildMonitorSnapshot(
+            for: monitor,
+            orientation: orientation,
+            workspaceId: workspaceId
+        )
         let entries = controller.workspaceManager.tiledEntries(in: workspaceId)
         let excludedTokens = Set(
             entries.lazy
@@ -1772,6 +1751,7 @@ import QuartzCore
                    bundleId: bundleId ?? evaluation.facts.ax.bundleId,
                    mode: trackedMode,
                    facts: evaluation.facts,
+                   ruleEffects: evaluation.decision.ruleEffects,
                    admissionHints: evaluation.decision.admissionHints,
                    sizeConstraints: candidate.enumeratedWindow.decisionEvidence.sizeConstraints
                )
@@ -2760,6 +2740,7 @@ import QuartzCore
         var allEntries: [(workspaceId: WorkspaceDescriptor.ID, windowId: Int)] = []
         for workspace in controller.workspaceManager.workspaces {
             for entry in controller.workspaceManager.entries(in: workspace.id) {
+                guard !entry.displaysOnAllWorkspaces else { continue }
                 allEntries.append((workspace.id, entry.windowId))
             }
         }
@@ -2853,6 +2834,7 @@ import QuartzCore
         allEntries.reserveCapacity(workspaceEntries.reduce(into: 0) { $0 += $1.entries.count })
         for snapshot in workspaceEntries {
             for entry in snapshot.entries {
+                guard !entry.displaysOnAllWorkspaces else { continue }
                 allEntries.append((snapshot.workspace.id, entry.windowId))
             }
         }
@@ -2868,6 +2850,7 @@ import QuartzCore
         let hiddenPlacementMonitors = controller.workspaceManager.monitors.map(HiddenPlacementMonitorContext.init)
         for snapshot in workspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
             for entry in snapshot.entries {
+                guard !entry.displaysOnAllWorkspaces else { continue }
                 inactiveWindowJobs.append((entry.pid, entry.windowId))
             }
         }
@@ -2908,6 +2891,13 @@ import QuartzCore
     ) {
         guard let controller else { return }
         for entry in entries {
+            if entry.displaysOnAllWorkspaces {
+                controller.axManager.markWindowActive(entry.windowId)
+                if controller.workspaceManager.hiddenState(for: entry.token)?.workspaceInactive == true {
+                    unhideWindow(entry, monitor: monitor)
+                }
+                continue
+            }
             guard controller.workspaceManager.layoutReason(for: entry.token) != .nativeFullscreen else {
                 continue
             }

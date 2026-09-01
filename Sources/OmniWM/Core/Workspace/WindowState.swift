@@ -120,6 +120,10 @@ struct WindowState: Equatable {
         token.pid
     }
 
+    var displaysOnAllWorkspaces: Bool {
+        mode == .floating && ruleEffects.displayOnAllWorkspaces == true
+    }
+
     var windowId: Int {
         token.windowId
     }

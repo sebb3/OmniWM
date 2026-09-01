@@ -36,8 +36,18 @@ final class QuakeSplitContainer: NSView {
         root.allSurfaceViews()
     }
 
-    func split(view: GhosttySurfaceView, direction: SplitDirection, newView: GhosttySurfaceView) {
-        root = root.inserting(at: view, direction: direction, newView: newView)
+    func split(
+        view: GhosttySurfaceView,
+        direction: SplitDirection,
+        newViewFirst: Bool = false,
+        newView: GhosttySurfaceView
+    ) {
+        root = root.inserting(
+            at: view,
+            direction: direction,
+            newViewFirst: newViewFirst,
+            newView: newView
+        )
         addSubview(newView)
         focusedView = newView
         relayout(rebuildDividers: true)
@@ -73,6 +83,16 @@ final class QuakeSplitContainer: NSView {
         if let neighbor = root.findNeighbor(of: focused, direction: direction, in: bounds) {
             focus(view: neighbor)
         }
+    }
+
+    func navigateByTraversalOffset(_ offset: Int) {
+        let views = root.allSurfaceViews()
+        guard views.count > 1,
+              let focusedView,
+              let currentIndex = views.firstIndex(where: { $0 === focusedView })
+        else { return }
+        let remainder = (currentIndex + offset).quotientAndRemainder(dividingBy: views.count).remainder
+        focus(view: views[remainder >= 0 ? remainder : remainder + views.count])
     }
 
     func equalize() {

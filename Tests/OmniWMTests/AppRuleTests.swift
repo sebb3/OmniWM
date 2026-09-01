@@ -46,8 +46,11 @@ final class AppRuleTests: XCTestCase {
         XCTAssertTrue(AppRule(bundleId: "com.test.app", initialContainerPrimarySpan: 1.0).hasEffect)
         XCTAssertTrue(AppRule(bundleId: "com.test.app", defaultWidth: 800).hasEffect)
         XCTAssertTrue(AppRule(bundleId: "com.test.app", defaultHeight: 600).hasEffect)
+        XCTAssertTrue(AppRule(bundleId: "com.test.app", defaultPositionX: 0.5).hasEffect)
+        XCTAssertTrue(AppRule(bundleId: "com.test.app", defaultPositionY: 0.5).hasEffect)
         XCTAssertTrue(AppRule(bundleId: "com.test.app", minWidth: 400).hasEffect)
         XCTAssertTrue(AppRule(bundleId: "com.test.app", minHeight: 300).hasEffect)
+        XCTAssertTrue(AppRule(bundleId: "com.test.app", displayOnAllWorkspaces: false).hasEffect)
     }
 
     func testInvalidInitialContainerPrimarySpanDoesNotCountAsEffect() {
@@ -81,6 +84,29 @@ final class AppRuleTests: XCTestCase {
         let decoded = try XCTUnwrap(SettingsTOMLCodec.decode(data).appRules.first)
         XCTAssertEqual(decoded.defaultWidth, 800)
         XCTAssertEqual(decoded.defaultHeight, 600)
+    }
+
+    func testFloatingPositionAndWorkspaceVisibilityRoundTripThroughTOML() throws {
+        var export = SettingsExport.defaults()
+        export.appRules = [
+            AppRule(
+                bundleId: "com.apple.finder",
+                layout: .float,
+                defaultPositionX: 0.25,
+                defaultPositionY: 0.75,
+                displayOnAllWorkspaces: true
+            )
+        ]
+
+        let data = try SettingsTOMLCodec.encode(export)
+        let toml = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertTrue(toml.contains("defaultPositionX = 0.25"))
+        XCTAssertTrue(toml.contains("defaultPositionY = 0.75"))
+        XCTAssertTrue(toml.contains("displayOnAllWorkspaces = true"))
+        let decoded = try XCTUnwrap(SettingsTOMLCodec.decode(data).appRules.first)
+        XCTAssertEqual(decoded.defaultPositionX, 0.25)
+        XCTAssertEqual(decoded.defaultPositionY, 0.75)
+        XCTAssertEqual(decoded.displayOnAllWorkspaces, true)
     }
 
     func testNilInitialContainerPrimarySpanIsOmittedFromJSONAndTOML() throws {
@@ -216,6 +242,33 @@ final class AppRuleTests: XCTestCase {
         XCTAssertEqual(draft.defaultWidth, 720)
         XCTAssertEqual(draft.defaultHeight, 480)
         XCTAssertNil(draft.defaultSizeError)
+        XCTAssertEqual(draft.makeRule(), rule)
+    }
+
+    func testDraftRoundTripsFloatingPositionAndWorkspaceVisibility() {
+        let rule = AppRule(
+            bundleId: "com.apple.finder",
+            layout: .float,
+            defaultPositionX: 0.2,
+            defaultPositionY: 0.8,
+            displayOnAllWorkspaces: true
+        )
+        let draft = AppRuleDraft(rule: rule)
+
+        XCTAssertTrue(draft.defaultPositionXEnabled)
+        XCTAssertTrue(draft.defaultPositionYEnabled)
+        XCTAssertEqual(draft.defaultPositionX, 0.2)
+        XCTAssertEqual(draft.defaultPositionY, 0.8)
+        XCTAssertEqual(draft.displayOnAllWorkspaces, true)
+        XCTAssertEqual(draft.makeRule(), rule)
+    }
+
+    func testDraftPreservesPartiallySpecifiedDefaultPosition() {
+        let rule = AppRule(bundleId: "com.apple.finder", defaultPositionX: 0.2)
+        let draft = AppRuleDraft(rule: rule)
+
+        XCTAssertTrue(draft.defaultPositionXEnabled)
+        XCTAssertFalse(draft.defaultPositionYEnabled)
         XCTAssertEqual(draft.makeRule(), rule)
     }
 

@@ -91,10 +91,13 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         case initialContainerPrimarySpan
         case defaultWidth
         case defaultHeight
+        case defaultPositionX
+        case defaultPositionY
         case minWidth
         case minHeight
         case focus
         case windowLevel
+        case displayOnAllWorkspaces
     }
 
     let id: UUID
@@ -109,10 +112,13 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
     var initialContainerPrimarySpan: Double?
     var defaultWidth: Double?
     var defaultHeight: Double?
+    var defaultPositionX: Double?
+    var defaultPositionY: Double?
     var minWidth: Double?
     var minHeight: Double?
     var focus: WindowRuleFocusPolicy?
     var windowLevel: WindowRuleWindowLevel?
+    var displayOnAllWorkspaces: Bool?
 
     init(
         id: UUID = UUID(),
@@ -127,10 +133,13 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         initialContainerPrimarySpan: Double? = nil,
         defaultWidth: Double? = nil,
         defaultHeight: Double? = nil,
+        defaultPositionX: Double? = nil,
+        defaultPositionY: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
         focus: WindowRuleFocusPolicy? = nil,
-        windowLevel: WindowRuleWindowLevel? = nil
+        windowLevel: WindowRuleWindowLevel? = nil,
+        displayOnAllWorkspaces: Bool? = nil
     ) {
         self.id = id
         self.bundleId = bundleId
@@ -144,10 +153,13 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.defaultWidth = defaultWidth
         self.defaultHeight = defaultHeight
+        self.defaultPositionX = defaultPositionX
+        self.defaultPositionY = defaultPositionY
         self.minWidth = minWidth
         self.minHeight = minHeight
         self.focus = focus
         self.windowLevel = windowLevel
+        self.displayOnAllWorkspaces = displayOnAllWorkspaces
         normalizeSingleTitle()
     }
 
@@ -165,13 +177,22 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         return initialContainerPrimarySpan
     }
 
+    var validDefaultPositionX: Double? { validDefaultPosition(defaultPositionX) }
+    var validDefaultPositionY: Double? { validDefaultPosition(defaultPositionY) }
+
+    private func validDefaultPosition(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, (0 ... 1).contains(value) else { return nil }
+        return value
+    }
+
     var hasEffect: Bool {
         effectiveLayoutAction != .auto ||
             assignToWorkspace?.isEmpty == false ||
             validInitialContainerPrimarySpan != nil ||
             defaultWidth != nil || defaultHeight != nil ||
+            validDefaultPositionX != nil || validDefaultPositionY != nil ||
             minWidth != nil || minHeight != nil ||
-            focus != nil || windowLevel != nil
+            focus != nil || windowLevel != nil || displayOnAllWorkspaces != nil
     }
 
     var hasAdvancedMatchers: Bool {
@@ -224,8 +245,9 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
             assignToWorkspace != nil ||
             initialContainerPrimarySpan != nil ||
             defaultWidth != nil || defaultHeight != nil ||
+            defaultPositionX != nil || defaultPositionY != nil ||
             minWidth != nil || minHeight != nil ||
-            focus != nil || windowLevel != nil ||
+            focus != nil || windowLevel != nil || displayOnAllWorkspaces != nil ||
             hasAdvancedMatchers
     }
 
@@ -243,10 +265,13 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
         defaultWidth = try container.decodeIfPresent(Double.self, forKey: .defaultWidth)
         defaultHeight = try container.decodeIfPresent(Double.self, forKey: .defaultHeight)
+        defaultPositionX = try container.decodeIfPresent(Double.self, forKey: .defaultPositionX)
+        defaultPositionY = try container.decodeIfPresent(Double.self, forKey: .defaultPositionY)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
         focus = try container.decodeIfPresent(WindowRuleFocusPolicy.self, forKey: .focus)
         windowLevel = try container.decodeIfPresent(WindowRuleWindowLevel.self, forKey: .windowLevel)
+        displayOnAllWorkspaces = try container.decodeIfPresent(Bool.self, forKey: .displayOnAllWorkspaces)
         normalizeSingleTitle()
     }
 
@@ -264,10 +289,13 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         try container.encodeIfPresent(initialContainerPrimarySpan, forKey: .initialContainerPrimarySpan)
         try container.encodeIfPresent(defaultWidth, forKey: .defaultWidth)
         try container.encodeIfPresent(defaultHeight, forKey: .defaultHeight)
+        try container.encodeIfPresent(defaultPositionX, forKey: .defaultPositionX)
+        try container.encodeIfPresent(defaultPositionY, forKey: .defaultPositionY)
         try container.encodeIfPresent(minWidth, forKey: .minWidth)
         try container.encodeIfPresent(minHeight, forKey: .minHeight)
         try container.encodeIfPresent(focus, forKey: .focus)
         try container.encodeIfPresent(windowLevel, forKey: .windowLevel)
+        try container.encodeIfPresent(displayOnAllWorkspaces, forKey: .displayOnAllWorkspaces)
     }
 
     private mutating func normalizeSingleTitle() {

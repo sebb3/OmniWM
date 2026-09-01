@@ -1589,12 +1589,15 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
     public let initialContainerPrimarySpan: Double?
     public let defaultWidth: Double?
     public let defaultHeight: Double?
+    public let defaultPositionX: Double?
+    public let defaultPositionY: Double?
     public let minWidth: Double?
     public let minHeight: Double?
     /// Unlike the fields above, `focus` and `windowLevel` cascade per field, so
     /// nil here means "not defined by this rule" rather than "default".
     public let focus: IPCRuleFocus?
     public let windowLevel: IPCRuleWindowLevel?
+    public let displayOnAllWorkspaces: Bool?
     /// Routes `add` to the in-memory one-shot list instead of `settings.appRules`
     /// (see `IPCRuleSnapshot.isOneShot`). Write-only: it never round-trips onto
     /// `AppRule` itself, since one-shot-ness is which list a rule lives in, not a
@@ -1614,10 +1617,13 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         initialContainerPrimarySpan: Double? = nil,
         defaultWidth: Double? = nil,
         defaultHeight: Double? = nil,
+        defaultPositionX: Double? = nil,
+        defaultPositionY: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
         focus: IPCRuleFocus? = nil,
         windowLevel: IPCRuleWindowLevel? = nil,
+        displayOnAllWorkspaces: Bool? = nil,
         oneShot: Bool? = nil
     ) {
         self.bundleId = bundleId
@@ -1631,10 +1637,13 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.defaultWidth = defaultWidth
         self.defaultHeight = defaultHeight
+        self.defaultPositionX = defaultPositionX
+        self.defaultPositionY = defaultPositionY
         self.minWidth = minWidth
         self.minHeight = minHeight
         self.focus = focus
         self.windowLevel = windowLevel
+        self.displayOnAllWorkspaces = displayOnAllWorkspaces
         self.oneShot = oneShot
     }
 }
@@ -2487,10 +2496,13 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     public let initialContainerPrimarySpan: Double?
     public let defaultWidth: Double?
     public let defaultHeight: Double?
+    public let defaultPositionX: Double?
+    public let defaultPositionY: Double?
     public let minWidth: Double?
     public let minHeight: Double?
     public let focus: IPCRuleFocus?
     public let windowLevel: IPCRuleWindowLevel?
+    public let displayOnAllWorkspaces: Bool?
     /// Whether this rule is armed in the in-memory one-shot list rather than
     /// `settings.appRules`. See `IPCRuleDefinition.oneShot`.
     public let isOneShot: Bool
@@ -2502,6 +2514,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, position, bundleId, appNameSubstring, titleSubstring, titleRegex, axRole, axSubrole
         case layout, assignToWorkspace, initialContainerPrimarySpan, defaultWidth, defaultHeight
+        case defaultPositionX, defaultPositionY, displayOnAllWorkspaces
         case minWidth, minHeight, specificity, isValid
         case focus, windowLevel, isOneShot
         case invalidRegexMessage, validationMessages
@@ -2521,10 +2534,13 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         initialContainerPrimarySpan: Double? = nil,
         defaultWidth: Double? = nil,
         defaultHeight: Double? = nil,
+        defaultPositionX: Double? = nil,
+        defaultPositionY: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
         focus: IPCRuleFocus? = nil,
         windowLevel: IPCRuleWindowLevel? = nil,
+        displayOnAllWorkspaces: Bool? = nil,
         isOneShot: Bool = false,
         specificity: Int,
         isValid: Bool,
@@ -2544,10 +2560,13 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.defaultWidth = defaultWidth
         self.defaultHeight = defaultHeight
+        self.defaultPositionX = defaultPositionX
+        self.defaultPositionY = defaultPositionY
         self.minWidth = minWidth
         self.minHeight = minHeight
         self.focus = focus
         self.windowLevel = windowLevel
+        self.displayOnAllWorkspaces = displayOnAllWorkspaces
         self.isOneShot = isOneShot
         self.specificity = specificity
         self.isValid = isValid
@@ -2570,10 +2589,13 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
         defaultWidth = try container.decodeIfPresent(Double.self, forKey: .defaultWidth)
         defaultHeight = try container.decodeIfPresent(Double.self, forKey: .defaultHeight)
+        defaultPositionX = try container.decodeIfPresent(Double.self, forKey: .defaultPositionX)
+        defaultPositionY = try container.decodeIfPresent(Double.self, forKey: .defaultPositionY)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
         focus = try container.decodeIfPresent(IPCRuleFocus.self, forKey: .focus)
         windowLevel = try container.decodeIfPresent(IPCRuleWindowLevel.self, forKey: .windowLevel)
+        displayOnAllWorkspaces = try container.decodeIfPresent(Bool.self, forKey: .displayOnAllWorkspaces)
         isOneShot = try container.decodeIfPresent(Bool.self, forKey: .isOneShot) ?? false
         specificity = try container.decode(Int.self, forKey: .specificity)
         isValid = try container.decode(Bool.self, forKey: .isValid)

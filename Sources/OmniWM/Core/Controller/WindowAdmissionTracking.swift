@@ -85,7 +85,7 @@ extension AXEventHandler {
             let preferredMonitor = controller.workspaceManager.monitor(for: trackedEntry.workspaceId)
 
             if let observedFrame {
-                let targetFrame = controller.defaultSizedFloatingFrame(
+                let targetFrame = controller.defaultFloatingFrame(
                     observedFrame,
                     hints: trackedEntry.admissionHints,
                     preferredMonitor: preferredMonitor
