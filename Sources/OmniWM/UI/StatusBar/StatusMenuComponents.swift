@@ -24,7 +24,7 @@ struct MenuHeader: View {
                         .fill(Color(nsColor: .systemGreen))
                         .frame(width: 6, height: 6)
                 }
-                Text("v\(appVersion)")
+                Text("v\(appVersion) Fork")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(Color(nsColor: .secondaryLabelColor))
             }
