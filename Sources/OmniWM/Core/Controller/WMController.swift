@@ -1303,14 +1303,7 @@ final class WMController {
         guard !oneShotRules.isEmpty else {
             return evaluation
         }
-        let oneShotDecision = oneShotRuleEngine.decision(
-            for: evaluation.facts,
-            token: evaluation.token,
-            appFullscreen: evaluation.appFullscreen
-        )
-        guard let matchedRuleId = oneShotDecision.ruleEffects.matchedRuleId,
-              let oneShot = oneShotRules.first(where: { $0.id == matchedRuleId })
-        else {
+        guard let oneShot = oneShotRuleEngine.matchingUserRule(for: evaluation.facts) else {
             return evaluation
         }
         let merged = WindowRuleEngine.applyingOneShotOverride(evaluation.decision, oneShot: oneShot)
