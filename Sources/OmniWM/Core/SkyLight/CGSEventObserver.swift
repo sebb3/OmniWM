@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
+import Dispatch
 import Foundation
 import os
 
@@ -21,6 +22,7 @@ final class CGSEventObserver {
     private var isRegistered = false
     private var isWindowClosedNotifyRegistered = false
     private(set) var lastRegistrationSummary = "not started"
+    private(set) var lastWindowSubscriptionSummary = "not requested"
 
     private init() {}
 
@@ -115,7 +117,15 @@ final class CGSEventObserver {
 
     @discardableResult
     func subscribeToWindows(_ windowIds: [UInt32]) -> Bool {
-        SkyLight.shared.subscribeToWindowNotifications(windowIds)
+        guard !windowIds.isEmpty else {
+            lastWindowSubscriptionSummary = "empty set skipped"
+            return false
+        }
+        let success = SkyLight.shared.subscribeToWindowNotifications(windowIds)
+        lastWindowSubscriptionSummary = success
+            ? "\(windowIds.count) windows subscribed"
+            : "\(windowIds.count) window subscription failed"
+        return success
     }
 }
 
@@ -138,6 +148,14 @@ private func handleRawCGSEvent(
          .malformed:
         return
     case let .event(event):
+        if case let .frameChanged(windowId) = event,
+           FrameApplyTrace.shared.isActive
+        {
+            FrameEffectObservationTracker.noteCGSFrameChanged(
+                windowId: Int(windowId),
+                eventNs: DispatchTime.now().uptimeNanoseconds
+            )
+        }
         DiagnosticsEventRecorder.shared.recordCGS(event)
         EventIntake.post(.cgs(event))
     }

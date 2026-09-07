@@ -7,11 +7,19 @@ import Foundation
 @MainActor
 struct WorldView {
     private let controller: WMController
-    private let borderFrameResolver: ((Int) -> CGRect?)?
+    private let liveBoundsProvider: ((Int) -> CGRect?)?
 
-    init(controller: WMController, borderFrameResolver: ((Int) -> CGRect?)? = nil) {
+    /// Creates a world view over the window-manager controller.
+    /// - Parameters:
+    ///   - controller: The window manager this view reads state from.
+    ///   - liveBoundsProvider: Injectable source of live window bounds (defaults to
+    ///     querying the WindowServer); lets tests supply synthetic bounds.
+    init(
+        controller: WMController,
+        liveBoundsProvider: ((Int) -> CGRect?)? = nil
+    ) {
         self.controller = controller
-        self.borderFrameResolver = borderFrameResolver
+        self.liveBoundsProvider = liveBoundsProvider
     }
 
     var hasStartedServices: Bool {
@@ -26,8 +34,8 @@ struct WorldView {
         controller.workspaceManager.renderableFocusToken
     }
 
-    var isNonManagedFocusActive: Bool {
-        controller.workspaceManager.isNonManagedFocusActive
+    var borderFocusToken: WindowToken? {
+        controller.workspaceManager.borderFocusToken
     }
 
     var suppressedFocusToken: WindowToken? {
@@ -56,10 +64,6 @@ struct WorldView {
 
     func entry(for token: WindowToken) -> WindowState? {
         controller.workspaceManager.entry(for: token)
-    }
-
-    func isOwnedWindow(windowId: Int) -> Bool {
-        controller.isOwnedWindow(windowNumber: windowId)
     }
 
     func isWindowFullscreenInLayout(_ token: WindowToken) -> Bool {
@@ -128,7 +132,7 @@ struct WorldView {
                     workspaceId: record.workspaceId,
                     frame: .zero,
                     displayContext: nil,
-                    selected: workspaceManager.focusedToken == record.currentToken
+                    selected: workspaceManager.selectedManagedToken == record.currentToken
                         || workspaceManager.pendingFocusedToken == record.currentToken,
                     visible: record.transition == .suspended
                         && entry?.layoutReason == .nativeFullscreen
@@ -155,30 +159,50 @@ struct WorldView {
         return true
     }
 
+    /// Resolves the frame the focused-window border ring should hug.
+    /// The ring follows presentation truth: live WindowServer bounds win whenever
+    /// they can be queried (apps apply AX writes late and may constrain themselves,
+    /// so layout-intent frames can overlap the presented window). Pending AX writes
+    /// and layout caches only backfill when live bounds are unavailable.
+    /// - Returns: The frame to draw the border around, or `nil` when the window has
+    ///   no usable geometry from any source.
     func borderFrame(for entry: WindowState) -> CGRect? {
-        if let borderFrameResolver {
-            return borderFrameResolver(entry.windowId)
-        }
-        if let cached = cachedBorderFrame(for: entry) {
-            return cached
+        if let observed = observedWindowBounds(windowId: entry.windowId) {
+            return observed
         }
         BorderOpMetricsRecorder.shared.noteBoundsQueryFallback()
-        return observedWindowBounds(windowId: entry.windowId)
+        if let pending = controller.axManager.pendingFrameWrite(for: entry.windowId) {
+            return pending
+        }
+        return cachedBorderFrame(for: entry)
     }
 
     func cachedBorderFrame(for entry: WindowState) -> CGRect? {
         if let pending = controller.axManager.pendingFrameWrite(for: entry.windowId) {
             return pending
         }
-        if entry.mode == .tiling,
-           let applied = controller.axManager.lastAppliedFrame(for: entry.windowId)
-        {
+        if entry.mode == .floating {
+            if let observed = entry.observedState.frame {
+                return observed
+            }
+            if let desired = entry.desiredState.floatingFrame {
+                return desired
+            }
+            if let lastFloatingFrame = entry.floatingState?.lastFrame {
+                return lastFloatingFrame
+            }
+        } else if let applied = controller.axManager.lastAppliedFrame(for: entry.windowId) {
             return applied
         }
         return nil
     }
 
+    /// Returns the window's live bounds in AppKit screen coordinates, or `nil` when
+    /// the window has no positive-size WindowServer bounds.
     func observedWindowBounds(windowId: Int) -> CGRect? {
+        if let liveBoundsProvider {
+            return liveBoundsProvider(windowId)
+        }
         guard windowId > 0,
               let bounds = SkyLight.shared.getWindowBounds(UInt32(windowId)),
               bounds.width > 0, bounds.height > 0

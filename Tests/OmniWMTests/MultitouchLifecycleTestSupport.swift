@@ -98,9 +98,17 @@ final class FakeMultitouchBackend {
     var unregisterResults: [UInt64: [Bool]] = [:]
     private(set) var calls: [Call] = []
     private(set) var registeredGenerations: [UInt] = []
+    private(set) var registeredSlots: [Int] = []
 
     private var enumerationIndex = 0
     private var registryIdByPointer: [UInt: UInt64] = [:]
+    private var callbackByRegistryId: [
+        UInt64: (
+            device: MultitouchBinding.DeviceRef,
+            callback: MultitouchBinding.ContactCallback,
+            refcon: UnsafeMutableRawPointer
+        )
+    ] = [:]
 
     static func device(pointer: UInt, registryId: UInt64) -> MultitouchBinding.Device {
         MultitouchBinding.Device(ref: OpaquePointer(bitPattern: pointer)!, registryId: registryId)
@@ -123,7 +131,7 @@ final class FakeMultitouchBackend {
     func operations(sleeper: ManualMultitouchSleeper) -> MultitouchGestureSource.LifecycleOperations {
         MultitouchGestureSource.LifecycleOperations(
             enumerate: { self.enumerate() },
-            register: { self.register($0, refcon: $2) },
+            register: { self.register($0, callback: $1, refcon: $2) },
             start: { self.start($0) },
             isRunning: { self.isRunning($0) },
             stop: { self.stop($0) },
@@ -134,6 +142,32 @@ final class FakeMultitouchBackend {
 
     func callCount(_ expected: Call) -> Int {
         calls.count(where: { $0 == expected })
+    }
+
+    func emitFrame(
+        registryId: UInt64,
+        touches: [(x: Float, y: Float)],
+        timestamp: Double,
+        refcon: UnsafeMutableRawPointer? = nil
+    ) {
+        guard let registration = callbackByRegistryId[registryId] else { return }
+        let stride = 96
+        let fingers = UnsafeMutableRawPointer.allocate(byteCount: max(touches.count, 1) * stride, alignment: 8)
+        defer { fingers.deallocate() }
+        for (index, touch) in touches.enumerated() {
+            let base = index * stride
+            fingers.storeBytes(of: Int32(4), toByteOffset: base + 20, as: Int32.self)
+            fingers.storeBytes(of: touch.x, toByteOffset: base + 32, as: Float.self)
+            fingers.storeBytes(of: touch.y, toByteOffset: base + 36, as: Float.self)
+        }
+        _ = registration.callback(
+            registration.device,
+            touches.isEmpty ? nil : fingers,
+            Int32(touches.count),
+            timestamp,
+            0,
+            refcon ?? registration.refcon
+        )
     }
 
     private func enumerate() -> MultitouchBinding.Enumeration {
@@ -152,12 +186,19 @@ final class FakeMultitouchBackend {
 
     private func register(
         _ ref: MultitouchBinding.DeviceRef,
+        callback: MultitouchBinding.ContactCallback,
         refcon: UnsafeMutableRawPointer
     ) -> Bool {
         let registryId = registryId(for: ref)
         calls.append(.register(registryId))
-        registeredGenerations.append(UInt(bitPattern: refcon))
-        return nextResult(from: &registerResults, for: registryId) ?? true
+        let token = MultitouchGestureSource.RegistrationToken(bitPattern: UInt(bitPattern: refcon))
+        registeredGenerations.append(token.generation)
+        registeredSlots.append(token.slot)
+        let registered = nextResult(from: &registerResults, for: registryId) ?? true
+        if registered {
+            callbackByRegistryId[registryId] = (ref, callback, refcon)
+        }
+        return registered
     }
 
     private func start(_ ref: MultitouchBinding.DeviceRef) -> Int32 {
@@ -181,6 +222,7 @@ final class FakeMultitouchBackend {
     private func unregister(_ ref: MultitouchBinding.DeviceRef) -> Bool {
         let registryId = registryId(for: ref)
         calls.append(.unregister(registryId))
+        callbackByRegistryId.removeValue(forKey: registryId)
         return nextResult(from: &unregisterResults, for: registryId) ?? true
     }
 

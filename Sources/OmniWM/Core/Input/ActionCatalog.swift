@@ -35,6 +35,8 @@ struct ActionSpec: Equatable {
 }
 
 enum ActionCatalog {
+    static let workspaceSlotRange = 1 ... 9
+
     private static let digitCodes: [UInt32] = [
         UInt32(kVK_ANSI_1), UInt32(kVK_ANSI_2), UInt32(kVK_ANSI_3),
         UInt32(kVK_ANSI_4), UInt32(kVK_ANSI_5), UInt32(kVK_ANSI_6),
@@ -84,22 +86,6 @@ enum ActionCatalog {
         }
     }
 
-    static func matchesSearch(_ query: String, binding: HotkeyBinding) -> Bool {
-        let normalizedQuery = normalizedSearchTerm(query)
-        guard !normalizedQuery.isEmpty else { return true }
-
-        guard let spec = spec(for: binding.id) else {
-            return binding.command.displayName.localizedCaseInsensitiveContains(query)
-                || binding.command.layoutCompatibility.rawValue.localizedCaseInsensitiveContains(query)
-                || binding.binding.displayString.localizedCaseInsensitiveContains(query)
-                || binding.binding.humanReadableString.localizedCaseInsensitiveContains(query)
-        }
-
-        return spec.searchTerms.contains { normalizedSearchTerm($0).contains(normalizedQuery) }
-            || normalizedSearchTerm(binding.binding.displayString).contains(normalizedQuery)
-            || normalizedSearchTerm(binding.binding.humanReadableString).contains(normalizedQuery)
-    }
-
     static func uniqueTerms(_ values: [String]) -> [String] {
         var seen: Set<String> = []
         return values.compactMap { raw in
@@ -123,6 +109,27 @@ enum ActionCatalog {
     private static func buildSpecs() -> [ActionSpec] {
         var specs: [ActionSpec] = []
 
+        for index in ScratchpadIndex.range {
+            specs.append(
+                action(
+                    id: "toggleScratchpad.\(index)",
+                    command: .toggleScratchpad(index),
+                    category: .layout,
+                    binding: .unassigned,
+                    keywords: ["scratchpad"]
+                )
+            )
+            specs.append(
+                action(
+                    id: "assignFocusedWindowToScratchpad.\(index)",
+                    command: .assignFocusedWindowToScratchpad(index),
+                    category: .layout,
+                    binding: .unassigned,
+                    keywords: ["scratchpad"]
+                )
+            )
+        }
+
         for (idx, code) in digitCodes.enumerated() {
             specs.append(
                 action(
@@ -140,6 +147,25 @@ enum ActionCatalog {
                     binding: KeyBinding(keyCode: code, modifiers: UInt32(optionKey | shiftKey))
                 )
             )
+        }
+
+        for slot in workspaceSlotRange {
+            specs.append(contentsOf: [
+                action(
+                    id: "switchWorkspaceSlot.\(slot)",
+                    command: .switchWorkspaceSlot(slot),
+                    category: .workspace,
+                    binding: .unassigned,
+                    keywords: ["slot", "position", "monitor"]
+                ),
+                action(
+                    id: "moveToWorkspaceSlot.\(slot)",
+                    command: .moveToWorkspaceSlot(slot),
+                    category: .workspace,
+                    binding: .unassigned,
+                    keywords: ["slot", "position", "monitor"]
+                )
+            ])
         }
 
         specs.append(
@@ -860,18 +886,11 @@ enum ActionCatalog {
                 keywords: ["float", "floating"]
             ),
             action(
-                id: "assignFocusedWindowToScratchpad",
-                command: .assignFocusedWindowToScratchpad,
-                category: .layout,
+                id: "closeFocusedWindow",
+                command: .closeFocusedWindow,
+                category: .focus,
                 binding: .unassigned,
-                keywords: ["scratchpad"]
-            ),
-            action(
-                id: "toggleScratchpadWindow",
-                command: .toggleScratchpadWindow,
-                category: .layout,
-                binding: .unassigned,
-                keywords: ["scratchpad"]
+                keywords: ["close", "quit", "window"]
             ),
             action(
                 id: "openMenuAnywhere",
@@ -1018,6 +1037,8 @@ enum ActionCatalog {
              .moveWindowToWorkspaceUp,
              .moveWindowToWorkspaceDown,
              .switchWorkspace,
+             .switchWorkspaceSlot,
+             .moveToWorkspaceSlot,
              .switchWorkspaceNext,
              .switchWorkspacePrevious,
              .focusMonitorPrevious,
@@ -1028,14 +1049,13 @@ enum ActionCatalog {
              .moveWorkspaceToMonitor,
              .swapWorkspaceWithMonitor,
              .workspaceBackAndForth,
-             .focusWorkspaceAnywhere,
-             .moveWindowToWorkspaceOnMonitor,
              .openCommandPalette,
              .raiseAllFloatingWindows,
              .rescueOffscreenWindows,
              .toggleFocusedWindowFloating,
+             .closeFocusedWindow,
              .assignFocusedWindowToScratchpad,
-             .toggleScratchpadWindow,
+             .toggleScratchpad,
              .openMenuAnywhere,
              .toggleWorkspaceBarVisibility,
              .toggleHiddenBarPanel,
@@ -1059,6 +1079,8 @@ enum ActionCatalog {
         case .moveColumnToWorkspaceUp: "Move Column to Workspace Up"
         case .moveColumnToWorkspaceDown: "Move Column to Workspace Down"
         case let .switchWorkspace(idx): "Switch to Workspace \(idx + 1)"
+        case let .switchWorkspaceSlot(slot): "Switch to Workspace Slot \(slot)"
+        case let .moveToWorkspaceSlot(slot): "Move to Workspace Slot \(slot)"
         case .switchWorkspaceNext: "Switch to Next Workspace"
         case .switchWorkspacePrevious: "Switch to Previous Workspace"
         case .focusMonitorPrevious: "Focus Previous Monitor"
@@ -1118,14 +1140,13 @@ enum ActionCatalog {
         case let .preselect(dir): "Preselect \(dir.displayName)"
         case .preselectClear: "Clear Preselection"
         case .workspaceBackAndForth: "Switch to Last Active Workspace"
-        case let .focusWorkspaceAnywhere(idx): "Focus Workspace \(idx + 1) Anywhere"
-        case let .moveWindowToWorkspaceOnMonitor(wsIdx, monDir): "Move Window to Workspace \(wsIdx + 1) on \(monDir.displayName) Monitor"
         case .openCommandPalette: "Toggle Command Palette"
         case .raiseAllFloatingWindows: "Raise All Floating Windows"
         case .rescueOffscreenWindows: "Rescue Off-Screen Floating Windows"
         case .toggleFocusedWindowFloating: "Toggle Focused Window Floating"
-        case .assignFocusedWindowToScratchpad: "Assign Focused Window to Scratchpad"
-        case .toggleScratchpadWindow: "Toggle Scratchpad Window"
+        case .closeFocusedWindow: "Close Focused Window"
+        case let .assignFocusedWindowToScratchpad(index): "Assign Focused Window to Scratchpad \(index)"
+        case let .toggleScratchpad(index): "Toggle Scratchpad \(index)"
         case .openMenuAnywhere: "Open Menu Anywhere"
         case .toggleWorkspaceBarVisibility: "Toggle Workspace Bar"
         case .toggleHiddenBarPanel: "Toggle Hidden Icons Bar"
@@ -1190,22 +1211,22 @@ enum ActionCatalog {
             .expelWindowFromColumn
         case .switchWorkspace:
             .switchWorkspace
+        case .switchWorkspaceSlot:
+            .switchWorkspaceSlot
+        case .moveToWorkspaceSlot:
+            .moveToWorkspaceSlot
         case .switchWorkspaceNext:
             .switchWorkspaceNext
         case .switchWorkspacePrevious:
             .switchWorkspacePrevious
         case .workspaceBackAndForth:
             .switchWorkspaceBackAndForth
-        case .focusWorkspaceAnywhere:
-            .switchWorkspaceAnywhere
         case .moveToWorkspace:
             .moveToWorkspace
         case .moveWindowToWorkspaceUp:
             .moveToWorkspaceUp
         case .moveWindowToWorkspaceDown:
             .moveToWorkspaceDown
-        case .moveWindowToWorkspaceOnMonitor:
-            .moveToWorkspaceOnMonitor
         case .focusMonitorPrevious:
             .focusMonitorPrevious
         case .focusMonitorNext:
@@ -1298,9 +1319,11 @@ enum ActionCatalog {
             .hiddenBarPanel
         case .toggleFocusedWindowFloating:
             .toggleFocusedWindowFloating
+        case .closeFocusedWindow:
+            .closeFocusedWindow
         case .assignFocusedWindowToScratchpad:
             .scratchpadAssign
-        case .toggleScratchpadWindow:
+        case .toggleScratchpad:
             .scratchpadToggle
         case .openMenuAnywhere:
             .openMenuAnywhere

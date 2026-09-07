@@ -234,8 +234,10 @@ extension AXEventHandler {
         expectedToken: WindowToken?,
         axRef: AXWindowRef? = nil,
         reason: WindowAdmissionPendingReason,
-        trigger: AdmissionRetryTrigger
+        trigger: AdmissionRetryTrigger,
+        preparedSubscriptionRetainContribution: Int = 0
     ) -> Bool {
+        assert(preparedSubscriptionRetainContribution >= 0)
         let state = normalizedAdmissionRetryState(windowId: windowId, observedAXRef: axRef)
         if var retainedState = state,
            !retainedState.exhausted,
@@ -246,6 +248,7 @@ extension AXEventHandler {
                     ?? retainedState.trigger.focusedAdmissionContinuation,
                 trigger.focusedAdmissionContinuation
             )
+            retainedState.preparedSubscriptionRetainCount += preparedSubscriptionRetainContribution
             admissionRetryStateByWindowId[windowId] = retainedState
             return true
         }
@@ -264,7 +267,8 @@ extension AXEventHandler {
             expectedToken: expectedToken,
             axRef: axRef,
             reason: reason,
-            trigger: trigger
+            trigger: trigger,
+            preparedSubscriptionRetainContribution: preparedSubscriptionRetainContribution
         )
         if let existingResult = updateExistingAdmissionRetry(
             state,
@@ -350,11 +354,27 @@ extension AXEventHandler {
         expectedToken: WindowToken?,
         axRef: AXWindowRef?,
         reason: WindowAdmissionPendingReason,
-        trigger: AdmissionRetryTrigger
+        trigger: AdmissionRetryTrigger,
+        preparedSubscriptionRetainContribution: Int
     ) -> AdmissionRetrySchedule {
         let preservesPriorTrigger = state.map { $0.trigger.priority > trigger.priority } ?? false
         let retainedFocusedContinuation = state.flatMap {
             $0.focusedAdmissionContinuation ?? $0.trigger.focusedAdmissionContinuation
+        }
+        let effectiveTrigger = preservesPriorTrigger ? state?.trigger ?? trigger : trigger
+        let identityRebindSource: ManagedWindowIdentityRebindSource?
+        if case let .identityRebind(oldWindow, _, _, _, _) = effectiveTrigger {
+            identityRebindSource = state?.identityRebindSource
+                ?? controller?.workspaceManager.handle(for: oldWindow.token).map {
+                    let source = ManagedWindowIdentityRebindSource(
+                        handle: $0,
+                        requestOrder: nextAdmissionRetryGeneration
+                    )
+                    nextAdmissionRetryGeneration &+= 1
+                    return source
+                }
+        } else {
+            identityRebindSource = nil
         }
         return AdmissionRetrySchedule(
             expectedToken: preservesPriorTrigger
@@ -362,11 +382,14 @@ extension AXEventHandler {
                 : expectedToken ?? state?.expectedToken,
             axRef: preservesPriorTrigger ? state?.axRef ?? axRef : axRef ?? state?.axRef,
             reason: preservesPriorTrigger ? state?.reason ?? reason : reason,
-            trigger: preservesPriorTrigger ? state?.trigger ?? trigger : trigger,
+            trigger: effectiveTrigger,
+            identityRebindSource: identityRebindSource,
             focusedAdmissionContinuation: latestFocusedAdmissionRetryContinuation(
                 retainedFocusedContinuation,
                 trigger.focusedAdmissionContinuation
-            )
+            ),
+            preparedSubscriptionRetainCount: (state?.preparedSubscriptionRetainCount ?? 0)
+                + preparedSubscriptionRetainContribution
         )
     }
 
@@ -377,11 +400,17 @@ extension AXEventHandler {
     ) -> Bool? {
         guard var state else { return nil }
         if state.exhausted {
+            releasePreparedWindowSubscriptions(
+                windowId,
+                count: state.preparedSubscriptionRetainCount
+            )
             state.expectedToken = schedule.expectedToken
             state.axRef = schedule.axRef
             state.reason = schedule.reason
             state.trigger = schedule.trigger
+            state.identityRebindSource = schedule.identityRebindSource
             state.focusedAdmissionContinuation = schedule.focusedAdmissionContinuation
+            state.preparedSubscriptionRetainCount = 0
             admissionRetryStateByWindowId[windowId] = state
             rejectDeferredReplacement(windowId: windowId)
             return false
@@ -389,6 +418,8 @@ extension AXEventHandler {
         switch state.executionPhase {
         case .waiting:
             guard state.task != nil else { return nil }
+        case .queued:
+            break
         case .running:
             guard schedule.trigger.priority >= state.trigger.priority else { return true }
             state.task?.cancel()
@@ -410,7 +441,9 @@ extension AXEventHandler {
         state.axRef = schedule.axRef
         state.reason = schedule.reason
         state.trigger = schedule.trigger
+        state.identityRebindSource = schedule.identityRebindSource
         state.focusedAdmissionContinuation = schedule.focusedAdmissionContinuation
+        state.preparedSubscriptionRetainCount = schedule.preparedSubscriptionRetainCount
         admissionRetryStateByWindowId[windowId] = state
         return !state.exhausted
     }
@@ -439,6 +472,9 @@ extension AXEventHandler {
         windowId: UInt32
     ) {
         state?.task?.cancel()
+        if let state {
+            completeAdmissionRetrySubscriptionOwnership(windowId: windowId, state: state)
+        }
         cancelSameAppCloseProbe(
             for: schedule.trigger,
             reason: "identity_rebind_retry_exhausted"
@@ -451,9 +487,11 @@ extension AXEventHandler {
             attempt: Self.createdWindowRetryLimit,
             generation: generation,
             trigger: schedule.trigger,
+            identityRebindSource: schedule.identityRebindSource,
             focusedAdmissionContinuation: schedule.focusedAdmissionContinuation,
             exhausted: true,
             executionPhase: .waiting,
+            preparedSubscriptionRetainCount: 0,
             task: nil
         )
         discardCreatePlacementContext(windowId: windowId)
@@ -478,6 +516,9 @@ extension AXEventHandler {
             )
         )
         rejectDeferredReplacement(windowId: windowId)
+        if let source = schedule.identityRebindSource {
+            resumeQueuedIdentityRebind(for: source.handle)
+        }
     }
 
     private func scheduleAdmissionRetryTask(
@@ -494,9 +535,11 @@ extension AXEventHandler {
             attempt: attempt,
             generation: generation,
             trigger: schedule.trigger,
+            identityRebindSource: schedule.identityRebindSource,
             focusedAdmissionContinuation: schedule.focusedAdmissionContinuation,
             exhausted: false,
             executionPhase: .waiting,
+            preparedSubscriptionRetainCount: schedule.preparedSubscriptionRetainCount,
             task: nil
         )
         state.task = makeAdmissionRetryTask(windowId: windowId, generation: generation)
@@ -517,18 +560,10 @@ extension AXEventHandler {
             try? await Task.sleep(for: Self.stabilizationRetryDelay)
             guard !Task.isCancelled,
                   let self,
-                  var state = self.admissionRetryStateByWindowId[windowId],
+                  let state = self.admissionRetryStateByWindowId[windowId],
                   state.generation == generation
             else { return }
-            let executionOwner = self.nextAdmissionRetryExecutionOwner
-            self.nextAdmissionRetryExecutionOwner &+= 1
-            state.executionPhase = .running(executionOwner)
-            self.admissionRetryStateByWindowId[windowId] = state
-            self.resumeAdmissionRetry(
-                windowId: windowId,
-                state: state,
-                executionOwner: executionOwner
-            )
+            self.dispatchAdmissionRetry(windowId: windowId)
         }
     }
 
@@ -562,10 +597,46 @@ extension AXEventHandler {
     }
 
     func retryAdmissionAfterFrameChange(windowId: UInt32) -> Bool {
+        dispatchAdmissionRetry(windowId: windowId)
+    }
+
+    @discardableResult
+    private func dispatchAdmissionRetry(windowId: UInt32) -> Bool {
         guard var state = admissionRetryStateByWindowId[windowId] else { return false }
+        if case .identityRebind = state.trigger {
+            if case .running = state.executionPhase { return true }
+            guard !state.exhausted, !state.identityRebindTargetDestroyed,
+                  let source = state.identityRebindSource
+            else { return false }
+            state.task?.cancel()
+            state.task = nil
+            state.executionPhase = .queued
+            admissionRetryStateByWindowId[windowId] = state
+            guard activeIdentityRebindsByHandle[source.handle] == nil,
+                  oldestIdentityRebind(for: source.handle)?.key == windowId
+            else { return true }
+            guard let entry = controller?.workspaceManager.entry(for: source.handle),
+                  case let .identityRebind(_, newWindow, metadata, hints, constraints) = state.trigger
+            else {
+                cancelCreatedWindowRetry(windowId: windowId)
+                rejectDeferredReplacement(windowId: windowId)
+                requestTargetedFullRescan(for: state.trigger.protectionPIDs)
+                return true
+            }
+            state.trigger = .identityRebind(
+                oldWindow: AXManagedWindowIdentity(token: entry.token, axRef: entry.axRef),
+                newWindow: newWindow,
+                managedReplacementMetadata: metadata,
+                admissionHints: hints,
+                sizeConstraints: constraints
+            )
+        }
         state.task?.cancel()
         let executionOwner = nextAdmissionRetryExecutionOwner
         nextAdmissionRetryExecutionOwner &+= 1
+        if let source = state.identityRebindSource {
+            activeIdentityRebindsByHandle[source.handle] = executionOwner
+        }
         state.executionPhase = .running(executionOwner)
         state.task = nil
         admissionRetryStateByWindowId[windowId] = state
@@ -577,14 +648,55 @@ extension AXEventHandler {
         return true
     }
 
+    private func oldestIdentityRebind(for handle: WindowHandle) -> (key: UInt32, value: AdmissionRetryState)? {
+        var oldest: (key: UInt32, value: AdmissionRetryState)?
+        var oldestOrder = UInt64.max
+        for (windowId, state) in admissionRetryStateByWindowId {
+            guard !state.exhausted, !state.identityRebindTargetDestroyed,
+                  let source = state.identityRebindSource, source.handle === handle,
+                  source.requestOrder < oldestOrder
+            else { continue }
+            oldest = (windowId, state)
+            oldestOrder = source.requestOrder
+        }
+        return oldest
+    }
+
+    private func resumeQueuedIdentityRebind(for handle: WindowHandle) {
+        guard activeIdentityRebindsByHandle[handle] == nil,
+              let next = oldestIdentityRebind(for: handle),
+              next.value.executionPhase == .queued
+        else { return }
+        dispatchAdmissionRetry(windowId: next.key)
+    }
+
+    private func finishIdentityRebindExecution(for handle: WindowHandle, executionOwner: UInt64) {
+        guard activeIdentityRebindsByHandle[handle] == executionOwner else { return }
+        activeIdentityRebindsByHandle.removeValue(forKey: handle)
+        resumeQueuedIdentityRebind(for: handle)
+    }
+
     func retryAdmissionAfterFrameChangeRequiresEarlyReturn(windowId: UInt32) -> Bool {
         guard admissionRetryStateByWindowId[windowId] != nil else { return false }
         let wasTrackedBeforeRetry = controller?.workspaceManager.entry(forWindowId: Int(windowId)) != nil
         return retryAdmissionAfterFrameChange(windowId: windowId) && !wasTrackedBeforeRetry
     }
 
-    func finishAdmissionRetryAfterTracking(windowId: UInt32) {
+    @discardableResult
+    func finishAdmissionRetryAfterTracking(windowId: UInt32) -> Bool {
         finishAdmissionRetry(windowId: windowId)
+    }
+
+    func finishRuleReevaluationAfterTracking(
+        windowId: UInt32,
+        wasNewlyManaged: Bool
+    ) {
+        let completedSubscriptionIdentityTransition = finishAdmissionRetryAfterTracking(
+            windowId: windowId
+        )
+        if wasNewlyManaged, !completedSubscriptionIdentityTransition {
+            noteManagedWindowSubscriptionIdentityChanged()
+        }
     }
 
     func finishAdmissionRetryAfterCollision(
@@ -599,7 +711,7 @@ extension AXEventHandler {
             return
         }
         if case .identityRebind = state.trigger { return }
-        finishAdmissionRetry(windowId: windowId)
+        _ = finishAdmissionRetry(windowId: windowId)
     }
 
     func ownsFocusedAdmissionRetryExecution(_ execution: FocusedAdmissionRetryExecution) -> Bool {
@@ -639,27 +751,36 @@ extension AXEventHandler {
             return false
         }
         state.task?.cancel()
+        completeAdmissionRetrySubscriptionOwnership(
+            windowId: execution.windowId,
+            state: state
+        )
         finishDeferredReplacementAfterTracking(windowId: execution.windowId)
         return true
     }
 
-    private func finishAdmissionRetry(windowId: UInt32) {
+    private func finishAdmissionRetry(windowId: UInt32) -> Bool {
         guard var state = admissionRetryStateByWindowId[windowId] else {
             finishDeferredReplacementAfterTracking(windowId: windowId)
-            return
+            return false
         }
         if let executionOwner = state.focusedAdmissionReplayExecutionOwner,
            state.executionPhase == .running(executionOwner)
         {
-            return
+            return false
         }
         state.task?.cancel()
+        let completedSubscriptionIdentityTransition = completeAdmissionRetrySubscriptionOwnership(
+            windowId: windowId,
+            state: state
+        )
+        state.preparedSubscriptionRetainCount = 0
         finishDeferredReplacementAfterTracking(windowId: windowId)
         guard let continuation = state.focusedAdmissionContinuation
             ?? state.trigger.focusedAdmissionContinuation
         else {
             admissionRetryStateByWindowId.removeValue(forKey: windowId)
-            return
+            return completedSubscriptionIdentityTransition
         }
         let executionOwner = nextAdmissionRetryExecutionOwner
         nextAdmissionRetryExecutionOwner &+= 1
@@ -670,6 +791,7 @@ extension AXEventHandler {
             observationGeneration: continuation.observationGeneration,
             callbackGeneration: continuation.callbackGeneration
         )
+        state.identityRebindSource = nil
         state.focusedAdmissionContinuation = continuation
         state.executionPhase = .running(executionOwner)
         state.focusedAdmissionReplayExecutionOwner = executionOwner
@@ -690,6 +812,7 @@ extension AXEventHandler {
         if !factRequestIssued {
             finishFocusedAdmissionRetryExecution(execution)
         }
+        return completedSubscriptionIdentityTransition
     }
 
     func hasLiveFocusedAdmissionContinuation(for token: WindowToken) -> Bool {
@@ -706,6 +829,8 @@ extension AXEventHandler {
         switch state.executionPhase {
         case .waiting:
             return state.task != nil
+        case .queued:
+            return true
         case .running:
             return true
         }
@@ -814,10 +939,16 @@ extension AXEventHandler {
         }
     }
 
-    func cancelCreatedWindowRetry(windowId: UInt32) {
-        guard let state = admissionRetryStateByWindowId.removeValue(forKey: windowId) else { return }
+    @discardableResult
+    func cancelCreatedWindowRetry(windowId: UInt32) -> Int {
+        guard let state = admissionRetryStateByWindowId.removeValue(forKey: windowId) else { return 0 }
         state.task?.cancel()
+        completeAdmissionRetrySubscriptionOwnership(windowId: windowId, state: state)
         cancelSameAppCloseProbe(for: state.trigger, reason: "identity_rebind_retry_cancelled")
+        if let source = state.identityRebindSource {
+            resumeQueuedIdentityRebind(for: source.handle)
+        }
+        return state.preparedSubscriptionRetainCount
     }
 
     func cancelCreatedWindowRetry(windowId: Int) {
@@ -826,8 +957,9 @@ extension AXEventHandler {
     }
 
     func resetCreatedWindowRetryState() {
-        for (_, state) in admissionRetryStateByWindowId {
+        for (windowId, state) in admissionRetryStateByWindowId {
             state.task?.cancel()
+            completeAdmissionRetrySubscriptionOwnership(windowId: windowId, state: state)
             cancelSameAppCloseProbe(for: state.trigger, reason: "identity_rebind_retry_reset")
         }
         admissionRetryStateByWindowId.removeAll()
@@ -843,6 +975,22 @@ extension AXEventHandler {
             matchingFocusedToken: oldWindow.token,
             reason: reason
         )
+    }
+
+    @discardableResult
+    private func completeAdmissionRetrySubscriptionOwnership(
+        windowId: UInt32,
+        state: AdmissionRetryState
+    ) -> Bool {
+        if releasePreparedWindowSubscriptions(
+            windowId,
+            count: state.preparedSubscriptionRetainCount
+        ) {
+            return true
+        }
+        guard case .identityRebind = state.trigger else { return false }
+        noteManagedWindowSubscriptionIdentityChanged()
+        return true
     }
 
     private func admissionIncarnationRelation(
@@ -910,6 +1058,11 @@ extension AXEventHandler {
             guard let windowId = UInt32(exactly: newWindow.token.windowId) else { return }
             let task = Task { @MainActor [weak self] in
                 guard let self else { return }
+                defer {
+                    if let source = state.identityRebindSource {
+                        self.finishIdentityRebindExecution(for: source.handle, executionOwner: executionOwner)
+                    }
+                }
                 await self.completeManagedWindowIdentityRebind(
                     from: oldWindow,
                     to: newWindow,
@@ -968,7 +1121,8 @@ extension AXEventHandler {
             admissionRetryStateByWindowId[windowId] = state
             _ = scheduleTrackedTilingPromotionRetry(token: token, axRef: axRef, reason: reason)
         } else {
-            admissionRetryStateByWindowId[windowId] = nil
+            admissionRetryStateByWindowId[windowId] = state
+            cancelCreatedWindowRetry(windowId: windowId)
             finishDeferredReplacementAfterTracking(windowId: windowId)
         }
     }

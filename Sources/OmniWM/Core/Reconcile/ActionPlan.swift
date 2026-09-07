@@ -21,6 +21,7 @@ struct PersistedHydrationMutation: Equatable {
     let floatingFrame: CGRect?
     let niriPlacement: PersistedNiriPlacement?
     let detachedNiriContainerSizingState: NiriContainerSizingState?
+    let dwindlePlacement: PersistedDwindlePlacement?
     let consumedKey: PersistedWindowRestoreKey
     let consumedEntry: PersistedWindowRestoreConsumptionKey
 }
@@ -112,16 +113,14 @@ struct ActionPlan: Equatable {
 
     private func describe(_ focusSession: FocusSessionSnapshot) -> String {
         var parts: [String] = []
-        parts.append("focused=\(focusSession.focusedToken.map(String.init(describing:)) ?? "nil")")
+        parts.append("selected=\(focusSession.selectedManagedToken.map(String.init(describing:)) ?? "nil")")
+        parts.append("native=\(focusSession.nativeFocusOwner)")
         parts.append("pending=\(focusSession.pendingManagedFocus.token.map(String.init(describing:)) ?? "nil")")
         if let requestId = focusSession.pendingManagedFocus.requestId {
             parts.append("request=\(requestId)")
         }
         if let leaseOwner = focusSession.focusLease?.owner.rawValue {
             parts.append("lease=\(leaseOwner)")
-        }
-        if focusSession.isNonManagedFocusActive {
-            parts.append("non_managed=true")
         }
         return parts.joined(separator: ",")
     }

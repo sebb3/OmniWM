@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
+import CoreGraphics
 import os
 import Synchronization
 
@@ -10,12 +11,21 @@ final class BorderOpMetricsRecorder: RuntimeTraceRecording, @unchecked Sendable 
     let sectionTitle = "Border Op Metrics"
 
     private struct Counters {
+        var fullScenePasses = 0
+        var borderOnlyPasses = 0
         var applyCalls = 0
         var shortCircuited = 0
         var updateCalls = 0
+        var windowCreations = 0
+        var levelQueries = 0
+        var levelFallbacks = 0
+        var levelRetries = 0
         var cornerRadiusHits = 0
         var cornerRadiusQueries = 0
+        var scaleReconfigurations = 0
         var redraws = 0
+        var flushes = 0
+        var rasterizedPointArea: UInt64 = 0
         var reshapes = 0
         var moveOnly = 0
         var moveAndOrder = 0
@@ -42,12 +52,36 @@ final class BorderOpMetricsRecorder: RuntimeTraceRecording, @unchecked Sendable 
         bump { $0.applyCalls += 1 }
     }
 
+    func noteFullScenePass() {
+        bump { $0.fullScenePasses += 1 }
+    }
+
+    func noteBorderOnlyPass() {
+        bump { $0.borderOnlyPasses += 1 }
+    }
+
     func noteShortCircuit() {
         bump { $0.shortCircuited += 1 }
     }
 
     func noteUpdate() {
         bump { $0.updateCalls += 1 }
+    }
+
+    func noteWindowCreation() {
+        bump { $0.windowCreations += 1 }
+    }
+
+    func noteLevelQuery() {
+        bump { $0.levelQueries += 1 }
+    }
+
+    func noteLevelFallback() {
+        bump { $0.levelFallbacks += 1 }
+    }
+
+    func noteLevelRetry() {
+        bump { $0.levelRetries += 1 }
     }
 
     func noteCornerRadiusHit() {
@@ -58,24 +92,40 @@ final class BorderOpMetricsRecorder: RuntimeTraceRecording, @unchecked Sendable 
         bump { $0.cornerRadiusQueries += 1 }
     }
 
-    func noteRedraw() {
-        bump { $0.redraws += 1 }
+    func noteScaleReconfiguration() {
+        bump { $0.scaleReconfigurations += 1 }
     }
 
-    func noteReshape() {
-        bump { $0.reshapes += 1 }
+    func noteRedraw(rasterizedArea: CGFloat = 0) {
+        let boundedArea = rasterizedArea.isFinite ? max(0, rasterizedArea) : 0
+        bump {
+            $0.redraws += 1
+            $0.rasterizedPointArea += UInt64(boundedArea.rounded(.up))
+        }
     }
 
-    func noteMoveOnly() {
-        bump { $0.moveOnly += 1 }
+    func noteFlush() {
+        bump { $0.flushes += 1 }
     }
 
-    func noteMoveAndOrder() {
-        bump { $0.moveAndOrder += 1 }
+    func noteReshape(count: Int = 1) {
+        guard count > 0 else { return }
+        bump { $0.reshapes += count }
     }
 
-    func noteHide() {
-        bump { $0.hides += 1 }
+    func noteMoveOnly(count: Int = 1) {
+        guard count > 0 else { return }
+        bump { $0.moveOnly += count }
+    }
+
+    func noteMoveAndOrder(count: Int = 1) {
+        guard count > 0 else { return }
+        bump { $0.moveAndOrder += count }
+    }
+
+    func noteHide(count: Int = 1) {
+        guard count > 0 else { return }
+        bump { $0.hides += count }
     }
 
     func noteBoundsQueryFallback() {
@@ -94,14 +144,25 @@ final class BorderOpMetricsRecorder: RuntimeTraceRecording, @unchecked Sendable 
 
     func dump() -> String {
         let snapshot = counters.withLock { $0 }
-        guard snapshot.applyCalls > 0 || snapshot.updateCalls > 0 else { return "none" }
+        guard snapshot.fullScenePasses > 0
+            || snapshot.borderOnlyPasses > 0
+            || snapshot.applyCalls > 0
+            || snapshot.updateCalls > 0
+        else {
+            return "none"
+        }
         return [
+            "fullScenePasses=\(snapshot.fullScenePasses) borderOnlyPasses=\(snapshot.borderOnlyPasses)",
             "applyCalls=\(snapshot.applyCalls) shortCircuited=\(snapshot.shortCircuited)"
                 + " updateCalls=\(snapshot.updateCalls)",
+            "windowCreations=\(snapshot.windowCreations) levelQueries=\(snapshot.levelQueries)"
+                + " levelFallbacks=\(snapshot.levelFallbacks) levelRetries=\(snapshot.levelRetries)",
             "cornerRadius hits=\(snapshot.cornerRadiusHits) queries=\(snapshot.cornerRadiusQueries)",
-            "redraws=\(snapshot.redraws) reshapes=\(snapshot.reshapes)"
+            "redraws=\(snapshot.redraws) flushes=\(snapshot.flushes)"
+                + " rasterizedPointArea=\(snapshot.rasterizedPointArea) reshapes=\(snapshot.reshapes)"
                 + " moveOnly=\(snapshot.moveOnly) moveAndOrder=\(snapshot.moveAndOrder)",
-            "hides=\(snapshot.hides) boundsQueryFallbacks=\(snapshot.boundsQueryFallbacks)"
+            "hides=\(snapshot.hides) scaleReconfigurations=\(snapshot.scaleReconfigurations)"
+                + " boundsQueryFallbacks=\(snapshot.boundsQueryFallbacks)"
         ].joined(separator: "\n")
     }
 }

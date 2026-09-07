@@ -9,41 +9,105 @@ import OmniWMIPC
 struct WindowFocusOperations {
     let activateApp: (pid_t) -> Void
     let focusSpecificWindow: (pid_t, UInt32, AXUIElement) -> Void
+    let deactivateSameAppWindow: (pid_t, UInt32) -> Bool
+    let activateAndFocusSameAppWindow: (pid_t, UInt32, AXUIElement) -> Bool
     let raiseWindow: (AXUIElement) -> Void
     let orderWindow: (UInt32) -> Void
+    let enqueueRetryRaise: (pid_t, AXWindowRef, RunLoopJob, @escaping @MainActor @Sendable () -> Void) -> Bool
 
     init(
         activateApp: @escaping (pid_t) -> Void,
         focusSpecificWindow: @escaping (pid_t, UInt32, AXUIElement) -> Void,
+        deactivateSameAppWindow: @escaping (pid_t, UInt32) -> Bool = { _, _ in false },
+        activateAndFocusSameAppWindow: @escaping (pid_t, UInt32, AXUIElement) -> Bool = { _, _, _ in false },
         raiseWindow: @escaping (AXUIElement) -> Void,
-        orderWindow: @escaping (UInt32) -> Void = { _ in }
+        orderWindow: @escaping (UInt32) -> Void = { _ in },
+        enqueueRetryRaise: @escaping (
+            pid_t, AXWindowRef, RunLoopJob, @escaping @MainActor @Sendable () -> Void
+        ) -> Bool = { pid, window, job, completion in
+            guard let context = AppAXContext.contexts[pid] else { return false }
+            return context.enqueueRetryRaise(window, job: job, completion: completion)
+        }
     ) {
         self.activateApp = activateApp
         self.focusSpecificWindow = focusSpecificWindow
+        self.deactivateSameAppWindow = deactivateSameAppWindow
+        self.activateAndFocusSameAppWindow = activateAndFocusSameAppWindow
         self.raiseWindow = raiseWindow
         self.orderWindow = orderWindow
+        self.enqueueRetryRaise = enqueueRetryRaise
     }
 
     static let live = WindowFocusOperations(
         activateApp: { pid in
-            if let runningApp = NSRunningApplication(processIdentifier: pid) {
-                runningApp.activate(options: [])
+            MainThreadAXSpanTrace.measure(.activateApp, pid: pid) {
+                if let runningApp = NSRunningApplication(processIdentifier: pid) {
+                    runningApp.activate(options: [])
+                }
             }
         },
         focusSpecificWindow: { pid, windowId, element in
-            OmniWM.focusWindow(pid: pid, windowId: windowId, windowRef: element)
+            MainThreadAXSpanTrace.measure(.privateFocus, pid: pid, windowId: Int(windowId)) {
+                OmniWM.focusWindow(pid: pid, windowId: windowId, windowRef: element)
+            }
+        },
+        deactivateSameAppWindow: { pid, windowId in
+            MainThreadAXSpanTrace.measure(.sameAppDeactivate, pid: pid, windowId: Int(windowId)) {
+                OmniWM.deactivateSameAppWindow(pid: pid, windowId: windowId)
+            } succeeded: { $0 }
+        },
+        activateAndFocusSameAppWindow: { pid, windowId, element in
+            MainThreadAXSpanTrace.measure(.sameAppHandoff, pid: pid, windowId: Int(windowId)) {
+                OmniWM.activateAndFocusSameAppWindow(
+                    pid: pid,
+                    windowId: windowId,
+                    windowRef: element
+                )
+            } succeeded: { $0 }
         },
         raiseWindow: { element in
-            performAXAction(element, kAXRaiseAction as CFString, noteKey: "performRaiseFailed")
+            _ = MainThreadAXSpanTrace.measure(.axRaise) {
+                performAXAction(element, kAXRaiseAction as CFString, noteKey: "performRaiseFailed")
+            } succeeded: { $0 }
         },
         orderWindow: { windowId in
-            SkyLight.shared.orderWindow(windowId, relativeTo: 0, order: .above)
+            MainThreadAXSpanTrace.measure(.orderWindow, windowId: Int(windowId)) {
+                SkyLight.shared.orderWindow(windowId, relativeTo: 0, order: .above)
+            }
         }
     )
 }
 
+private struct ScratchpadStackingPlan {
+    let id: UInt64
+    let index: ScratchpadIndex
+    let workspaceId: WorkspaceDescriptor.ID
+    let handles: [WindowHandle]
+    var nextHandleIndex: Int
+    var pendingHandle: WindowHandle?
+    var pendingRequestId: IntentID?
+    var pendingActivationSettled: Bool
+    var continuationScheduled: Bool
+}
+
+private struct DeferredScratchpadStacking {
+    let id: UInt64
+    let index: ScratchpadIndex
+    let workspaceId: WorkspaceDescriptor.ID
+    let tokens: [WindowToken]
+}
+
 @MainActor @Observable
 final class WMController {
+    private struct BorderLayoutConfig: Equatable {
+        let enabled: Bool
+        let width: CGFloat
+
+        func clearance(scale: CGFloat) -> CGFloat {
+            BorderConfig.layoutClearance(enabled: enabled, width: width, scale: scale)
+        }
+    }
+
     struct StatusBarWorkspaceSummary: Equatable {
         let monitorId: Monitor.ID
         let workspaceLabel: String
@@ -73,6 +137,8 @@ final class WMController {
     var diagnosticsIssues: [DiagnosticsIssue] = []
 
     let settings: SettingsStore
+    @ObservationIgnored
+    private var appliedBorderLayoutConfig: BorderLayoutConfig
     let workspaceManager: WorkspaceManager
     let hotkeys = HotkeyCenter()
     private(set) var hotkeyRegistrationFailures: [HotkeyCommand: HotkeyRegistrationFailureReason] = [:]
@@ -85,9 +151,14 @@ final class WMController {
     let lockScreenObserver = LockScreenObserver()
     var isLockScreenActive: Bool = false {
         didSet {
-            guard isLockScreenActive, oldValue != isLockScreenActive else { return }
-            resetWorkspaceBarReveal()
-            mouseEventHandler.handleInputSuppressionBegan()
+            guard oldValue != isLockScreenActive else { return }
+            if isLockScreenActive {
+                layoutRefreshController.suspendForLockScreen()
+                resetWorkspaceBarReveal()
+                mouseEventHandler.handleInputSuppressionBegan()
+            } else {
+                layoutRefreshController.awaitPostUnlockTopologySample()
+            }
         }
     }
 
@@ -102,6 +173,20 @@ final class WMController {
     let intentLedger = IntentLedger()
     let deadlineWheel = DeadlineWheel()
     @ObservationIgnored
+    var scheduleScratchpadStackingContinuation: (@escaping @MainActor () -> Void) -> Void = { continuation in
+        Task { @MainActor in
+            await Task.yield()
+            continuation()
+        }
+    }
+
+    @ObservationIgnored
+    private var scratchpadStackingPlan: ScratchpadStackingPlan?
+    @ObservationIgnored
+    private var deferredScratchpadStacking: DeferredScratchpadStacking?
+    @ObservationIgnored
+    private var scratchpadStackingGeneration: UInt64 = 0
+    @ObservationIgnored
     private(set) lazy var eventInterpreter = EventInterpreter(controller: self)
     let focusPolicyEngine: FocusPolicyEngine
     private let restorePlanner = RestorePlanner()
@@ -114,7 +199,12 @@ final class WMController {
 
     var dwindleEngine: DwindleLayoutEngine? {
         get { workspaceManager.dwindleEngine }
-        set { workspaceManager.dwindleEngine = newValue }
+        set {
+            if let current = workspaceManager.dwindleEngine, current !== newValue {
+                layoutRefreshController.stopAllDwindleAnimations()
+            }
+            workspaceManager.dwindleEngine = newValue
+        }
     }
 
     let tabRailManager = TabRailManager()
@@ -153,7 +243,7 @@ final class WMController {
     }()
 
     @ObservationIgnored
-    private let hiddenBarController: HiddenBarController
+    let hiddenBarController: HiddenBarController
     @ObservationIgnored
     private lazy var quakeTerminalController: QuakeTerminalController = .init(
         settings: settings,
@@ -227,7 +317,7 @@ final class WMController {
     }
 
     @ObservationIgnored
-    private lazy var clipboardHistoryService = ClipboardHistoryService(configuration: clipboardHistoryConfiguration())
+    lazy var clipboardHistoryService = ClipboardHistoryService(configuration: clipboardHistoryConfiguration())
     @ObservationIgnored
     private(set) lazy var focusNotificationDispatcher = FocusNotificationDispatcher(controller: self)
     @ObservationIgnored
@@ -247,7 +337,7 @@ final class WMController {
     let motionPolicy: MotionPolicy
     let diagnosticsDirectory: URL
     private let clipboardHistoryDirectory: URL
-    private let windowFocusOperations: WindowFocusOperations
+    let windowFocusOperations: WindowFocusOperations
     weak var statusBarController: StatusBarController?
 
     init(
@@ -260,6 +350,10 @@ final class WMController {
         workspaceBarIconResolver: WorkspaceBarIconResolver? = nil
     ) {
         self.settings = settings
+        appliedBorderLayoutConfig = BorderLayoutConfig(
+            enabled: settings.bordersEnabled,
+            width: CGFloat(settings.borderWidth)
+        )
         self.workspaceBarIconResolver = workspaceBarIconResolver
             ?? WorkspaceBarIconResolver(settingsFileURL: settings.settingsFileURL)
         motionPolicy = MotionPolicy(animationsEnabled: settings.animationsEnabled)
@@ -278,9 +372,6 @@ final class WMController {
         }
         axManager.isWindowParked = { [workspaceManager] windowId in
             workspaceManager.entry(forWindowId: windowId)?.hiddenState != nil
-        }
-        axManager.interactionPolicyForWindowId = { [workspaceManager] windowId in
-            workspaceManager.entry(forWindowId: windowId)?.interactionPolicy ?? .full
         }
         intentLedger.seqProvider = { [eventIntake] in eventIntake.lastSeq }
         intentLedger.deadlineWheel = deadlineWheel
@@ -312,20 +403,43 @@ final class WMController {
                 )
             }
         }
-        workspaceManager.onSessionStateChanged = { [weak self] in
-            self?.handleSessionStateChanged()
+        workspaceManager.onSessionStateChanged = { [weak self] surfaceScope in
+            self?.handleSessionStateChanged(surfaceScope: surfaceScope)
         }
-        workspaceManager.onRuntimeInvalidation = { [weak self] workspaceId, domains in
-            self?.handleRuntimeInvalidation(workspaceId: workspaceId, domains: domains)
+        workspaceManager.onRuntimeInvalidation = { [weak self] workspaceId, domains, surfaceScope in
+            self?.handleRuntimeInvalidation(
+                workspaceId: workspaceId,
+                domains: domains,
+                surfaceScope: surfaceScope
+            )
         }
         workspaceManager.onWindowPresenceObserved = { [weak self] handle in
             self?.layoutRefreshController.recordWindowPresence(handle)
+            self?.axEventHandler.probeUnresolvedNativeFocus(after: handle.token)
         }
         workspaceManager.onWindowRemoved = { [weak self] entry in
             self?.windowActionHandlerStorage?.handleOverviewWindowRemoved(entry)
         }
         workspaceManager.onDeferredWorkspaceMonitorMove = { [weak self] outcome in
             self?.layoutRefreshController.commitWorkspaceMonitorTransition(outcome)
+        }
+        workspaceManager.onAnimationMotionsWillBeRemoved = { [weak self] workspaceIds in
+            guard let self else { return }
+            for workspaceId in workspaceIds {
+                self.niriLayoutHandler.terminateViewportGesture(
+                    for: workspaceId,
+                    disposition: .settleLiveOffset
+                )
+                let displayIds = self.niriLayoutHandler.scrollAnimationByDisplay.compactMap { displayId, registered in
+                    registered == workspaceId ? displayId : nil
+                }
+                for displayId in displayIds {
+                    self.layoutRefreshController.stopScrollAnimation(for: displayId)
+                }
+                for displayId in self.dwindleLayoutHandler.animationDisplayIds(for: workspaceId) {
+                    self.layoutRefreshController.stopDwindleAnimation(for: displayId)
+                }
+            }
         }
         focusPolicyEngine.onLeaseChanged = { [weak self] lease in
             self?.workspaceManager.recordReconcileEvent(
@@ -364,13 +478,6 @@ final class WMController {
         setHotkeysEnabled(settings.hotkeysEnabled)
 
         setGapSize(settings.gapSize, publishChange: false)
-        setOuterGaps(
-            left: settings.outerGapLeft,
-            right: settings.outerGapRight,
-            top: settings.outerGapTop,
-            bottom: settings.outerGapBottom,
-            publishChange: false
-        )
 
         if niriEngine == nil {
             enableNiriLayout(
@@ -515,21 +622,24 @@ final class WMController {
         }
     }
 
-    func setOuterGaps(
-        left: Double,
-        right: Double,
-        top: Double,
-        bottom: Double,
-        publishChange: Bool = true
-    ) {
-        workspaceManager.setOuterGaps(left: left, right: right, top: top, bottom: bottom)
-        if publishChange {
-            publishDisplayChanged()
-        }
-    }
-
     func borderSettingsChanged() {
-        surfaceReconciler.noteWorldChanged()
+        let current = BorderLayoutConfig(
+            enabled: settings.bordersEnabled,
+            width: CGFloat(settings.borderWidth)
+        )
+        let previous = appliedBorderLayoutConfig
+        appliedBorderLayoutConfig = current
+        let clearanceChanged = workspaceManager.monitors.contains { monitor in
+            let scale = backingScaleFactor(for: monitor)
+            return previous.clearance(scale: scale) != current.clearance(scale: scale)
+        }
+        if clearanceChanged {
+            workspaceManager.invalidateAllLayouts()
+            layoutRefreshController.requestRelayout(reason: .layoutConfigChanged)
+            surfaceReconciler.noteWorldChanged()
+        } else {
+            surfaceReconciler.noteBorderChanged()
+        }
     }
 
     func setWorkspaceBarEnabled(_ enabled: Bool) {
@@ -538,6 +648,7 @@ final class WMController {
         }
         pruneHiddenWorkspaceBarMonitorIds()
         workspaceBarManager.setup(controller: self, settings: settings)
+        workspaceManager.invalidateAllLayouts()
         layoutRefreshController.requestRelayout(reason: .monitorSettingsChanged)
         surfaceReconciler.noteWorldChanged()
         syncWorkspaceBarRevealMonitor()
@@ -549,6 +660,10 @@ final class WMController {
         workspaceBarManager.cleanup()
     }
 
+    func invalidateOverviewDeferredActionsForServiceStop() {
+        windowActionHandlerStorage?.invalidateOverviewDeferredActionsForServiceStop()
+    }
+
     func setPreventSleepEnabled(_ enabled: Bool) {
         if enabled {
             SleepPreventionManager.shared.preventSleep()
@@ -558,6 +673,7 @@ final class WMController {
     }
 
     func toggleHiddenBarPanel() {
+        statusBarController?.dismissPanel()
         hiddenBarController.togglePanel(placement: hiddenBarPanelPlacement())
     }
 
@@ -625,6 +741,7 @@ final class WMController {
             hiddenWorkspaceBarMonitorIds.insert(monitor.id)
         }
 
+        workspaceManager.invalidateAllLayouts()
         layoutRefreshController.requestRelayout(reason: .monitorSettingsChanged)
         surfaceReconciler.noteWorldChanged()
         hiddenBarController.dismissPanel()
@@ -695,7 +812,7 @@ final class WMController {
             return nil
         }
 
-        let focusedAppName: String? = if let focusedToken = workspaceManager.focusedToken,
+        let focusedAppName: String? = if let focusedToken = workspaceManager.selectedManagedToken,
                                          let entry = workspaceManager.entry(for: focusedToken),
                                          entry.workspaceId == workspace.id
         {
@@ -717,6 +834,7 @@ final class WMController {
             forceReload: forceIconReload
         )
         pruneHiddenWorkspaceBarMonitorIds()
+        workspaceManager.invalidateAllLayouts()
         layoutRefreshController.requestRelayout(reason: .monitorSettingsChanged)
         surfaceReconciler.noteWorldChanged()
         syncWorkspaceBarRevealMonitor()
@@ -787,41 +905,22 @@ final class WMController {
     }
 
     func updateMonitorDwindleSettings() {
-        guard let engine = dwindleEngine else { return }
-        workspaceManager.withEngineMutationScope {
-            for monitor in workspaceManager.monitors {
-                let resolved = settings.resolvedDwindleSettings(for: monitor)
-                engine.updateMonitorSettings(resolved, for: monitor.id)
-            }
-        }
+        guard dwindleEngine != nil else { return }
+        workspaceManager.invalidateAllLayouts()
         layoutRefreshController.requestRelayout(reason: .monitorSettingsChanged)
     }
 
     func updateMonitorGapSettings() {
+        workspaceManager.invalidateAllLayouts()
         layoutRefreshController.requestRelayout(reason: .monitorSettingsChanged)
         publishDisplayChanged()
     }
 
-    private func publishDisplayChanged() {
+    func publishDisplayChanged() {
         guard let ipcApplicationBridge else { return }
         Task {
             await ipcApplicationBridge.publishEvent(.displayChanged)
         }
-    }
-
-    func workspaceBarItems(
-        for monitor: Monitor,
-        projection options: WorkspaceBarProjectionOptions
-    ) -> [WorkspaceBarItem] {
-        WorkspaceBarDataSource.workspaceBarItems(
-            for: monitor,
-            options: options,
-            workspaceManager: workspaceManager,
-            appInfoCache: appInfoCache,
-            iconResolver: workspaceBarIconResolver,
-            focusedToken: workspaceManager.focusedToken,
-            settings: settings
-        )
     }
 
     func workspaceBarProjection(
@@ -834,7 +933,7 @@ final class WMController {
             workspaceManager: workspaceManager,
             appInfoCache: appInfoCache,
             iconResolver: workspaceBarIconResolver,
-            focusedToken: workspaceManager.focusedToken,
+            focusedToken: workspaceManager.selectedManagedToken,
             settings: settings
         )
     }
@@ -880,53 +979,39 @@ final class WMController {
     }
 
     @discardableResult
-    func activateScratchpadFromBar(on monitorId: Monitor.ID?) -> ExternalCommandResult {
-        guard let scratchpadToken = workspaceManager.scratchpadToken() else {
-            return .notFound
-        }
-        guard let entry = workspaceManager.entry(for: scratchpadToken) else {
-            cleanupScratchpadWindowResources(for: scratchpadToken)
-            return .notFound
-        }
-        guard !isManagedWindowSuspendedForNativeFullscreen(scratchpadToken) else {
-            return .notFound
-        }
-
-        if workspaceManager.isAppHidden(pid: entry.pid),
-           let handle = workspaceManager.handle(for: scratchpadToken)
-        {
-            return windowActionHandler.revealScratchpadFromBar(
-                handle: handle,
-                monitorId: monitorId
-            ) ? .executed : .notFound
+    func activateScratchpadFromBar(index: ScratchpadIndex, on monitorId: Monitor.ID?) -> ExternalCommandResult {
+        if workspaceManager.revealedScratchpadIndex() != index {
+            let hiddenAppHandles = workspaceManager.scratchpadMembers(in: index).compactMap { token in
+                workspaceManager.entry(for: token).flatMap {
+                    workspaceManager.isAppHidden(pid: $0.pid) ? workspaceManager.handle(for: token) : nil
+                }
+            }
+            if let handle = hiddenAppHandles.first,
+               windowActionHandler.revealScratchpadFromBar(
+                   handle: handle,
+                   index: index,
+                   monitorId: monitorId
+               )
+            {
+                return .executed
+            }
         }
 
         if let monitorId {
             _ = workspaceManager.setInteractionMonitor(monitorId)
         }
-
-        if let hiddenState = workspaceManager.hiddenState(for: scratchpadToken) {
-            guard hiddenState.isScratchpad || hiddenState.workspaceInactive,
-                  let target = scratchpadTarget(on: monitorId)
-            else {
-                return .notFound
-            }
-            let updatedEntry = workspaceManager.entry(for: scratchpadToken) ?? entry
-            return showScratchpadWindow(updatedEntry, on: target.workspaceId, monitor: target.monitor)
-                ? .executed
-                : .notFound
-        }
-
-        if windowActionHandler.focusWindowFromBar(token: scratchpadToken) {
-            return .executed
-        }
-
-        focusWindow(scratchpadToken)
-        return .executed
+        return toggleScratchpad(index, on: monitorId)
     }
 
     func setFocusFollowsMouse(_ enabled: Bool) {
         focusFollowsMouseEnabled = enabled
+        guard !enabled,
+              let request = intentLedger.activeManagedRequest,
+              request.origin == .focusFollowsMouse
+        else {
+            return
+        }
+        cancelManagedFocusRequestAndRestoreSource(request)
     }
 
     func setMoveMouseToFocusedWindow(_ enabled: Bool) {
@@ -992,10 +1077,14 @@ final class WMController {
     }
 
     func innerGap(for monitor: Monitor) -> CGFloat {
-        guard settings.gapSettings(for: monitor)?.innerGap != nil else {
-            return CGFloat(workspaceManager.gaps)
-        }
-        return settings.resolvedGapSettings(for: monitor).innerGap
+        innerGap(for: monitor, scale: backingScaleFactor(for: monitor))
+    }
+
+    func innerGap(for monitor: Monitor, scale: CGFloat) -> CGFloat {
+        let rawGap = settings.gapSettings(for: monitor)?.innerGap == nil
+            ? CGFloat(workspaceManager.gaps)
+            : settings.resolvedGapSettings(for: monitor).innerGap
+        return max(rawGap, borderClearance(scale: scale))
     }
 
     func innerGap(for workspaceId: WorkspaceDescriptor.ID) -> CGFloat {
@@ -1005,28 +1094,121 @@ final class WMController {
         return innerGap(for: monitor)
     }
 
-    func insetWorkingFrame(for monitor: Monitor) -> CGRect {
-        let scale = NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
+    func resolvedDwindleSettings(for monitor: Monitor) -> ResolvedDwindleSettings {
+        resolvedDwindleSettings(for: monitor, scale: backingScaleFactor(for: monitor))
+    }
+
+    func resolvedDwindleSettings(for monitor: Monitor, scale: CGFloat) -> ResolvedDwindleSettings {
+        let resolved = settings.resolvedDwindleSettings(for: monitor)
+        return ResolvedDwindleSettings(
+            smartSplit: resolved.smartSplit,
+            defaultSplitRatio: resolved.defaultSplitRatio,
+            splitWidthMultiplier: resolved.splitWidthMultiplier,
+            singleWindowFit: resolved.singleWindowFit,
+            useGlobalGaps: resolved.useGlobalGaps,
+            innerGap: max(resolved.innerGap, borderClearance(scale: scale))
+        )
+    }
+
+    func layoutFrames(
+        for monitor: Monitor,
+        scale: CGFloat
+    ) -> (workingFrame: CGRect, borderSafeFillFrame: CGRect, fullscreenLayoutFrame: CGRect) {
         let reservedTopInset = workspaceBarReservedTopInset(for: monitor)
         let gaps = settings.resolvedGapSettings(for: monitor)
         let menuBarInset = max(0, monitor.frame.maxY - monitor.visibleFrame.maxY)
-        let struts = Struts(
+        let normalizedTop = normalizedTopStrut(
+            top: gaps.outerGapTop,
+            menuBarInset: menuBarInset,
+            reservedTopInset: reservedTopInset
+        )
+        let rawStruts = Struts(
             left: gaps.outerGapLeft,
             right: gaps.outerGapRight,
-            top: normalizedTopStrut(
-                top: gaps.outerGapTop,
-                menuBarInset: menuBarInset,
-                reservedTopInset: reservedTopInset
-            ),
+            top: normalizedTop,
             bottom: gaps.outerGapBottom
         )
-        return computeWorkingArea(parentArea: monitor.visibleFrame, scale: scale, struts: struts)
+        let clearance = borderClearance(scale: scale)
+        let effectiveStruts = Struts(
+            left: max(rawStruts.left, clearance),
+            right: max(rawStruts.right, clearance),
+            top: max(rawStruts.top, clearance),
+            bottom: max(rawStruts.bottom, clearance)
+        )
+        let rawWorkingFrame = computeWorkingArea(
+            parentArea: monitor.visibleFrame,
+            scale: scale,
+            struts: rawStruts
+        )
+        let workingFrame = computeWorkingArea(
+            parentArea: monitor.visibleFrame,
+            scale: scale,
+            struts: effectiveStruts
+        )
+        let fullscreenLayoutFrame: CGRect
+        let borderSafeFillFrame: CGRect
+        if gaps.fullscreenUsesOuterGaps {
+            fullscreenLayoutFrame = rawWorkingFrame
+            borderSafeFillFrame = workingFrame
+        } else {
+            fullscreenLayoutFrame = computeWorkingArea(
+                parentArea: monitor.visibleFrame,
+                scale: scale,
+                struts: Struts(top: reservedTopInset)
+            )
+            borderSafeFillFrame = computeWorkingArea(
+                parentArea: monitor.visibleFrame,
+                scale: scale,
+                struts: Struts(
+                    left: clearance,
+                    right: clearance,
+                    top: max(reservedTopInset, clearance),
+                    bottom: clearance
+                )
+            )
+        }
+        return (workingFrame, borderSafeFillFrame, fullscreenLayoutFrame)
+    }
+
+    func niriInteractionGeometry(
+        for monitor: Monitor
+    ) -> (workingFrame: CGRect, innerGap: CGFloat, scale: CGFloat) {
+        niriInteractionGeometry(for: monitor, scale: backingScaleFactor(for: monitor))
+    }
+
+    func niriInteractionGeometry(
+        for monitor: Monitor,
+        scale: CGFloat
+    ) -> (workingFrame: CGRect, innerGap: CGFloat, scale: CGFloat) {
+        let workingFrame = layoutFrames(for: monitor, scale: scale).workingFrame
+        return (workingFrame, innerGap(for: monitor, scale: scale), scale)
+    }
+
+    func insetWorkingFrame(for monitor: Monitor) -> CGRect {
+        let scale = backingScaleFactor(for: monitor)
+        return layoutFrames(for: monitor, scale: scale).workingFrame
     }
 
     func fullscreenLayoutFrame(for monitor: Monitor) -> CGRect {
-        let scale = NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
-        let struts = Struts(top: workspaceBarReservedTopInset(for: monitor))
-        return computeWorkingArea(parentArea: monitor.visibleFrame, scale: scale, struts: struts)
+        let scale = backingScaleFactor(for: monitor)
+        return layoutFrames(for: monitor, scale: scale).fullscreenLayoutFrame
+    }
+
+    func borderSafeFillFrame(for monitor: Monitor) -> CGRect {
+        let scale = backingScaleFactor(for: monitor)
+        return layoutFrames(for: monitor, scale: scale).borderSafeFillFrame
+    }
+
+    func backingScaleFactor(for monitor: Monitor) -> CGFloat {
+        NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
+    }
+
+    private func borderClearance(scale: CGFloat) -> CGFloat {
+        BorderConfig.layoutClearance(
+            enabled: settings.bordersEnabled,
+            width: CGFloat(settings.borderWidth),
+            scale: scale
+        )
     }
 
     private func workspaceBarReservedTopInset(for monitor: Monitor) -> CGFloat {
@@ -1035,7 +1217,7 @@ final class WMController {
         return WorkspaceBarGeometry.resolve(
             monitor: monitor,
             resolved: resolved,
-            isVisible: isWorkspaceBarVisible(on: monitor, resolved: resolved)
+            isVisible: isWorkspaceBarConfiguredVisible(on: monitor, resolved: resolved)
         ).reservedTopInset
     }
 
@@ -1100,8 +1282,20 @@ final class WMController {
 
     func isWorkspaceBarVisible(on monitor: Monitor, resolved: ResolvedBarSettings? = nil) -> Bool {
         let effective = resolved ?? settings.resolvedBarSettings(for: monitor)
-        guard effective.enabled, !hiddenWorkspaceBarMonitorIds.contains(monitor.id) else { return false }
+        guard isWorkspaceBarConfiguredVisible(on: monitor, resolved: effective) else { return false }
+        return !isWorkspaceBarSuppressedByNativeFullscreen(on: monitor)
+    }
+
+    private func isWorkspaceBarConfiguredVisible(on monitor: Monitor, resolved: ResolvedBarSettings) -> Bool {
+        guard resolved.enabled, !hiddenWorkspaceBarMonitorIds.contains(monitor.id) else { return false }
         return settings.workspaceBarRevealModifier == .off || isWorkspaceBarRevealHeld
+    }
+
+    private func isWorkspaceBarSuppressedByNativeFullscreen(on monitor: Monitor) -> Bool {
+        guard settings.workspaceBarHideInNativeFullscreen else { return false }
+        let topology = workspaceManager.spaceTopology
+        guard topology.isPopulated else { return false }
+        return topology.isDisplayShowingFullscreenSpace(on: monitor) == true
     }
 
     private func pruneHiddenWorkspaceBarMonitorIds() {
@@ -1173,8 +1367,18 @@ final class WMController {
         placementResolver.monitorForInteraction()
     }
 
-    private func handleSessionStateChanged() {
-        surfaceReconciler.noteWorldChanged()
+    func interactionWorkspaceProjection() -> (monitor: Monitor?, workspace: WorkspaceDescriptor?) {
+        let monitor = monitorForInteraction()
+        return (monitor, monitor.flatMap { workspaceManager.activeWorkspace(on: $0.id) })
+    }
+
+    private func handleSessionStateChanged(surfaceScope: SessionSurfaceInvalidationScope) {
+        switch surfaceScope {
+        case .full:
+            surfaceReconciler.noteWorldChanged()
+        case .border:
+            surfaceReconciler.noteBorderChanged()
+        }
         let changeSet = focusNotificationDispatcher.notifyFocusChangesIfNeeded()
         if statusBarRefreshIsEnabled {
             refreshStatusBar()
@@ -1197,9 +1401,15 @@ final class WMController {
 
     private func handleRuntimeInvalidation(
         workspaceId: WorkspaceDescriptor.ID?,
-        domains: InvalidationDomain
+        domains: InvalidationDomain,
+        surfaceScope: SessionSurfaceInvalidationScope
     ) {
-        surfaceReconciler.noteWorldChanged()
+        switch surfaceScope {
+        case .full:
+            surfaceReconciler.noteWorldChanged()
+        case .border:
+            surfaceReconciler.noteBorderChanged()
+        }
         guard domains.contains(.workspace) || domains.contains(.fullscreen) else { return }
         guard runtimeFrameJobCancellationSuppressionDepth == 0 else { return }
         cancelPendingFrameJobsForInvalidation(workspaceId: workspaceId)
@@ -1214,7 +1424,7 @@ final class WMController {
     func cancelPendingFrameJobsForInvalidation(workspaceId: WorkspaceDescriptor.ID?) {
         let entries = workspaceId.map { workspaceManager.entries(in: $0) } ?? workspaceManager.allEntries()
         guard !entries.isEmpty else { return }
-        axManager.cancelPendingFrameJobs(entries.map { ($0.pid, $0.windowId) })
+        axManager.cancelPendingFrameJobs(entries.map { ($0.pid, $0.windowId) }, reason: "invalidation")
     }
 
     func activeWorkspace() -> WorkspaceDescriptor? {
@@ -1303,8 +1513,31 @@ final class WMController {
         }
     }
 
-    func adoptObservedSizeAfterTerminalFrameRefusal(_ refusal: AXFrameTerminalRefusal) {
-        guard let entry = workspaceManager.entry(forWindowId: refusal.windowId),
+    func adoptObservedMinimumAfterStableSizeClamp(_ result: AXFrameApplyResult) {
+        guard let entry = workspaceManager.entry(forPid: result.pid, windowId: result.windowId),
+              sameAXWindowIdentity(entry.axRef, result.expectedWindow),
+              entry.mode == .tiling,
+              entry.layoutReason == .standard,
+              entry.hiddenState == nil,
+              !workspaceManager.isAppHidden(pid: entry.pid),
+              let observed = result.writeResult.observedFrame?.size
+        else {
+            return
+        }
+        let target = result.targetFrame.size
+        let existing = workspaceManager.observedMinSize(for: entry.token) ?? CGSize(width: 1, height: 1)
+        let observedMin = CGSize(
+            width: observed.width > target.width + FrameTolerance.frameWrite
+                ? max(existing.width, observed.width) : existing.width,
+            height: observed.height > target.height + FrameTolerance.frameWrite
+                ? max(existing.height, observed.height) : existing.height
+        )
+        adoptObservedMinimum(observedMin, for: entry)
+    }
+
+    func adoptObservedMinimumAfterTerminalSizeWriteFailure(_ refusal: AXFrameTerminalRefusal) {
+        guard case .sizeWriteFailed = refusal.failureReason,
+              let entry = workspaceManager.entry(forWindowId: refusal.windowId),
               entry.mode == .tiling,
               workspaceManager.hiddenState(for: entry.token) == nil
         else {
@@ -1328,8 +1561,12 @@ final class WMController {
             )
         )
         guard observedMin.width > 1 || observedMin.height > 1 else { return }
+        adoptObservedMinimum(observedMin, for: entry)
+    }
 
-        guard workspaceManager.setObservedMinSize(observedMin, for: token) else { return }
+    private func adoptObservedMinimum(_ observedMin: CGSize, for entry: WindowState) {
+        guard workspaceManager.setObservedMinSize(observedMin, for: entry.token) else { return }
+        workspaceManager.invalidateLayout(for: [entry.workspaceId])
         layoutRefreshController.requestRelayout(
             reason: .observedConstraintsChanged,
             affectedWorkspaceIds: [entry.workspaceId]
@@ -1391,17 +1628,6 @@ final class WMController {
         return workspaceManager.monitors.first
     }
 
-    private func clampedFloatingFrame(
-        _ frame: CGRect,
-        in visibleFrame: CGRect
-    ) -> CGRect {
-        let maxX = visibleFrame.maxX - frame.width
-        let maxY = visibleFrame.maxY - frame.height
-        let clampedX = min(max(frame.origin.x, visibleFrame.minX), max(maxX, visibleFrame.minX))
-        let clampedY = min(max(frame.origin.y, visibleFrame.minY), max(maxY, visibleFrame.minY))
-        return CGRect(origin: CGPoint(x: clampedX, y: clampedY), size: frame.size)
-    }
-
     private func initialFloatingFrame(
         for entry: WindowState,
         preferredMonitor: Monitor?,
@@ -1417,7 +1643,7 @@ final class WMController {
         ) else {
             return offsetFrame
         }
-        return clampedFloatingFrame(offsetFrame, in: monitor.visibleFrame)
+        return FloatingFrameGeometry.clamped(offsetFrame, in: monitor.visibleFrame)
     }
 
     private func shouldApplyFloatingFrameImmediately(
@@ -1454,22 +1680,29 @@ final class WMController {
     }
 
     func focusedOrFrontmostWindowTokenForAutomation(
-        preferFrontmostWhenNonManagedFocusActive: Bool = false
+        preferFrontmostWhenExternalOrOwnedFocusActive: Bool = false
     ) -> WindowToken? {
-        let focusedToken = workspaceManager.focusedToken
+        let selectedManagedToken = workspaceManager.selectedManagedToken
         let frontmostPid = commandHandler.frontmostAppPidProvider?()
             ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
         let frontmostToken = commandHandler.frontmostFocusedWindowTokenProvider?()
             ?? frontmostPid.flatMap { axEventHandler.focusedWindowToken(for: $0) }
-        if preferFrontmostWhenNonManagedFocusActive, workspaceManager.isNonManagedFocusActive {
-            return frontmostToken ?? focusedToken
+        if preferFrontmostWhenExternalOrOwnedFocusActive {
+            switch workspaceManager.nativeFocusOwner {
+            case .external,
+                 .ownedSurface:
+                return frontmostToken ?? selectedManagedToken
+            case .managed,
+                 .none:
+                break
+            }
         }
-        return focusedToken ?? frontmostToken
+        return selectedManagedToken ?? frontmostToken
     }
 
     func captureQuakeTerminalRestoreTarget() -> QuakeTerminalRestoreTarget? {
         guard let token = workspaceManager.renderableFocusToken
-            ?? focusedOrFrontmostWindowTokenForAutomation(preferFrontmostWhenNonManagedFocusActive: true)
+            ?? focusedOrFrontmostWindowTokenForAutomation(preferFrontmostWhenExternalOrOwnedFocusActive: true)
         else {
             return nil
         }
@@ -1495,7 +1728,7 @@ final class WMController {
 
     func focusedManagedWindowScreenForQuakeTerminal() -> NSScreen? {
         guard let token = focusedOrFrontmostWindowTokenForAutomation(
-            preferFrontmostWhenNonManagedFocusActive: true
+            preferFrontmostWhenExternalOrOwnedFocusActive: true
         ),
             let entry = workspaceManager.entry(for: token)
         else {
@@ -1568,7 +1801,9 @@ final class WMController {
         _ token: WindowToken,
         preferredMonitor: Monitor? = nil
     ) -> Bool {
-        guard let entry = workspaceManager.entry(for: token) else { return false }
+        guard let entry = workspaceManager.entry(for: token) else {
+            return false
+        }
 
         if entry.mode == .floating {
             guard captureVisibleFloatingGeometry(for: token, preferredMonitor: preferredMonitor) != nil
@@ -1614,18 +1849,18 @@ final class WMController {
 
     private func visibleFocusRecoveryToken(
         in workspaceId: WorkspaceDescriptor.ID,
-        excluding excludedToken: WindowToken
+        excluding excludedTokens: Set<WindowToken>
     ) -> WindowToken? {
         let explicitCandidates = [
             workspaceManager.lastFocusedToken(in: workspaceId),
             workspaceManager.preferredFocusToken(in: workspaceId),
             workspaceManager.lastFloatingFocusedToken(in: workspaceId),
-            workspaceManager.focusedToken
+            workspaceManager.selectedManagedToken
         ]
 
         for candidate in explicitCandidates {
             guard let candidate,
-                  candidate != excludedToken,
+                  !excludedTokens.contains(candidate),
                   let entry = workspaceManager.entry(for: candidate),
                   entry.workspaceId == workspaceId,
                   isManagedWindowDisplayable(entry.token)
@@ -1636,22 +1871,22 @@ final class WMController {
         }
 
         if let tiledEntry = workspaceManager.tiledEntries(in: workspaceId).first(where: {
-            $0.token != excludedToken && isManagedWindowDisplayable($0.token)
+            !excludedTokens.contains($0.token) && isManagedWindowDisplayable($0.token)
         }) {
             return tiledEntry.token
         }
 
         return workspaceManager.floatingEntries(in: workspaceId).first(where: {
-            $0.token != excludedToken && isManagedWindowDisplayable($0.token)
+            !excludedTokens.contains($0.token) && isManagedWindowDisplayable($0.token)
         })?.token
     }
 
     private func recoverFocusAfterScratchpadHide(
         in workspaceId: WorkspaceDescriptor.ID,
-        excluding token: WindowToken,
+        excluding tokens: Set<WindowToken>,
         on monitorId: Monitor.ID?
     ) {
-        if let nextFocusToken = visibleFocusRecoveryToken(in: workspaceId, excluding: token) {
+        if let nextFocusToken = visibleFocusRecoveryToken(in: workspaceId, excluding: tokens) {
             focusWindow(nextFocusToken)
             return
         }
@@ -1662,21 +1897,12 @@ final class WMController {
     func cleanupScratchpadWindowResources(for token: WindowToken) {
         layoutRefreshController.cancelPendingScratchpadReveal(for: token)
         let frameEntry = [(pid: token.pid, windowId: token.windowId)]
-        axManager.cancelPendingFrameJobs(frameEntry)
+        axManager.cancelPendingFrameJobs(frameEntry, reason: "scratchpad-cleanup")
         axManager.unsuppressFrameWrites(frameEntry)
         AXWindowService.unpinAXElement(for: UInt32(token.windowId))
         if workspaceManager.clearScratchpadIfMatches(token) {
             requestWorkspaceBarRefresh()
         }
-    }
-
-    func cleanupScratchpadWindowResourcesIfNeeded(for token: WindowToken) {
-        guard workspaceManager.isScratchpadToken(token)
-            || workspaceManager.hiddenState(for: token)?.isScratchpad == true
-        else {
-            return
-        }
-        cleanupScratchpadWindowResources(for: token)
     }
 
     func rekeyScratchpadWindowResources(from oldToken: WindowToken, to newToken: WindowToken, axRef: AXWindowRef) {
@@ -1685,62 +1911,116 @@ final class WMController {
         AXWindowService.pinAXElement(axRef.element, for: UInt32(newToken.windowId))
     }
 
-    private func hideScratchpadWindow(
-        _ entry: WindowState,
+    private func logicalScratchpadHiddenState(
+        for entry: WindowState,
         monitor: Monitor
-    ) {
-        // Hold an AX reference before hiding so reveal can still resolve windows
-        // whose apps drop them from kAXWindowsAttribute while off-screen
-        // (Calculator, some AppKit panels). axWindowRef enumeration would
-        // otherwise return nil and the reveal frame write would silently skip.
+    ) -> HiddenState? {
+        guard let floatingState = workspaceManager.floatingState(for: entry.token) else { return nil }
+        let referenceMonitor = floatingState.referenceMonitorId.flatMap { workspaceManager.monitor(byId: $0) }
+            ?? monitor
+        return HiddenState(
+            proportionalPosition: layoutRefreshController.proportionalPosition(
+                topLeft: floatingState.lastFrame.topLeftCorner,
+                in: referenceMonitor.frame
+            ),
+            referenceMonitorId: referenceMonitor.id,
+            reason: .scratchpad
+        )
+    }
+
+    @discardableResult
+    private func parkScratchpadWindow(
+        _ entry: WindowState,
+        monitor: Monitor,
+        captureGeometry: Bool = true
+    ) -> Bool {
+        let logicalOnly = workspaceManager.isAppHidden(pid: entry.pid)
+            || isManagedWindowSuspendedForNativeFullscreen(entry.token)
+        if logicalOnly {
+            guard let hiddenState = logicalScratchpadHiddenState(for: entry, monitor: monitor) else {
+                return false
+            }
+            let frameEntry = [(entry.pid, entry.windowId)]
+            axManager.cancelPendingFrameJobs(frameEntry, reason: "scratchpad-hide")
+            axManager.suppressFrameWrites(frameEntry)
+            workspaceManager.setHiddenState(hiddenState, for: entry.token)
+            return true
+        }
+
+        if captureGeometry {
+            _ = captureVisibleFloatingGeometry(for: entry.token, preferredMonitor: monitor)
+        }
         if let ref = AXWindowService.axWindowRef(for: UInt32(entry.windowId), pid: entry.pid) {
             AXWindowService.pinAXElement(ref.element, for: UInt32(entry.windowId))
         }
 
-        let preferredSide = layoutRefreshController.preferredHideSide(for: monitor)
-        layoutRefreshController.hideWindow(
+        let parked = layoutRefreshController.hideWindow(
             entry,
             monitor: monitor,
-            side: preferredSide,
+            side: layoutRefreshController.preferredHideSide(for: monitor),
             reason: .scratchpad
         )
+        if !parked,
+           workspaceManager.hiddenState(for: entry.token) == nil,
+           !workspaceManager.isAppHidden(pid: entry.pid),
+           !isManagedWindowSuspendedForNativeFullscreen(entry.token)
+        {
+            axManager.unsuppressFrameWrites([(entry.pid, entry.windowId)])
+        }
+        return parked
+    }
+
+    private func hideScratchpadMembers(
+        _ entries: [WindowState],
+        fallbackMonitor: Monitor,
+        captureGeometry: Bool = true
+    ) {
+        let focusedEntry = workspaceManager.selectedManagedToken.flatMap { focusedToken in
+            entries.first { $0.token == focusedToken }
+        }
+        for entry in entries {
+            _ = parkScratchpadWindow(
+                entry,
+                monitor: workspaceManager.monitor(for: entry.workspaceId) ?? fallbackMonitor,
+                captureGeometry: captureGeometry
+            )
+        }
         requestWorkspaceBarRefresh()
-        recoverFocusAfterScratchpadHide(
-            in: workspaceManager.workspace(for: entry.token) ?? entry.workspaceId,
-            excluding: entry.token,
-            on: monitor.id
-        )
+        if let focusedEntry {
+            recoverFocusAfterScratchpadHide(
+                in: workspaceManager.workspace(for: focusedEntry.token) ?? focusedEntry.workspaceId,
+                excluding: Set(entries.map(\.token)),
+                on: (workspaceManager.monitor(for: focusedEntry.workspaceId) ?? fallbackMonitor).id
+            )
+        }
     }
 
     @discardableResult
     private func showScratchpadWindow(
         _ entry: WindowState,
         on workspaceId: WorkspaceDescriptor.ID,
-        monitor: Monitor
+        monitor: Monitor,
+        onRevealed: LayoutRefreshController.PostLayoutAction? = nil,
+        revealGroupId: UInt64? = nil
     ) -> Bool {
-        if entry.workspaceId != workspaceId {
-            reassignManagedWindow(entry.token, to: workspaceId)
-        }
         let entry = workspaceManager.entry(for: entry.token) ?? entry
         axManager.markWindowActive(entry.windowId)
 
         if let hiddenState = workspaceManager.hiddenState(for: entry.token) {
-            let focusOnRevealSuccess: LayoutRefreshController.PostLayoutAction = { [weak self] in
-                self?.focusWindow(entry.token)
-            }
             if hiddenState.isScratchpad {
                 return layoutRefreshController.restoreScratchpadWindow(
                     entry,
                     monitor: monitor,
-                    onSuccess: focusOnRevealSuccess
-                )
-            } else {
-                return layoutRefreshController.unhideWindow(
-                    entry,
-                    monitor: monitor,
-                    onSuccess: focusOnRevealSuccess
+                    onSuccess: onRevealed,
+                    revealGroupId: revealGroupId
                 )
             }
+            return layoutRefreshController.unhideWindow(
+                entry,
+                monitor: monitor,
+                onSuccess: onRevealed,
+                revealGroupId: revealGroupId
+            )
         }
 
         if let frame = workspaceManager.resolvedFloatingFrame(
@@ -1753,8 +2033,371 @@ final class WMController {
             ])
         }
 
-        focusWindow(entry.token)
+        if let revealGroupId {
+            layoutRefreshController.recordScratchpadRevealSuccess(entry.token, groupId: revealGroupId)
+        } else {
+            onRevealed?()
+        }
         return true
+    }
+
+    private func scratchpadEntries(in index: ScratchpadIndex) -> [WindowState] {
+        workspaceManager.scratchpadMembers(in: index).compactMap { token in
+            guard let entry = workspaceManager.entry(for: token) else {
+                cleanupScratchpadWindowResources(for: token)
+                return nil
+            }
+            return entry
+        }
+    }
+
+    private func revealableScratchpadEntries(in index: ScratchpadIndex) -> [WindowState] {
+        scratchpadEntries(in: index).filter { entry in
+            !isManagedWindowSuspendedForNativeFullscreen(entry.token)
+                && !workspaceManager.isAppHidden(pid: entry.pid)
+        }
+    }
+
+    private func stackScratchpadMembers(
+        _ tokens: [WindowToken],
+        in index: ScratchpadIndex,
+        on workspaceId: WorkspaceDescriptor.ID
+    ) {
+        let planId = reserveScratchpadStackingGeneration()
+        startScratchpadStacking(
+            tokens,
+            in: index,
+            on: workspaceId,
+            planId: planId
+        )
+    }
+
+    private func reserveScratchpadStackingGeneration() -> UInt64 {
+        scratchpadStackingGeneration &+= 1
+        scratchpadStackingPlan = nil
+        deferredScratchpadStacking = nil
+        return scratchpadStackingGeneration
+    }
+
+    private func startScratchpadStacking(
+        _ tokens: [WindowToken],
+        in index: ScratchpadIndex,
+        on workspaceId: WorkspaceDescriptor.ID,
+        planId: UInt64,
+        waitingFor barrierRequest: ManagedFocusRequest? = nil
+    ) {
+        guard scratchpadStackingGeneration == planId else { return }
+        let handles = tokens.compactMap { workspaceManager.handle(for: $0) }
+        guard !handles.isEmpty else {
+            scratchpadStackingPlan = nil
+            return
+        }
+        var plan = ScratchpadStackingPlan(
+            id: planId,
+            index: index,
+            workspaceId: workspaceId,
+            handles: handles,
+            nextHandleIndex: 0,
+            pendingHandle: nil,
+            pendingRequestId: nil,
+            pendingActivationSettled: false,
+            continuationScheduled: false
+        )
+        if let barrierRequest {
+            guard barrierRequest.workspaceId == workspaceId,
+                  let barrierHandle = workspaceManager.handle(for: barrierRequest.token),
+                  intentLedger.activeManagedRequest(requestId: barrierRequest.requestId) != nil,
+                  workspaceManager.pendingManagedFocusMatches(
+                      token: barrierRequest.token,
+                      workspaceId: barrierRequest.workspaceId,
+                      requestId: barrierRequest.requestId
+                  )
+            else {
+                scratchpadStackingPlan = nil
+                return
+            }
+            plan.pendingHandle = barrierHandle
+            plan.pendingRequestId = barrierRequest.requestId
+            plan.pendingActivationSettled = axEventHandler.frontmostApplicationPIDProvider()
+                == barrierRequest.token.pid
+            scratchpadStackingPlan = plan
+            return
+        }
+        scratchpadStackingPlan = plan
+        advanceScratchpadStacking(planId: planId)
+    }
+
+    func resumeRehomedScratchpadStackingAfterFocusHandoff() {
+        guard let deferred = deferredScratchpadStacking,
+              deferred.id == scratchpadStackingGeneration
+        else {
+            return
+        }
+        deferredScratchpadStacking = nil
+        startScratchpadStacking(
+            deferred.tokens,
+            in: deferred.index,
+            on: deferred.workspaceId,
+            planId: deferred.id,
+            waitingFor: intentLedger.activeManagedRequest
+        )
+    }
+
+    private func advanceScratchpadStacking(planId: UInt64) {
+        guard var plan = scratchpadStackingPlan, plan.id == planId else { return }
+        guard workspaceManager.revealedScratchpadIndex() == plan.index,
+              workspaceManager.visibleWorkspaceIds().contains(plan.workspaceId)
+        else {
+            scratchpadStackingPlan = nil
+            return
+        }
+
+        while plan.nextHandleIndex < plan.handles.count {
+            let handle = plan.handles[plan.nextHandleIndex]
+            plan.nextHandleIndex += 1
+            guard let entry = scratchpadStackingEntry(for: handle, in: plan) else {
+                continue
+            }
+
+            plan.pendingHandle = handle
+            plan.pendingRequestId = nil
+            plan.pendingActivationSettled = axEventHandler.frontmostApplicationPIDProvider() == entry.pid
+            plan.continuationScheduled = false
+            scratchpadStackingPlan = plan
+            let origin: ManagedFocusOrigin = plan.handles[plan.nextHandleIndex...].contains { candidate in
+                scratchpadStackingEntry(for: candidate, in: plan) != nil
+            } ? .pointerHover : .keyboardOrProgrammatic
+            guard let request = focusWindow(handle.id, origin: origin) else {
+                plan.pendingHandle = nil
+                scratchpadStackingPlan = plan
+                continue
+            }
+            guard intentLedger.activeManagedRequest(requestId: request.requestId) != nil,
+                  workspaceManager.pendingManagedFocusMatches(
+                      token: request.token,
+                      workspaceId: request.workspaceId,
+                      requestId: request.requestId
+                  )
+            else {
+                plan.pendingHandle = nil
+                scratchpadStackingPlan = plan
+                continue
+            }
+            plan.pendingRequestId = request.requestId
+            scratchpadStackingPlan = plan
+            return
+        }
+
+        scratchpadStackingPlan = nil
+    }
+
+    private func scratchpadStackingEntry(
+        for handle: WindowHandle,
+        in plan: ScratchpadStackingPlan
+    ) -> WindowState? {
+        guard workspaceManager.scratchpadIndex(for: handle.id) == plan.index,
+              let entry = workspaceManager.entry(for: handle),
+              entry.workspaceId == plan.workspaceId,
+              workspaceManager.hiddenState(for: handle.id) == nil,
+              !workspaceManager.isAppHidden(pid: entry.pid),
+              !isManagedWindowSuspendedForNativeFullscreen(handle.id)
+        else {
+            return nil
+        }
+        return entry
+    }
+
+    func continueScratchpadStacking(after request: ManagedFocusRequest) {
+        guard let plan = scratchpadStackingPlan,
+              plan.pendingRequestId == request.requestId,
+              plan.pendingHandle?.id == request.token
+        else {
+            return
+        }
+        scheduleScratchpadStackingIfReady(planId: plan.id)
+    }
+
+    func advanceScratchpadStackingAfterFocusRetryExhaustion(_ request: ManagedFocusRequest) {
+        guard var plan = scratchpadStackingPlan,
+              plan.pendingRequestId == request.requestId,
+              plan.pendingHandle?.id == request.token
+        else {
+            return
+        }
+        plan.pendingHandle = nil
+        plan.pendingRequestId = nil
+        plan.pendingActivationSettled = false
+        plan.continuationScheduled = false
+        scratchpadStackingPlan = plan
+        advanceScratchpadStacking(planId: plan.id)
+    }
+
+    func abortScratchpadStacking(matching requestId: IntentID) {
+        guard scratchpadStackingPlan?.pendingRequestId == requestId else { return }
+        _ = reserveScratchpadStackingGeneration()
+    }
+
+    func noteScratchpadStackingAppActivation(pid: pid_t, source: ActivationEventSource) {
+        guard source == .workspaceDidActivateApplication,
+              var plan = scratchpadStackingPlan,
+              let pendingHandle = plan.pendingHandle,
+              pendingHandle.id.pid == pid,
+              axEventHandler.frontmostApplicationPIDProvider() == pid
+        else {
+            return
+        }
+        plan.pendingActivationSettled = true
+        scratchpadStackingPlan = plan
+        scheduleScratchpadStackingIfReady(planId: plan.id)
+    }
+
+    private func scheduleScratchpadStackingIfReady(planId: UInt64) {
+        guard var plan = scratchpadStackingPlan,
+              plan.id == planId,
+              !plan.continuationScheduled,
+              plan.pendingActivationSettled,
+              let pendingPID = plan.pendingHandle?.id.pid,
+              let requestId = plan.pendingRequestId,
+              intentLedger.intent(id: requestId)?.phase == .confirmed,
+              intentLedger.newestFocusIntentId() == requestId
+        else {
+            return
+        }
+        plan.continuationScheduled = true
+        scratchpadStackingPlan = plan
+        scheduleScratchpadStackingContinuation { [weak self] in
+            guard let self,
+                  var currentPlan = scratchpadStackingPlan,
+                  currentPlan.id == planId,
+                  currentPlan.pendingRequestId == requestId
+            else {
+                return
+            }
+            guard intentLedger.intent(id: requestId)?.phase == .confirmed,
+                  intentLedger.newestFocusIntentId() == requestId,
+                  axEventHandler.frontmostApplicationPIDProvider() == pendingPID,
+                  workspaceManager.selectedManagedToken == currentPlan.pendingHandle?.id,
+                  workspaceManager.revealedScratchpadIndex() == currentPlan.index,
+                  workspaceManager.visibleWorkspaceIds().contains(currentPlan.workspaceId)
+            else {
+                scratchpadStackingPlan = nil
+                return
+            }
+            currentPlan.pendingHandle = nil
+            currentPlan.pendingRequestId = nil
+            currentPlan.pendingActivationSettled = false
+            currentPlan.continuationScheduled = false
+            scratchpadStackingPlan = currentPlan
+            advanceScratchpadStacking(planId: planId)
+        }
+    }
+
+    private func revealScratchpadMembers(
+        _ entries: [WindowState],
+        in index: ScratchpadIndex,
+        on workspaceId: WorkspaceDescriptor.ID,
+        monitor: Monitor,
+        preferring preferredToken: WindowToken? = nil
+    ) -> Bool {
+        for entry in scratchpadEntries(in: index) where entry.workspaceId != workspaceId {
+            reassignManagedWindow(entry.token, to: workspaceId)
+        }
+        let resolvedEntries = entries.compactMap { workspaceManager.entry(for: $0.token) }
+        let preferredToken = preferredToken ?? workspaceManager.lastFocusedToken(in: workspaceId)
+        let ordered = resolvedEntries.filter { $0.token != preferredToken }
+            + resolvedEntries.filter { $0.token == preferredToken }
+        let orderedHandles = ordered.compactMap { workspaceManager.handle(for: $0.token) }
+        var revealed = false
+        let groupId = layoutRefreshController.beginScratchpadRevealGroup(index: index) { [weak self] outcome in
+            guard let self else { return }
+            let revealedHandleIds = Set(outcome.revealedHandles.map(ObjectIdentifier.init))
+            let survivors = orderedHandles.compactMap { handle -> WindowToken? in
+                guard revealedHandleIds.contains(ObjectIdentifier(handle)),
+                      self.workspaceManager.scratchpadIndex(for: handle.id) == index,
+                      self.workspaceManager.entry(for: handle) != nil,
+                      self.workspaceManager.hiddenState(for: handle.id) == nil
+                else {
+                    return nil
+                }
+                return handle.id
+            }
+            guard !survivors.isEmpty else {
+                if self.workspaceManager.revealedScratchpadIndex() == index {
+                    self.workspaceManager.setRevealedScratchpad(nil)
+                    self.requestWorkspaceBarRefresh()
+                }
+                return
+            }
+            self.stackScratchpadMembers(survivors, in: index, on: workspaceId)
+        }
+
+        for entry in ordered {
+            if showScratchpadWindow(
+                entry,
+                on: workspaceId,
+                monitor: monitor,
+                revealGroupId: groupId
+            ) {
+                revealed = true
+            }
+        }
+
+        guard revealed else {
+            layoutRefreshController.discardScratchpadRevealGroup(groupId)
+            return false
+        }
+        layoutRefreshController.sealScratchpadRevealGroup(groupId)
+        requestWorkspaceBarRefresh()
+        return true
+    }
+
+    func rehomeRevealedScratchpad(activeWorkspaceIds: Set<WorkspaceDescriptor.ID>) {
+        guard let index = workspaceManager.revealedScratchpadIndex() else { return }
+        let members = workspaceManager.scratchpadMembers(in: index)
+        let focusedMember = workspaceManager.selectedManagedToken.flatMap { members.contains($0) ? $0 : nil }
+        var targetWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
+        for token in members {
+            guard let entry = workspaceManager.entry(for: token),
+                  !activeWorkspaceIds.contains(entry.workspaceId),
+                  let monitor = workspaceManager.monitor(for: entry.workspaceId),
+                  let target = workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id,
+                  target != entry.workspaceId
+            else {
+                continue
+            }
+            reassignManagedWindow(token, to: target)
+            targetWorkspaceIds.insert(target)
+        }
+        guard !targetWorkspaceIds.isEmpty else { return }
+        let planId = reserveScratchpadStackingGeneration()
+        guard targetWorkspaceIds.count == 1,
+              let targetWorkspaceId = targetWorkspaceIds.first
+        else {
+            return
+        }
+        let survivors = members.filter { token in
+            workspaceManager.entry(for: token)?.workspaceId == targetWorkspaceId
+                && workspaceManager.hiddenState(for: token) == nil
+        }
+        let preferred = focusedMember.flatMap { survivors.contains($0) ? $0 : nil } ?? survivors.last
+        let ordered = survivors.filter { $0 != preferred } + survivors.filter { $0 == preferred }
+        guard !ordered.isEmpty else { return }
+        deferredScratchpadStacking = DeferredScratchpadStacking(
+            id: planId,
+            index: index,
+            workspaceId: targetWorkspaceId,
+            tokens: ordered
+        )
+    }
+
+    private func hideRevealedScratchpad(_ index: ScratchpadIndex, fallbackMonitor: Monitor) {
+        let entries = scratchpadEntries(in: index).filter { entry in
+            workspaceManager.hiddenState(for: entry.token) == nil
+                || workspaceManager.isAppHidden(pid: entry.pid)
+                || isManagedWindowSuspendedForNativeFullscreen(entry.token)
+        }
+        hideScratchpadMembers(entries, fallbackMonitor: fallbackMonitor)
+        workspaceManager.setRevealedScratchpad(nil)
     }
 
     @discardableResult
@@ -1893,7 +2536,7 @@ final class WMController {
     ) -> TrackedWindowMode? {
         if context == .automatic,
            let existingEntry,
-           decision.isTransientWidgetSurfaceDecision
+           decision.isUnprovenIndependentRootDecision
         {
             floatDemotionFirstSamplesByToken.removeValue(forKey: existingEntry.token)
             return existingEntry.mode
@@ -2024,21 +2667,8 @@ final class WMController {
             windowServer: nil
         )
         let fullscreen = appFullscreen ?? AXWindowService.isFullscreen(axRef)
-        let bundleId = baseFacts.ax.bundleId ?? appInfo?.bundleId
-        var lookupAttempted = windowServerLookupAttempted || windowInfo != nil
+        let lookupAttempted = windowServerLookupAttempted || windowInfo != nil
         var resolvedWindowInfo = Self.exactWindowServerInfo(windowInfo, for: token)
-        if resolvedWindowInfo == nil,
-           !lookupAttempted,
-           bundleId == WindowRuleEngine.cleanShotBundleId
-        {
-            lookupAttempted = true
-            resolvedWindowInfo = resolveWindowServerInfoForDisposition(
-                token: token,
-                bundleId: bundleId,
-                axFacts: baseFacts.ax,
-                preferredWindowInfo: nil
-            )
-        }
 
         func evaluate(with windowServer: WindowServerInfo?) -> WindowDecisionEvaluation {
             makeWindowDispositionEvaluation(
@@ -2061,7 +2691,6 @@ final class WMController {
         {
             resolvedWindowInfo = resolveWindowServerInfoForDisposition(
                 token: token,
-                bundleId: bundleId,
                 axFacts: baseFacts.ax,
                 preferredWindowInfo: nil
             )
@@ -2094,7 +2723,9 @@ final class WMController {
             hasMinimizeButton: captured.hasMinimizeButton,
             appPolicy: captured.appPolicy ?? appInfo?.activationPolicy,
             bundleId: captured.bundleId ?? appInfo?.bundleId,
-            attributeFetchSucceeded: captured.attributeFetchSucceeded
+            attributeFetchSucceeded: captured.attributeFetchSucceeded,
+            isMain: captured.isMain,
+            isModal: captured.isModal
         )
         return makeWindowDispositionEvaluation(
             token: token,
@@ -2173,6 +2804,22 @@ final class WMController {
         )
     }
 
+    private func batchedWindowServerInfo(
+        for tokens: Set<WindowToken>
+    ) -> [WindowToken: WindowServerInfo] {
+        let windowIds = Set(tokens.compactMap { UInt32(exactly: $0.windowId) })
+        guard windowIds.count > 1 else { return [:] }
+        let infoByWindowId = axEventHandler.resolveWindowInfo(windowIds)
+        return tokens.reduce(into: [:]) { result, token in
+            guard let windowId = UInt32(exactly: token.windowId),
+                  let info = Self.exactWindowServerInfo(infoByWindowId[windowId], for: token)
+            else {
+                return
+            }
+            result[token] = info
+        }
+    }
+
     static func exactWindowServerInfo(
         _ windowInfo: WindowServerInfo?,
         for token: WindowToken
@@ -2189,7 +2836,6 @@ final class WMController {
 
     func resolveWindowServerInfoForDisposition(
         token: WindowToken,
-        bundleId: String?,
         axFacts: AXWindowFacts,
         preferredWindowInfo: WindowServerInfo?
     ) -> WindowServerInfo? {
@@ -2198,8 +2844,6 @@ final class WMController {
         }
 
         guard axFacts.role != (kAXHelpTagRole as String),
-              bundleId == WindowRuleEngine.cleanShotBundleId
-              || WindowRuleEngine.isTransientWidgetAXCandidate(axFacts),
               let windowId = UInt32(exactly: token.windowId)
         else {
             return nil
@@ -2209,18 +2853,6 @@ final class WMController {
             axEventHandler.resolveWindowInfo(windowId),
             for: token
         )
-    }
-
-    func decideWindowDisposition(
-        axRef: AXWindowRef,
-        pid: pid_t,
-        appFullscreen: Bool? = nil
-    ) -> WindowDecision {
-        evaluateWindowDisposition(
-            axRef: axRef,
-            pid: pid,
-            appFullscreen: appFullscreen
-        ).decision
     }
 
     func makeWindowDecisionDebugSnapshot(
@@ -2274,6 +2906,16 @@ final class WMController {
         workspaceManager.setManualLayoutOverride(nil, for: token)
     }
 
+    static func ruleReevaluationLifetimeAuthority(
+        existing: ManagedWindowLifetimeAuthority?,
+        observedInTopLevelInventory: Bool
+    ) -> ManagedWindowLifetimeAuthority {
+        if observedInTopLevelInventory {
+            return .axTopLevelInventory
+        }
+        return existing ?? .directLifecycle
+    }
+
     private func resolveAXWindowRef(for token: WindowToken) -> AXWindowRef? {
         workspaceManager.entry(for: token)?.axRef
             ?? AXWindowService.axWindowRef(for: UInt32(token.windowId), pid: token.pid)
@@ -2289,6 +2931,7 @@ final class WMController {
         let epochDomains: InvalidationDomain = [.workspace, .layout, .focus, .fullscreen]
         let epochSeq = workspaceManager.worldSeq
         var liveWindowsByToken: [WindowToken: AXWindowRef] = [:]
+        var topLevelInventoryTokens: Set<WindowToken> = []
         var tokensToReevaluate: Set<WindowToken> = []
         var pidTargets: Set<pid_t> = []
         var resolvedAnyTarget = false
@@ -2337,6 +2980,7 @@ final class WMController {
                     let token = WindowToken(pid: pid, windowId: windowId)
                     tokensToReevaluate.insert(token)
                     liveWindowsByToken[token] = axRef
+                    topLevelInventoryTokens.insert(token)
                 }
             }
 
@@ -2359,7 +3003,10 @@ final class WMController {
             )
         }
 
+        let batchedWindowInfoByToken = batchedWindowServerInfo(for: tokensToReevaluate)
+
         var relayoutNeeded = false
+        var ruleRelayoutNeeded = false
         var evaluatedAnyWindow = false
         var affectedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
 
@@ -2380,8 +3027,17 @@ final class WMController {
                 : .liveCreate
 
             evaluatedAnyWindow = true
-            let evaluation = evaluateWindowDisposition(axRef: axRef, pid: token.pid)
-            let interactionPolicy = WindowInteractionPolicy.resolve(for: evaluation)
+            let evaluation = evaluateWindowDisposition(
+                axRef: axRef,
+                pid: token.pid,
+                windowInfo: batchedWindowInfoByToken[token]
+            )
+            let ruleEffects = evaluation.decision.disposition == .undecided
+                ? existingEntry?.ruleEffects ?? evaluation.decision.ruleEffects
+                : evaluation.decision.ruleEffects
+            let admissionHints = evaluation.decision.disposition == .undecided
+                ? existingEntry?.admissionHints ?? evaluation.decision.admissionHints
+                : evaluation.decision.admissionHints
 
             guard let effectiveTrackedMode = trackedModePreservingAutomaticFallbackState(
                 decision: evaluation.decision,
@@ -2391,14 +3047,7 @@ final class WMController {
                 axEventHandler.cancelTrackedTilingPromotionRetry(windowId: token.windowId)
                 if let existingEntry {
                     affectedWorkspaceIds.insert(existingEntry.workspaceId)
-                    let removesScratchpadResources = workspaceManager.isScratchpadToken(token)
-                        || workspaceManager.hiddenState(for: token)?.isScratchpad == true
-                    _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
-                    mouseEventHandler.discardNativeTitleBarDrag(for: token)
-                    axManager.removeWindowState(pid: token.pid, expectedWindow: existingEntry.axRef)
-                    if removesScratchpadResources {
-                        cleanupScratchpadWindowResources(for: token)
-                    }
+                    axEventHandler.retireManagedWindowAfterDecisionRejection(existingEntry)
                     relayoutNeeded = true
                 } else if evaluation.decision.disposition != .undecided {
                     axEventHandler.discardCreatePlacementContext(for: token.windowId)
@@ -2454,14 +3103,12 @@ final class WMController {
                    bundleId: evaluation.facts.ax.bundleId,
                    mode: effectiveTrackedMode,
                    facts: evaluation.facts,
-                   admissionHints: evaluation.decision.admissionHints
+                   admissionHints: admissionHints
                )
             {
-                if workspaceManager.entry(for: token) != nil {
-                    workspaceManager.setInteractionPolicy(interactionPolicy, for: token)
-                }
                 affectedWorkspaceIds.insert(workspaceId)
                 relayoutNeeded = true
+                ruleRelayoutNeeded = true
                 continue
             }
 
@@ -2490,7 +3137,7 @@ final class WMController {
                     entry: $0,
                     workspaceId: workspaceId,
                     mode: oldMode ?? effectiveTrackedMode,
-                    ruleEffects: evaluation.decision.ruleEffects,
+                    ruleEffects: ruleEffects,
                     shouldPreservePreFullscreenState: false,
                     appFullscreen: false
                 )
@@ -2502,17 +3149,19 @@ final class WMController {
                     windowId: token.windowId,
                     to: workspaceId,
                     mode: oldMode ?? effectiveTrackedMode,
-                    ruleEffects: evaluation.decision.ruleEffects,
-                    admissionHints: evaluation.decision.admissionHints,
-                    interactionPolicy: interactionPolicy,
+                    ruleEffects: ruleEffects,
+                    admissionHints: admissionHints,
+                    lifetimeAuthority: Self.ruleReevaluationLifetimeAuthority(
+                        existing: existingEntry?.lifetimeAuthority,
+                        observedInTopLevelInventory: topLevelInventoryTokens.contains(token)
+                    ),
+                    allowsNativeFocusAdoption: !evaluation.appFullscreen,
                     managedReplacementMetadata: managedReplacementMetadata
                 )
-            } else if existingEntry != nil {
-                workspaceManager.setInteractionPolicy(interactionPolicy, for: token)
             }
             if existingEntry != nil {
                 _ = workspaceManager.updateAdmissionHints(
-                    evaluation.decision.admissionHints,
+                    admissionHints,
                     for: token
                 )
             }
@@ -2563,7 +3212,7 @@ final class WMController {
             }
 
             if existingEntry == nil
-                || oldEffects != evaluation.decision.ruleEffects
+                || oldEffects != ruleEffects
                 || oldWorkspaceId != workspaceId
                 || oldMode != effectiveTrackedMode
             {
@@ -2572,20 +3221,28 @@ final class WMController {
                 }
                 affectedWorkspaceIds.insert(workspaceId)
                 relayoutNeeded = true
+                ruleRelayoutNeeded = true
             }
             if workspaceManager.entry(for: token) != nil,
                let windowId = UInt32(exactly: token.windowId)
             {
-                axEventHandler.finishAdmissionRetryAfterTracking(windowId: windowId)
+                axEventHandler.finishRuleReevaluationAfterTracking(
+                    windowId: windowId,
+                    wasNewlyManaged: existingEntry == nil
+                )
             }
         }
+
+        workspaceManager.promoteLifetimeAuthorityForObservedTopLevelWindows(
+            topLevelInventoryTokens
+        )
 
         let evaluatedPIDs = Set(tokensToReevaluate.map(\.pid))
         axManager.bindManagedWindows(
             workspaceManager.allEntries().filter { evaluatedPIDs.contains($0.pid) }
         )
 
-        if relayoutNeeded {
+        if ruleRelayoutNeeded {
             layoutRefreshController.requestRelayout(
                 reason: .windowRuleReevaluation,
                 affectedWorkspaceIds: affectedWorkspaceIds
@@ -2597,6 +3254,13 @@ final class WMController {
             evaluatedAnyWindow: evaluatedAnyWindow,
             relayoutNeeded: relayoutNeeded
         )
+    }
+
+    func closeFocusedWindow() -> ExternalCommandResult {
+        guard let token = focusedManagedTokenForCommand(),
+              let handle = workspaceManager.handle(for: token)
+        else { return .notFound }
+        return windowActionHandler.closeWindow(handle: handle) ? .executed : .windowActionFailed
     }
 
     func toggleFocusedWindowFloating() -> ExternalCommandResult {
@@ -2619,7 +3283,7 @@ final class WMController {
     }
 
     @discardableResult
-    func assignFocusedWindowToScratchpad() -> ExternalCommandResult {
+    func assignFocusedWindowToScratchpad(_ index: ScratchpadIndex) -> ExternalCommandResult {
         guard let token = focusedManagedTokenForCommand(),
               let entry = workspaceManager.entry(for: token),
               !isManagedWindowSuspendedForNativeFullscreen(token)
@@ -2627,7 +3291,7 @@ final class WMController {
             return .notFound
         }
 
-        if workspaceManager.isScratchpadToken(token) {
+        if workspaceManager.scratchpadIndex(for: token) == index {
             guard !workspaceManager.isHiddenInCorner(token) else {
                 return .notFound
             }
@@ -2636,21 +3300,13 @@ final class WMController {
             return .executed
         }
 
-        if let existingScratchpadToken = workspaceManager.scratchpadToken() {
-            if workspaceManager.entry(for: existingScratchpadToken) == nil {
-                cleanupScratchpadWindowResources(for: existingScratchpadToken)
-            } else {
-                return .notFound
-            }
-        }
-
         let preferredMonitor = monitorForInteraction() ?? workspaceManager.monitor(for: entry.workspaceId)
         let transitionedFromTiling = entry.mode == .tiling
         guard prepareWindowForScratchpadAssignment(token, preferredMonitor: preferredMonitor) else {
             return .notFound
         }
 
-        if workspaceManager.setScratchpadToken(token) {
+        if workspaceManager.setScratchpadMembership(token, to: index) {
             requestWorkspaceBarRefresh()
         }
 
@@ -2661,7 +3317,13 @@ final class WMController {
             return .notFound
         }
 
-        hideScratchpadWindow(updatedEntry, monitor: hideMonitor)
+        if workspaceManager.revealedScratchpadIndex() != index {
+            hideScratchpadMembers(
+                [updatedEntry],
+                fallbackMonitor: hideMonitor,
+                captureGeometry: false
+            )
+        }
 
         if transitionedFromTiling {
             layoutRefreshController.requestLayoutCommandRelayout(
@@ -2688,18 +3350,7 @@ final class WMController {
             existingEntry: entry
         ) else {
             axEventHandler.cancelTrackedTilingPromotionRetry(windowId: token.windowId)
-            let removesScratchpadResources = workspaceManager.isScratchpadToken(token)
-                || workspaceManager.hiddenState(for: token)?.isScratchpad == true
-            _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
-            mouseEventHandler.discardNativeTitleBarDrag(for: token)
-            axManager.removeWindowState(pid: token.pid, expectedWindow: entry.axRef)
-            if removesScratchpadResources {
-                cleanupScratchpadWindowResources(for: token)
-            }
-            layoutRefreshController.requestRelayout(
-                reason: .windowRuleReevaluation,
-                affectedWorkspaceIds: [entry.workspaceId]
-            )
+            axEventHandler.retireManagedWindowAfterDecisionRejection(entry)
             return
         }
         if trackedMode != .tiling {
@@ -2732,51 +3383,148 @@ final class WMController {
     }
 
     @discardableResult
-    func toggleScratchpadWindow() -> ExternalCommandResult {
-        guard let scratchpadToken = workspaceManager.scratchpadToken() else {
+    func toggleScratchpad(_ index: ScratchpadIndex, on monitorId: Monitor.ID? = nil) -> ExternalCommandResult {
+        guard let target = scratchpadTarget(on: monitorId) else {
             return .notFound
         }
-        guard let entry = workspaceManager.entry(for: scratchpadToken) else {
-            cleanupScratchpadWindowResources(for: scratchpadToken)
+        let members = scratchpadEntries(in: index)
+        guard !members.isEmpty else { return .notFound }
+
+        let regroupsRevealedScratchpad = workspaceManager.revealedScratchpadIndex() == index
+        if regroupsRevealedScratchpad {
+            if members.allSatisfy({ $0.workspaceId == target.workspaceId }) {
+                layoutRefreshController.discardScratchpadRevealGroupCompletions()
+                for entry in members {
+                    layoutRefreshController.cancelPendingScratchpadReveal(for: entry.token)
+                }
+                hideScratchpadMembers(members, fallbackMonitor: target.monitor)
+                workspaceManager.setRevealedScratchpad(nil)
+                return .executed
+            }
+        }
+
+        let entries = members.filter { entry in
+            !isManagedWindowSuspendedForNativeFullscreen(entry.token)
+                && !workspaceManager.isAppHidden(pid: entry.pid)
+        }
+        guard !entries.isEmpty else { return .notFound }
+
+        if regroupsRevealedScratchpad {
+            layoutRefreshController.discardScratchpadRevealGroupCompletions()
+            for entry in members {
+                layoutRefreshController.cancelPendingScratchpadReveal(for: entry.token)
+            }
+        }
+
+        if let revealed = workspaceManager.revealedScratchpadIndex(), revealed != index {
+            layoutRefreshController.discardScratchpadRevealGroupCompletions()
+            hideRevealedScratchpad(revealed, fallbackMonitor: target.monitor)
+        }
+
+        let revealedBeforeAttempt = workspaceManager.revealedScratchpadIndex()
+        workspaceManager.setRevealedScratchpad(index)
+        guard revealScratchpadMembers(
+            entries,
+            in: index,
+            on: target.workspaceId,
+            monitor: target.monitor
+        ) else {
+            if workspaceManager.revealedScratchpadIndex() == index {
+                workspaceManager.setRevealedScratchpad(revealedBeforeAttempt)
+            }
             return .notFound
         }
-        guard !isManagedWindowSuspendedForNativeFullscreen(scratchpadToken) else {
-            return .notFound
-        }
-        guard !workspaceManager.isAppHidden(pid: entry.pid) else {
-            return .notFound
-        }
-        guard let target = scratchpadTarget() else {
+        return .executed
+    }
+
+    @discardableResult
+    func revealScratchpadWindow(
+        _ token: WindowToken,
+        index: ScratchpadIndex,
+        on monitorId: Monitor.ID?
+    ) -> ExternalCommandResult {
+        guard workspaceManager.scratchpadIndex(for: token) == index,
+              workspaceManager.entry(for: token) != nil,
+              let target = scratchpadTarget(on: monitorId)
+        else {
             return .notFound
         }
 
-        if let hiddenState = workspaceManager.hiddenState(for: scratchpadToken) {
-            let updatedEntry = workspaceManager.entry(for: scratchpadToken) ?? entry
-            if hiddenState.isScratchpad || hiddenState.workspaceInactive {
-                let started = showScratchpadWindow(updatedEntry, on: target.workspaceId, monitor: target.monitor)
-                return started ? .executed : .notFound
+        if workspaceManager.revealedScratchpadIndex() == index,
+           workspaceManager.hiddenState(for: token) == nil
+        {
+            if let entry = workspaceManager.entry(for: token) {
+                performWindowOrdering(windowId: entry.windowId)
+                focusWindow(token)
+                return .executed
             }
             return .notFound
         }
 
-        let hasCapturedGeometry = captureVisibleFloatingGeometry(
-            for: scratchpadToken,
-            preferredMonitor: target.monitor
-        ) != nil || workspaceManager.floatingState(for: scratchpadToken) != nil
-        guard hasCapturedGeometry else {
+        let entries = revealableScratchpadEntries(in: index)
+        guard entries.contains(where: { $0.token == token }) else { return .notFound }
+        if workspaceManager.revealedScratchpadIndex() == index {
+            layoutRefreshController.discardScratchpadRevealGroupCompletions()
+            if entries.contains(where: { $0.workspaceId != target.workspaceId }) {
+                for entry in scratchpadEntries(in: index) {
+                    layoutRefreshController.cancelPendingScratchpadReveal(for: entry.token)
+                }
+            }
+        }
+        if let revealed = workspaceManager.revealedScratchpadIndex(), revealed != index {
+            layoutRefreshController.discardScratchpadRevealGroupCompletions()
+            hideRevealedScratchpad(revealed, fallbackMonitor: target.monitor)
+        }
+        let revealedBeforeAttempt = workspaceManager.revealedScratchpadIndex()
+        workspaceManager.setRevealedScratchpad(index)
+        guard revealScratchpadMembers(
+            entries,
+            in: index,
+            on: target.workspaceId,
+            monitor: target.monitor,
+            preferring: token
+        ) else {
+            if workspaceManager.revealedScratchpadIndex() == index {
+                workspaceManager.setRevealedScratchpad(revealedBeforeAttempt)
+            }
             return .notFound
         }
+        return .executed
+    }
 
-        let liveEntry = workspaceManager.entry(for: scratchpadToken) ?? entry
-        if liveEntry.workspaceId == target.workspaceId,
-           isManagedWindowDisplayable(liveEntry.token)
-        {
-            hideScratchpadWindow(liveEntry, monitor: target.monitor)
-            return .executed
+    func reconcileScratchpadMembersAfterAppUnhide(pid: pid_t) {
+        for entry in workspaceManager.entries(forPid: pid) {
+            guard let index = workspaceManager.scratchpadIndex(for: entry.token),
+                  workspaceManager.hiddenState(for: entry.token)?.isScratchpad == true,
+                  !isManagedWindowSuspendedForNativeFullscreen(entry.token),
+                  let monitor = workspaceManager.monitor(for: entry.workspaceId) ?? monitorForInteraction()
+            else {
+                continue
+            }
+            if workspaceManager.revealedScratchpadIndex() == index {
+                _ = showScratchpadWindow(entry, on: entry.workspaceId, monitor: monitor)
+            } else {
+                _ = parkScratchpadWindow(entry, monitor: monitor)
+            }
         }
+    }
 
-        let started = showScratchpadWindow(liveEntry, on: target.workspaceId, monitor: target.monitor)
-        return started ? .executed : .notFound
+    @discardableResult
+    func reconcileScratchpadMemberAfterNativeFullscreenExit(_ token: WindowToken) -> Bool {
+        guard let entry = workspaceManager.entry(for: token),
+              entry.layoutReason == .standard,
+              let index = workspaceManager.scratchpadIndex(for: token),
+              workspaceManager.hiddenState(for: token)?.isScratchpad == true,
+              let monitor = workspaceManager.monitor(for: entry.workspaceId) ?? monitorForInteraction()
+        else {
+            return false
+        }
+        if workspaceManager.revealedScratchpadIndex() == index {
+            _ = showScratchpadWindow(entry, on: entry.workspaceId, monitor: monitor)
+            return false
+        }
+        _ = parkScratchpadWindow(entry, monitor: monitor)
+        return true
     }
 
     func workspaceAssignment(pid: pid_t, windowId: Int) -> WorkspaceDescriptor.ID? {
@@ -3112,7 +3860,7 @@ final class WMController {
             }
         }
 
-        if let focusedToken = workspaceManager.focusedToken,
+        if let focusedToken = workspaceManager.selectedManagedToken,
            workspaceManager.entry(for: focusedToken)?.workspaceId == workspaceId,
            !isManagedWindowSuppressedByMacOSHide(focusedToken)
         {
@@ -3142,8 +3890,8 @@ final class WMController {
     }
 
     func moveMouseToWindow(_ token: WindowToken, preferredFrame: CGRect? = nil) {
-        guard !axEventHandler.hasRecentMouseFocusIntent(for: token) else {
-            MouseTrace.record("focus-warp suppressed (mouse-click-intent) token=\(token)")
+        guard !axEventHandler.suppressesMouseWarp(for: token) else {
+            MouseTrace.record("focus-warp suppressed (pointer-intent) token=\(token)")
             return
         }
         guard let entry = workspaceManager.entry(for: token) else { return }
@@ -3175,358 +3923,5 @@ final class WMController {
 
     func runningAppsForRulePicker() -> [RunningAppInfo] {
         RunningAppInventory.rulePickerCandidates(trackedApplications: runningAppsWithWindows())
-    }
-}
-
-extension WMController {
-    func isFrontmostAppLockScreen() -> Bool {
-        lockScreenObserver.isFrontmostAppLockScreen()
-    }
-
-    func isPointInQuakeTerminal(_ point: CGPoint) -> Bool {
-        guard settings.quakeTerminalEnabled,
-              quakeTerminalController.visible,
-              let window = quakeTerminalController.window
-        else {
-            return false
-        }
-        return window.frame.contains(point)
-    }
-
-    func isPointInOwnWindow(_ point: CGPoint) -> Bool {
-        ownedWindowRegistry.contains(point: point)
-    }
-
-    var hasFrontmostOwnedWindow: Bool {
-        ownedWindowRegistry.hasFrontmostWindow
-    }
-
-    var hasVisibleOwnedWindow: Bool {
-        ownedWindowRegistry.hasVisibleWindow
-    }
-
-    func isOwnedWindow(windowNumber: Int) -> Bool {
-        ownedWindowRegistry.contains(windowNumber: windowNumber)
-    }
-
-    var isSystemModalFocusActive: Bool {
-        guard let systemModalFocusToken = workspaceManager.systemModalFocusToken else { return false }
-        return systemModalFocusToken == workspaceManager.focusedToken
-    }
-
-    var shouldSuppressManagedFocusRecovery: Bool {
-        if isSystemModalFocusActive { return true }
-        guard workspaceManager.isNonManagedFocusActive else { return false }
-        return hasFrontmostOwnedWindow || workspaceManager.nonManagedFocusToken != nil
-    }
-
-    func performWindowFronting(
-        pid: pid_t,
-        windowId: Int,
-        axRef: AXWindowRef
-    ) {
-        guard !workspaceManager.isAppHidden(pid: pid) else { return }
-        if let entry = workspaceManager.entry(forWindowId: windowId),
-           workspaceManager.isAppHidden(pid: entry.pid)
-        {
-            return
-        }
-        let policy = workspaceManager.entry(forWindowId: windowId)?.interactionPolicy ?? .full
-        guard policy.mayFocus,
-              focusPolicyEngine.evaluate(.windowFronting).allowsFocusChange
-        else {
-            return
-        }
-        if policy.mayActivateApp {
-            windowFocusOperations.activateApp(pid)
-        }
-        windowFocusOperations.focusSpecificWindow(pid, UInt32(windowId), axRef.element)
-        if policy.mayRaise {
-            windowFocusOperations.raiseWindow(axRef.element)
-        }
-    }
-
-    func performWindowOrdering(windowId: Int) {
-        if let entry = workspaceManager.entry(forWindowId: windowId),
-           workspaceManager.isAppHidden(pid: entry.pid)
-        {
-            return
-        }
-        let policy = workspaceManager.entry(forWindowId: windowId)?.interactionPolicy ?? .full
-        guard policy.mayOrder else { return }
-        windowFocusOperations.orderWindow(UInt32(windowId))
-    }
-
-    func retryManagedFocusFronting(_ request: ManagedFocusRequest) {
-        guard let entry = workspaceManager.entry(for: request.token),
-              entry.workspaceId == request.workspaceId,
-              !isManagedWindowSuppressedByMacOSHide(request.token)
-        else {
-            return
-        }
-        guard !isLockScreenActive else { return }
-        if hasStartedServices {
-            guard !isFrontmostAppLockScreen() else { return }
-        }
-        performWindowFronting(pid: entry.pid, windowId: entry.windowId, axRef: entry.axRef)
-    }
-
-    func activateNativeFullscreenPlaceholder(_ originalToken: WindowToken) {
-        guard let record = workspaceManager.nativeFullscreenRecord(originalToken: originalToken) else {
-            NativeFullscreenPlaceholderTrace.record(
-                NativeFullscreenPlaceholderTrace.makeRecord(
-                    .activationRejected,
-                    originalToken: originalToken,
-                    reason: .recordLookupFailed
-                )
-            )
-            return
-        }
-        guard record.transition == .suspended else {
-            NativeFullscreenPlaceholderTrace.record(
-                NativeFullscreenPlaceholderTrace.makeRecord(
-                    .activationRejected,
-                    originalToken: originalToken,
-                    currentToken: record.currentToken,
-                    workspaceId: record.workspaceId,
-                    transition: .init(record.transition),
-                    generation: record.transitionGeneration,
-                    reason: .transitionPending
-                )
-            )
-            return
-        }
-        let currentToken = record.currentToken
-        guard let entry = workspaceManager.entry(for: currentToken) else {
-            traceNativeFullscreenActivationRejected(record, reason: .entryMissing)
-            return
-        }
-        guard !isManagedWindowSuppressedByMacOSHide(currentToken) else {
-            traceNativeFullscreenActivationRejected(record, reason: .appHidden)
-            return
-        }
-        guard workspaceManager.showsNativeFullscreenPlaceholder(for: currentToken) else {
-            traceNativeFullscreenActivationRejected(record, reason: .placeholderUnavailable)
-            return
-        }
-        guard !isLockScreenActive else {
-            traceNativeFullscreenActivationRejected(record, reason: .lockScreen)
-            return
-        }
-        if hasStartedServices {
-            guard !isFrontmostAppLockScreen() else {
-                traceNativeFullscreenActivationRejected(record, reason: .lockScreen)
-                return
-            }
-        }
-        NativeFullscreenPlaceholderTrace.record(
-            NativeFullscreenPlaceholderTrace.makeRecord(
-                .activationResolved,
-                originalToken: originalToken,
-                currentToken: currentToken,
-                workspaceId: record.workspaceId,
-                transition: .init(record.transition),
-                generation: record.transitionGeneration,
-                reason: .accepted
-            )
-        )
-        selectNativeFullscreenPlaceholder(entry)
-        performWindowFronting(pid: entry.pid, windowId: entry.windowId, axRef: entry.axRef)
-    }
-
-    private func traceNativeFullscreenActivationRejected(
-        _ record: WorkspaceManager.NativeFullscreenRecord,
-        reason: NativeFullscreenPlaceholderTrace.Reason
-    ) {
-        NativeFullscreenPlaceholderTrace.record(
-            NativeFullscreenPlaceholderTrace.makeRecord(
-                .activationRejected,
-                originalToken: record.originalToken,
-                currentToken: record.currentToken,
-                workspaceId: record.workspaceId,
-                transition: .init(record.transition),
-                generation: record.transitionGeneration,
-                reason: reason
-            )
-        )
-    }
-
-    @discardableResult
-    private func selectNativeFullscreenPlaceholder(_ entry: WindowState) -> Bool {
-        let token = entry.token
-        let changed = workspaceManager.selectNativeFullscreenPlaceholder(
-            token,
-            in: entry.workspaceId,
-            onMonitor: workspaceManager.monitorId(for: entry.workspaceId)
-        )
-        let workspaceId = workspaceManager.workspace(for: token) ?? entry.workspaceId
-        let canceledRequest = intentLedger.cancelManagedRequest(matching: token, workspaceId: workspaceId)
-        if let canceledRequest {
-            _ = workspaceManager.cancelManagedFocusRequest(
-                matching: token,
-                workspaceId: workspaceId,
-                requestId: canceledRequest.requestId
-            )
-        } else {
-            _ = workspaceManager.cancelCurrentManagedFocusRequest(
-                matching: token,
-                workspaceId: workspaceId
-            )
-        }
-        intentLedger.discardPendingFocus(token)
-        if changed {
-            layoutRefreshController.requestImmediateRelayout(
-                reason: .appActivationTransition,
-                affectedWorkspaceIds: [workspaceId]
-            )
-        }
-        return changed
-    }
-
-    func restoreQuakeTerminalFocus(to target: QuakeTerminalRestoreTarget) {
-        switch target {
-        case let .managed(token):
-            guard workspaceManager.entry(for: token) != nil else { return }
-            focusWindow(token)
-
-        case let .external(target):
-            if workspaceManager.entry(for: target.token) != nil {
-                focusWindow(target.token)
-                return
-            }
-            guard !isLockScreenActive else { return }
-            if hasStartedServices {
-                guard !isFrontmostAppLockScreen() else { return }
-            }
-
-            let pid = target.pid
-            guard !workspaceManager.isAppHidden(pid: pid) else { return }
-            guard let app = NSRunningApplication(processIdentifier: pid),
-                  !app.isTerminated
-            else {
-                return
-            }
-
-            let intent = intentLedger.registerActivateApp(pid: pid)
-            deadlineWheel.schedule(intentId: intent.id, after: .seconds(1))
-            if let axRef = AXWindowService.axWindowRef(for: UInt32(target.windowId), pid: pid) {
-                performWindowFronting(
-                    pid: pid,
-                    windowId: target.windowId,
-                    axRef: axRef
-                )
-            } else {
-                windowFocusOperations.activateApp(pid)
-            }
-        }
-    }
-
-    func focusWindow(
-        _ token: WindowToken,
-        origin: ManagedFocusOrigin = .keyboardOrProgrammatic
-    ) {
-        guard let entry = workspaceManager.entry(for: token) else { return }
-        guard !isLockScreenActive else { return }
-        if hasStartedServices {
-            guard !isFrontmostAppLockScreen() else { return }
-        }
-        if isManagedWindowSuppressedByMacOSHide(token) {
-            return
-        }
-        if isManagedWindowSuspendedForNativeFullscreen(token) {
-            if workspaceManager.showsNativeFullscreenPlaceholder(for: token) {
-                selectNativeFullscreenPlaceholder(entry)
-            }
-            return
-        }
-        if deferInactiveDwindleGroupFocus(entry, origin: origin) {
-            return
-        }
-
-        let workspaceId = entry.workspaceId
-        let request = intentLedger.beginManagedRequest(
-            token: token,
-            workspaceId: workspaceId,
-            origin: origin
-        )
-        _ = workspaceManager.beginManagedFocusRequest(
-            token,
-            in: workspaceId,
-            onMonitor: workspaceManager.monitorId(for: workspaceId),
-            requestId: request.requestId
-        )
-        recordNiriCreateFocusTrace(
-            .pendingFocusStarted(
-                requestId: request.requestId,
-                token: token,
-                workspaceId: workspaceId
-            )
-        )
-
-        performWindowFronting(pid: entry.pid, windowId: entry.windowId, axRef: entry.axRef)
-        axEventHandler.probeFocusedWindowAfterFronting(
-            expectedToken: token,
-            workspaceId: workspaceId
-        )
-    }
-
-    private func deferInactiveDwindleGroupFocus(
-        _ entry: WindowState,
-        origin: ManagedFocusOrigin
-    ) -> Bool {
-        let workspaceId = entry.workspaceId
-        guard entry.mode == .tiling,
-              entry.layoutReason == .standard,
-              workspaceManager.activeLayoutKind(for: workspaceId) == .dwindle,
-              let monitorId = workspaceManager.monitorId(for: workspaceId),
-              workspaceManager.activeWorkspace(on: monitorId)?.id == workspaceId,
-              let snapshot = dwindleEngine?.tileSnapshot(for: entry.token, in: workspaceId),
-              snapshot.members.count > 1,
-              snapshot.activeToken != entry.token
-        else {
-            return false
-        }
-
-        return dwindleLayoutHandler.activateWindow(
-            entry.token,
-            in: workspaceId,
-            origin: origin
-        ) == .activated
-    }
-
-    func focusWindow(_ handle: WindowHandle) {
-        focusWindow(handle.id)
-    }
-
-    func preferredKeyboardFocusFrame(for token: WindowToken) -> CGRect? {
-        if let workspaceId = workspaceManager.entry(for: token)?.workspaceId {
-            switch workspaceManager.activeLayoutKind(for: workspaceId) {
-            case .niri:
-                if let node = niriEngine?.findNode(for: token, in: workspaceId) {
-                    return node.renderedFrame ?? node.frame
-                }
-            case .dwindle:
-                if let engine = dwindleEngine {
-                    return engine.contentFrame(for: token, in: workspaceId)
-                        ?? engine.findNode(for: token, in: workspaceId)?.cachedFrame
-                }
-            }
-        }
-        if let floatingState = workspaceManager.floatingState(for: token) {
-            return floatingState.lastFrame
-        }
-        return nil
-    }
-
-    func recordNiriCreateFocusTrace(_ kind: NiriCreateFocusTraceEvent.Kind) {
-        axEventHandler.recordNiriCreateFocusTrace(.init(kind: kind))
-    }
-
-    var isDiscoveryInProgress: Bool {
-        layoutRefreshController.isDiscoveryInProgress
-    }
-
-    var isInteractiveGestureActive: Bool {
-        mouseEventHandler.isInteractiveGestureActive
     }
 }

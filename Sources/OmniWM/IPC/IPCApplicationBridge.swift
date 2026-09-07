@@ -10,6 +10,7 @@ actor IPCApplicationBridge {
     private let eventBroker: IPCEventBroker
     private let sessionToken: String
     private let authorizationToken: String
+    private var lastPublishedDisplays: IPCResult?
 
     @MainActor
     init(
@@ -82,6 +83,7 @@ actor IPCApplicationBridge {
                 case .version:
                     return .success(id: request.id, kind: .version, result: versionResult)
                 case .command,
+                     .capture,
                      .query,
                      .rule,
                      .workspace,
@@ -97,6 +99,8 @@ actor IPCApplicationBridge {
         case let .command(command):
             let result = await commandResult { $0.handle(command) }
             return Self.response(for: result, id: request.id, kind: .command)
+        case let .capture(capture):
+            return await Self.captureResponse(for: capture, id: request.id, controller: controller)
         case let .query(query):
             return await MainActor.run {
                 let queryRouter = IPCQueryRouter(
@@ -131,13 +135,14 @@ actor IPCApplicationBridge {
     }
 
     private func versionResult() async -> IPCResult {
-        await MainActor.run {
+        let executableSHA256 = await OmniWMBuildInfo.executableSHA256.value
+        return await MainActor.run {
             let queryRouter = IPCQueryRouter(
                 controller: controller,
                 appVersion: appVersion,
                 sessionToken: sessionToken
             )
-            return IPCResult(version: queryRouter.versionResult())
+            return IPCResult(version: queryRouter.versionResult(executableSHA256: executableSHA256))
         }
     }
 
@@ -193,6 +198,10 @@ actor IPCApplicationBridge {
     func publishEvent(_ channel: IPCSubscriptionChannel) async {
         guard hasSubscribers(for: channel) else { return }
         guard let event = await eventEnvelope(for: channel) else { return }
+        if channel == .displayChanged {
+            guard event.result != lastPublishedDisplays else { return }
+            lastPublishedDisplays = event.result
+        }
         await eventBroker.publish(event)
     }
 
@@ -227,6 +236,8 @@ actor IPCApplicationBridge {
             )
         case .apps:
             return .success(id: id, kind: .query, result: IPCResult(apps: queryRouter.appsResult()))
+        case .metrics:
+            return .success(id: id, kind: .query, result: IPCResult(metrics: queryRouter.metricsResult()))
         case .focusedWindow:
             return .success(
                 id: id,
@@ -345,6 +356,10 @@ actor IPCApplicationBridge {
             return .failure(id: id, kind: kind, code: .workspaceStateConflict)
         case .notFound:
             return .failure(id: id, kind: kind, code: .notFound)
+        case .noChange:
+            return .failure(id: id, kind: kind, status: .ignored, code: .noChange)
+        case .windowActionFailed:
+            return .failure(id: id, kind: kind, code: .windowActionFailed)
         case .invalidArguments:
             return .failure(id: id, kind: kind, code: .invalidArguments)
         }

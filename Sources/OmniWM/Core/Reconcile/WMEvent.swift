@@ -107,8 +107,13 @@ enum WMEvent: Equatable {
         axRef: AXWindowRef,
         ruleEffects: ManagedWindowRuleEffects,
         admissionHints: ManagedWindowAdmissionHints,
-        interactionPolicy: WindowInteractionPolicy,
+        lifetimeAuthority: ManagedWindowLifetimeAuthority,
+        adoptNativeFocus: Bool,
         managedReplacementMetadata: ManagedReplacementMetadata?,
+        source: WMEventSource
+    )
+    case topLevelInventoryObserved(
+        tokens: Set<WindowToken>,
         source: WMEventSource
     )
     case windowRekeyed(
@@ -171,6 +176,10 @@ enum WMEvent: Equatable {
         placements: [WindowToken: PersistedNiriPlacement],
         source: WMEventSource
     )
+    case dwindlePlacementsResolved(
+        placements: [WindowToken: PersistedDwindlePlacement],
+        source: WMEventSource
+    )
     case hiddenApplicationsChanged(
         pids: Set<pid_t>,
         affectedWorkspaceIds: Set<WorkspaceDescriptor.ID>,
@@ -231,9 +240,8 @@ enum WMEvent: Equatable {
         requestId: UInt64?,
         source: WMEventSource
     )
-    case nonManagedFocusChanged(
-        active: Bool,
-        preserveFocusedToken: Bool,
+    case nativeFocusOwnerChanged(
+        owner: NativeFocusOwner,
         preservePendingManagedFocus: Bool,
         source: WMEventSource
     )
@@ -251,10 +259,6 @@ enum WMEvent: Equatable {
     )
     case focusForgotten(
         workspaceIds: Set<WorkspaceDescriptor.ID>,
-        source: WMEventSource
-    )
-    case nonManagedFocusTargetChanged(
-        target: WindowToken?,
         source: WMEventSource
     )
     case suppressedFocusChanged(
@@ -303,8 +307,13 @@ enum WMEvent: Equatable {
         nodeId: NodeId,
         source: WMEventSource
     )
-    case scratchpadChanged(
-        token: WindowToken?,
+    case scratchpadMembershipChanged(
+        token: WindowToken,
+        index: ScratchpadIndex?,
+        source: WMEventSource
+    )
+    case scratchpadRevealChanged(
+        index: ScratchpadIndex?,
         source: WMEventSource
     )
     case visibleWorkspacesChanged(
@@ -337,7 +346,8 @@ enum WMEvent: Equatable {
             axRef,
             ruleEffects,
             admissionHints,
-            interactionPolicy,
+            lifetimeAuthority,
+            adoptNativeFocus,
             metadata,
             source
         ):
@@ -349,7 +359,8 @@ enum WMEvent: Equatable {
                 axRef: AXWindowRef(element: Self.placeholderAXElement, windowId: axRef.windowId),
                 ruleEffects: ruleEffects,
                 admissionHints: admissionHints,
-                interactionPolicy: interactionPolicy,
+                lifetimeAuthority: lifetimeAuthority,
+                adoptNativeFocus: adoptNativeFocus,
                 managedReplacementMetadata: metadata,
                 source: source
             )
@@ -371,7 +382,7 @@ enum WMEvent: Equatable {
 
     var token: WindowToken? {
         switch self {
-        case let .windowAdmitted(token, _, _, _, _, _, _, _, _, _),
+        case let .windowAdmitted(token, _, _, _, _, _, _, _, _, _, _),
              let .windowRemoved(token, _, _),
              let .workspaceAssigned(token, _, _, _, _),
              let .windowModeChanged(token, _, _, _, _),
@@ -398,17 +409,19 @@ enum WMEvent: Equatable {
              .interactionMonitorChanged,
              .layoutOperationPerformed,
              .hiddenApplicationsChanged,
+             .nativeFocusOwnerChanged,
              .nativeFullscreenPlaceholderSelected,
              .niriPlacementsResolved,
-             .nonManagedFocusChanged,
-             .nonManagedFocusTargetChanged,
-             .scratchpadChanged,
+             .dwindlePlacementsResolved,
+             .scratchpadMembershipChanged,
+             .scratchpadRevealChanged,
              .selectionChanged,
              .spaceTopologyChanged,
              .suppressedFocusChanged,
              .systemModalFocusChanged,
              .systemSleep,
              .systemWake,
+             .topLevelInventoryObserved,
              .topologyChanged,
              .userCommand,
              .viewportChanged,
@@ -420,58 +433,12 @@ enum WMEvent: Equatable {
         }
     }
 
-    var source: WMEventSource {
-        switch self {
-        case let .windowAdmitted(_, _, _, _, _, _, _, _, _, source),
-             let .windowRekeyed(_, _, _, _, _, _, _, source),
-             let .windowRemoved(_, _, source),
-             let .workspaceAssigned(_, _, _, _, source),
-             let .windowModeChanged(_, _, _, _, source),
-             let .floatingGeometryUpdated(_, _, _, _, _, _, source),
-             let .floatingStateChanged(_, _, _, source),
-             let .manualLayoutOverrideChanged(_, _, _, source),
-             let .windowAdmissionHintsChanged(_, _, _, source),
-             let .niriPlacementsResolved(_, source),
-             let .hiddenApplicationsChanged(_, _, source),
-             let .appVisibilityInvalidated(_, _, source),
-             let .hiddenStateChanged(_, _, _, _, source),
-             let .nativeFullscreenTransition(_, _, _, _, source),
-             let .managedReplacementMetadataChanged(_, _, _, _, source),
-             let .topologyChanged(_, source),
-             let .activeSpaceChanged(source),
-             let .focusLeaseChanged(_, source),
-             let .managedFocusRequested(_, _, _, _, source),
-             let .managedFocusConfirmed(_, _, _, _, source),
-             let .managedFocusCancelled(_, _, _, source),
-             let .nonManagedFocusChanged(_, _, _, source),
-             let .focusRemembered(_, _, _, source),
-             let .focusFallbackRemembered(_, _, _, source),
-             let .focusForgotten(_, source),
-             let .nonManagedFocusTargetChanged(_, source),
-             let .suppressedFocusChanged(_, source),
-             let .systemModalFocusChanged(_, source),
-             let .workspaceFocusCleared(_, source),
-             let .nativeFullscreenPlaceholderSelected(_, _, source),
-             let .interactionMonitorChanged(_, _, source),
-             let .layoutOperationPerformed(_, _, source),
-             let .viewportChanged(_, _, source),
-             let .viewportCommitted(_, _, source),
-             let .viewportForgotten(_, source),
-             let .selectionChanged(_, _, source),
-             let .scratchpadChanged(_, source),
-             let .visibleWorkspacesChanged(_, source),
-             let .spaceTopologyChanged(_, source),
-             let .systemSleep(source),
-             let .systemWake(source),
-             let .userCommand(_, _, source):
-            source
-        }
-    }
-
     var summary: String {
         switch self {
-        case let .windowAdmitted(token, workspaceId, _, mode, _, _, _, _, _, _):
+        case let .windowAdmitted(token, workspaceId, _, mode, _, _, _, _, _, _, _):
             "window_admitted token=\(token) workspace=\(workspaceId.uuidString) mode=\(mode)"
+        case let .topLevelInventoryObserved(tokens, _):
+            "top_level_inventory_observed count=\(tokens.count)"
         case let .windowRekeyed(from, to, workspaceId, _, reason, _, _, _):
             "window_rekeyed from=\(from) to=\(to) workspace=\(workspaceId.uuidString) reason=\(reason.rawValue)"
         case let .windowRemoved(token, workspaceId, _):
@@ -490,6 +457,8 @@ enum WMEvent: Equatable {
             "window_admission_hints_changed token=\(token) workspace=\(workspaceId.uuidString) initial_niri_container_primary_span=\(admissionHints.initialNiriContainerPrimarySpan.map { String($0) } ?? "nil")"
         case let .niriPlacementsResolved(placements, _):
             "niri_placements_resolved count=\(placements.count)"
+        case let .dwindlePlacementsResolved(placements, _):
+            "dwindle_placements_resolved count=\(placements.count)"
         case let .hiddenApplicationsChanged(pids, affectedWorkspaceIds, _):
             "hidden_applications_changed pids=\(pids.count) workspaces=\(affectedWorkspaceIds.count)"
         case let .appVisibilityInvalidated(pid, affectedWorkspaceIds, _):
@@ -512,16 +481,14 @@ enum WMEvent: Equatable {
             "managed_focus_confirmed token=\(token) workspace=\(workspaceId.uuidString) monitor=\(String(describing: monitorId)) request=\(requestId.map { String($0) } ?? "nil")"
         case let .managedFocusCancelled(token, workspaceId, requestId, _):
             "managed_focus_cancelled token=\(token.map(String.init(describing:)) ?? "nil") workspace=\(workspaceId?.uuidString ?? "nil") request=\(requestId.map { String($0) } ?? "nil")"
-        case let .nonManagedFocusChanged(active, preserveFocusedToken, preservePendingManagedFocus, _):
-            "non_managed_focus_changed active=\(active) preserve=\(preserveFocusedToken) preserve_pending=\(preservePendingManagedFocus)"
+        case let .nativeFocusOwnerChanged(owner, preservePendingManagedFocus, _):
+            "native_focus_owner_changed owner=\(owner) preserve_pending=\(preservePendingManagedFocus)"
         case let .focusRemembered(token, workspaceId, mode, _):
             "focus_remembered token=\(token) workspace=\(workspaceId.uuidString) mode=\(mode)"
         case let .focusFallbackRemembered(token, workspaceId, mode, _):
             "focus_fallback_remembered token=\(token) workspace=\(workspaceId.uuidString) mode=\(mode)"
         case let .focusForgotten(workspaceIds, _):
             "focus_forgotten workspaces=\(workspaceIds.count)"
-        case let .nonManagedFocusTargetChanged(target, _):
-            "non_managed_focus_target_changed target=\(target.map(String.init(describing:)) ?? "nil")"
         case let .suppressedFocusChanged(token, _):
             "suppressed_focus_changed token=\(token.map(String.init(describing:)) ?? "nil")"
         case let .systemModalFocusChanged(token, _):
@@ -542,8 +509,10 @@ enum WMEvent: Equatable {
             "viewport_forgotten workspaces=\(workspaceIds.count)"
         case let .selectionChanged(workspaceId, nodeId, _):
             "selection_changed workspace=\(workspaceId.uuidString) node=\(nodeId)"
-        case let .scratchpadChanged(token, _):
-            "scratchpad_changed token=\(token.map(String.init(describing:)) ?? "nil")"
+        case let .scratchpadMembershipChanged(token, index, _):
+            "scratchpad_membership_changed token=\(token) index=\(index.map(String.init(describing:)) ?? "nil")"
+        case let .scratchpadRevealChanged(index, _):
+            "scratchpad_reveal_changed index=\(index.map(String.init(describing:)) ?? "nil")"
         case let .visibleWorkspacesChanged(sessions, _):
             "visible_workspaces_changed monitors=\(sessions.count)"
         case let .spaceTopologyChanged(topology, _):

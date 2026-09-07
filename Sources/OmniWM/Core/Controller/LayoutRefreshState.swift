@@ -35,11 +35,13 @@ struct LayoutRefreshState {
     var activeRefreshTask: Task<Void, Never>?
     var activeRefresh: LayoutRefreshController.ScheduledRefresh?
     var pendingRefresh: LayoutRefreshController.ScheduledRefresh?
+    var isRefreshSuspendedForLockScreen = false
+    var isAwaitingPostUnlockTopologySample = false
     var isImmediateLayoutInProgress: Bool = false
     var isIncrementalRefreshInProgress: Bool = false
     var activeFullEnumerationCount: Int = 0
     var displayLinksByDisplay: [CGDirectDisplayID: CADisplayLink] = [:]
-    var lastDisplayLinkTimestampByDisplay: [CGDirectDisplayID: CFTimeInterval] = [:]
+    var lastTickTimestampByDisplay: [CGDirectDisplayID: CFTimeInterval] = [:]
     var lastParkAuditTime: CFTimeInterval = 0
     var trailingAuditTask: Task<Void, Never>?
     var refreshRateByDisplay: [CGDirectDisplayID: Double] = [:]

@@ -108,7 +108,7 @@ final class NiriDirectionalOrientationTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            fixture.controller.commandHandler.handleHotkeyCommand(.moveWindowUp),
+            fixture.controller.commandHandler.performCommand(.moveWindowUp),
             .executed
         )
         XCTAssertEqual(fixture.engine.columns(in: fixture.workspaceId).count, 1)
@@ -119,7 +119,7 @@ final class NiriDirectionalOrientationTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            fixture.controller.commandHandler.handleHotkeyCommand(.moveWindowDown),
+            fixture.controller.commandHandler.performCommand(.moveWindowDown),
             .executed
         )
         XCTAssertEqual(fixture.engine.columns(in: fixture.workspaceId).count, 1)
@@ -710,6 +710,7 @@ extension NiriDirectionalOrientationTests {
         let controller = WindowAdmissionTestSupport.controller(
             prefix: "OmniWMNiriDirectionalOrientationAnimationTests"
         )
+        controller.layoutRefreshController.displayLinkActivationForTests = { _ in true }
         controller.motionPolicy.animationsEnabled = false
         controller.settings.moveCrossesMonitorAtEdge = false
 
@@ -806,8 +807,7 @@ extension NiriDirectionalOrientationTests {
             monitor: sourceMonitor,
             gaps: LayoutGaps(
                 horizontal: gap,
-                vertical: gap,
-                outer: controller.workspaceManager.outerGaps
+                vertical: gap
             ),
             state: controller.workspaceManager.niriViewportState(for: workspaceId),
             workingArea: WorkingAreaContext(
@@ -842,8 +842,7 @@ extension NiriDirectionalOrientationTests {
         let gap = fixture.controller.innerGap(for: fixture.sourceMonitor)
         let gaps = LayoutGaps(
             horizontal: gap,
-            vertical: gap,
-            outer: fixture.controller.workspaceManager.outerGaps
+            vertical: gap
         )
         let area = WorkingAreaContext(
             workingFrame: fixture.controller.insetWorkingFrame(for: fixture.sourceMonitor),
@@ -985,7 +984,7 @@ extension NiriDirectionalOrientationTests {
     }
 
     private func execute(_ command: HotkeyCommand, on controller: WMController) {
-        XCTAssertEqual(controller.commandHandler.handleHotkeyCommand(command), .executed)
+        XCTAssertEqual(controller.commandHandler.performCommand(command), .executed)
     }
 
     private func assertOrder(

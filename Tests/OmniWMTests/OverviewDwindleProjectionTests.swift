@@ -14,7 +14,8 @@ final class OverviewDwindleProjectionTests: XCTestCase {
         let fixture = makeGroupedFixture()
         let projection = DwindleOverviewWorkspaceProjection(
             engine: fixture.engine,
-            workspaceId: fixture.workspaceId
+            workspaceId: fixture.workspaceId,
+            eligibleTokens: [fixture.first, fixture.second, fixture.standalone]
         )
 
         XCTAssertFalse(projection.includes(fixture.first))
@@ -32,7 +33,8 @@ final class OverviewDwindleProjectionTests: XCTestCase {
 
         let projection = DwindleOverviewWorkspaceProjection(
             engine: fixture.engine,
-            workspaceId: fixture.workspaceId
+            workspaceId: fixture.workspaceId,
+            eligibleTokens: [fixture.first, fixture.second, fixture.standalone]
         )
 
         XCTAssertTrue(projection.includes(fixture.first))
@@ -52,12 +54,42 @@ final class OverviewDwindleProjectionTests: XCTestCase {
         _ = fixture.engine.calculateLayout(for: fixture.workspaceId, screen: screen)
         let projection = DwindleOverviewWorkspaceProjection(
             engine: fixture.engine,
-            workspaceId: fixture.workspaceId
+            workspaceId: fixture.workspaceId,
+            eligibleTokens: [fixture.first, fixture.second, fixture.standalone]
         )
 
         XCTAssertEqual(removed, [fixture.second])
         XCTAssertTrue(projection.includes(fixture.first))
         XCTAssertEqual(Set(projection.frames.keys), [fixture.first, fixture.standalone])
+        XCTAssertTrue(projection.groupCountByToken.isEmpty)
+    }
+
+    func testProjectionPromotesEligibleMemberWhenActiveMemberIsIneligible() {
+        let fixture = makeGroupedFixture()
+        let projection = DwindleOverviewWorkspaceProjection(
+            engine: fixture.engine,
+            workspaceId: fixture.workspaceId,
+            eligibleTokens: [fixture.first, fixture.standalone]
+        )
+
+        XCTAssertTrue(projection.includes(fixture.first))
+        XCTAssertFalse(projection.includes(fixture.second))
+        XCTAssertTrue(projection.includes(fixture.standalone))
+        XCTAssertEqual(Set(projection.frames.keys), [fixture.first, fixture.standalone])
+        XCTAssertTrue(projection.groupCountByToken.isEmpty)
+    }
+
+    func testProjectionExcludesIneligibleInactiveMemberFromGroupCount() {
+        let fixture = makeGroupedFixture()
+        let projection = DwindleOverviewWorkspaceProjection(
+            engine: fixture.engine,
+            workspaceId: fixture.workspaceId,
+            eligibleTokens: [fixture.second, fixture.standalone]
+        )
+
+        XCTAssertFalse(projection.includes(fixture.first))
+        XCTAssertTrue(projection.includes(fixture.second))
+        XCTAssertEqual(Set(projection.frames.keys), [fixture.second, fixture.standalone])
         XCTAssertTrue(projection.groupCountByToken.isEmpty)
     }
 
@@ -147,7 +179,7 @@ final class OverviewDwindleProjectionTests: XCTestCase {
         XCTAssertEqual(titleReads, 1)
         XCTAssertEqual(frameReads, 0)
 
-        overview.updateAnimationProgress(1, state: .open)
+        overview.onAnimationComplete(state: .open)
         let removedEntry = try XCTUnwrap(controller.workspaceManager.entry(for: second))
         _ = controller.workspaceManager.removeWindow(pid: second.pid, windowId: second.windowId)
         overview.handleManagedWindowRemoved(removedEntry)

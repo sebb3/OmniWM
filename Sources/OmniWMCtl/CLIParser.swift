@@ -25,16 +25,13 @@ struct ParsedCLICommand: Equatable {
     let outputFormat: CLIOutputFormat
     let expectsEventStream: Bool
     let watchConfiguration: CLIWatchConfiguration?
+    var reconnect = false
 
     var request: IPCRequest {
         guard case let .remote(request) = invocation else {
             preconditionFailure("Local CLI invocations do not have an IPC request")
         }
         return request
-    }
-
-    var prefersJSON: Bool {
-        outputFormat.prefersJSON
     }
 }
 
@@ -109,6 +106,16 @@ enum CLIParser {
                 expectsEventStream: false,
                 watchConfiguration: nil
             )
+        case "capture":
+            return ParsedCLICommand(
+                invocation: .remote(try parseCaptureRequest(
+                    id: requestId,
+                    arguments: Array(filteredArguments.dropFirst())
+                )),
+                outputFormat: outputFormat,
+                expectsEventStream: false,
+                watchConfiguration: nil
+            )
         case "workspace":
             return ParsedCLICommand(
                 invocation: .remote(try parseWorkspaceRequest(
@@ -130,14 +137,20 @@ enum CLIParser {
                 watchConfiguration: nil
             )
         case "subscribe":
+            let format = normalized.outputFormat ?? .json
+            guard format.prefersJSON else {
+                throw CLIParseError.usage(usageText)
+            }
+            let parsed = try parseSubscriptionArguments(
+                arguments: Array(filteredArguments.dropFirst()),
+                allowExec: false
+            )
             return ParsedCLICommand(
-                invocation: .remote(try parseSubscribeRequest(
-                    id: requestId,
-                    arguments: Array(filteredArguments.dropFirst())
-                )),
-                outputFormat: .json,
+                invocation: .remote(IPCRequest(id: requestId, subscribe: parsed.request)),
+                outputFormat: format,
                 expectsEventStream: true,
-                watchConfiguration: nil
+                watchConfiguration: nil,
+                reconnect: parsed.reconnect
             )
         case "watch":
             return try parseWatchCommand(
@@ -178,6 +191,7 @@ enum CLIParser {
 
     private struct ParsedSubscriptionArguments {
         let request: IPCSubscribeRequest
+        let reconnect: Bool
         let execArguments: [String]?
     }
 
@@ -504,28 +518,72 @@ enum CLIParser {
                         force: flags.contains("--force")
                     )
                 )
+            case .rename:
+                guard remaining.count == descriptor.arguments.count,
+                      !remaining.contains(where: { $0.hasPrefix("--") })
+                else {
+                    continue
+                }
+                return IPCRequest(
+                    id: id,
+                    workspace: .rename(
+                        target: WorkspaceTarget(resolvingInput: remaining[0]),
+                        displayName: remaining[1]
+                    )
+                )
             }
         }
 
         throw CLIParseError.usage(usageText)
     }
 
+    private static func parseCaptureRequest(id: String, arguments: [String]) throws -> IPCRequest {
+        guard let actionToken = arguments.first,
+              let action = IPCCaptureActionName(rawValue: actionToken)
+        else {
+            throw CLIParseError.usage(usageText)
+        }
+
+        let capture: IPCCaptureRequest
+        switch action {
+        case .start:
+            guard arguments.count == 2,
+                  let profile = IPCCaptureProfile(rawValue: arguments[1])
+            else {
+                throw CLIParseError.usage(usageText)
+            }
+            capture = .start(profile)
+        case .stop:
+            guard arguments.count == 1 else {
+                throw CLIParseError.usage(usageText)
+            }
+            capture = .stop
+        case .status:
+            guard arguments.count == 1 else {
+                throw CLIParseError.usage(usageText)
+            }
+            capture = .status
+        }
+
+        return IPCRequest(id: id, capture: capture)
+    }
+
     private static func parseWindowRequest(id: String, arguments: [String]) throws -> IPCRequest {
-        guard arguments.count == 2,
-              let action = IPCWindowActionName(rawValue: arguments[0])
+        guard let action = arguments.first.flatMap(IPCWindowActionName.init(rawValue:)),
+              let descriptor = IPCAutomationManifest.windowActionDescriptors.first(where: { $0.name == action }),
+              arguments.count == 1 + descriptor.arguments.count
         else {
             throw CLIParseError.usage(usageText)
         }
 
         return IPCRequest(
             id: id,
-            window: IPCWindowRequest(name: action, windowId: arguments[1])
+            window: IPCWindowRequest(
+                name: action,
+                windowId: arguments[1],
+                workspaceTarget: action == .moveToWorkspace ? WorkspaceTarget(resolvingInput: arguments[2]) : nil
+            )
         )
-    }
-
-    private static func parseSubscribeRequest(id: String, arguments: [String]) throws -> IPCRequest {
-        let parsed = try parseSubscriptionArguments(arguments: arguments, allowExec: false)
-        return IPCRequest(id: id, subscribe: parsed.request)
     }
 
     private static func parseWatchCommand(
@@ -542,7 +600,8 @@ enum CLIParser {
             invocation: .remote(IPCRequest(id: id, subscribe: parsed.request)),
             outputFormat: outputFormat,
             expectsEventStream: false,
-            watchConfiguration: CLIWatchConfiguration(childArguments: execArguments)
+            watchConfiguration: CLIWatchConfiguration(childArguments: execArguments),
+            reconnect: parsed.reconnect
         )
     }
 
@@ -562,6 +621,7 @@ enum CLIParser {
         var channels: [IPCSubscriptionChannel] = []
         var allChannels = false
         var sendInitial = true
+        var reconnect = false
         var sawChannelList = false
         var index = 0
         var execArguments: [String]?
@@ -587,6 +647,10 @@ enum CLIParser {
             case "--no-send-initial":
                 guard sendInitial else { throw CLIParseError.usage(usageText) }
                 sendInitial = false
+                index += 1
+            case "--reconnect":
+                guard !reconnect else { throw CLIParseError.usage(usageText) }
+                reconnect = true
                 index += 1
             default:
                 guard !argument.hasPrefix("--"), !sawChannelList else {
@@ -622,6 +686,7 @@ enum CLIParser {
                 allChannels: allChannels,
                 sendInitial: sendInitial
             ),
+            reconnect: reconnect,
             execArguments: execArguments
         )
     }
@@ -645,6 +710,13 @@ enum CLIParser {
             throw CLIParseError.usage(usageText)
         }
         return workspaceNumber
+    }
+
+    private static func parseScratchpadIndex(_ rawValue: String) throws -> Int {
+        guard let index = Int(rawValue), IPCScratchpadSlots.range.contains(index) else {
+            throw CLIParseError.usage(usageText)
+        }
+        return index
     }
 
     private static func parsePositiveInteger(_ rawValue: String) throws -> Int {
@@ -735,6 +807,8 @@ enum CLIParser {
             return .integer(try parseColumnIndex(token))
         case .windowIndex:
             return .integer(try parseWindowIndex(token))
+        case .scratchpadIndex:
+            return .integer(try parseScratchpadIndex(token))
         case .layout:
             return .layout(try parseWorkspaceLayout(token))
         case .resizeAxis:
@@ -759,6 +833,7 @@ enum CLIParser {
         }
         let workspaceLines = IPCAutomationManifest.workspaceActionDescriptors.map(\.path)
         let windowLines = IPCAutomationManifest.windowActionDescriptors.map(\.path)
+        let captureLines = IPCAutomationManifest.captureActionDescriptors.map(\.path)
 
         var lines = [
             "Usage:",
@@ -769,19 +844,20 @@ enum CLIParser {
         ]
         lines += commandLines.map { "  omniwmctl \($0)" }
         lines += ruleLines.map { "  omniwmctl \($0)" }
+        lines += captureLines.map { "  omniwmctl \($0)" }
         lines += [
-            "  omniwmctl query <\(queryNames)> [selectors...] [--fields <csv>] [--format <json|table|tsv|text>]"
+            "  omniwmctl query <\(queryNames)> [selectors...] [--fields <csv>] [--format <json|ndjson|table|tsv|text>]"
         ]
         lines += workspaceLines.map { "  omniwmctl \($0)" }
         lines += windowLines.map { "  omniwmctl \($0)" }
         lines += [
-            "  omniwmctl subscribe <\(subscriptionNames)> [--no-send-initial]",
-            "  omniwmctl subscribe --all [--no-send-initial]",
-            "  omniwmctl watch <\(subscriptionNames)> [--no-send-initial] --exec <argv...>",
-            "  omniwmctl watch --all [--no-send-initial] --exec <argv...>",
+            "  omniwmctl subscribe <\(subscriptionNames)> [--no-send-initial] [--reconnect] [--format json|ndjson]",
+            "  omniwmctl subscribe --all [--no-send-initial] [--reconnect] [--format json|ndjson]",
+            "  omniwmctl watch <\(subscriptionNames)> [--no-send-initial] [--reconnect] --exec <argv...>",
+            "  omniwmctl watch --all [--no-send-initial] [--reconnect] --exec <argv...>",
             "",
             "Formats:",
-            "  --format json|table|tsv|text",
+            "  --format json|ndjson|table|tsv|text",
             "  --json (alias for --format json)",
             "",
             "Rule Options:"

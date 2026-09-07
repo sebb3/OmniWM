@@ -7,7 +7,7 @@ import XCTest
 
 final class WorkspaceBarRevealSettingsTests: XCTestCase {
     func testDefaultsRoundTrip() throws {
-        XCTAssertEqual(SettingsExport.defaults().workspaceBarRevealModifier, WorkspaceBarRevealModifier.off.rawValue)
+        XCTAssertEqual(SettingsExport.defaults().workspaceBarRevealModifier, .off)
         XCTAssertEqual(SettingsExport.defaults().workspaceBarRevealHoldMilliseconds, 200)
 
         let data = try SettingsTOMLCodec.encode(.defaults())
@@ -16,13 +16,13 @@ final class WorkspaceBarRevealSettingsTests: XCTestCase {
         XCTAssertTrue(toml.contains("revealHoldMilliseconds = 200"))
 
         let decoded = try SettingsTOMLCodec.decode(data)
-        XCTAssertEqual(decoded.workspaceBarRevealModifier, WorkspaceBarRevealModifier.off.rawValue)
+        XCTAssertEqual(decoded.workspaceBarRevealModifier, .off)
         XCTAssertEqual(decoded.workspaceBarRevealHoldMilliseconds, 200)
     }
 
     func testNonDefaultRoundTrip() throws {
         var export = SettingsExport.defaults()
-        export.workspaceBarRevealModifier = WorkspaceBarRevealModifier.controlOptionCommand.rawValue
+        export.workspaceBarRevealModifier = .controlOptionCommand
         export.workspaceBarRevealHoldMilliseconds = 350
 
         let data = try SettingsTOMLCodec.encode(export)
@@ -31,24 +31,16 @@ final class WorkspaceBarRevealSettingsTests: XCTestCase {
         XCTAssertTrue(toml.contains("revealHoldMilliseconds = 350"))
 
         let decoded = try SettingsTOMLCodec.decode(data)
-        XCTAssertEqual(decoded.workspaceBarRevealModifier, WorkspaceBarRevealModifier.controlOptionCommand.rawValue)
+        XCTAssertEqual(decoded.workspaceBarRevealModifier, .controlOptionCommand)
         XCTAssertEqual(decoded.workspaceBarRevealHoldMilliseconds, 350)
     }
 
-    func testMissingKeysRecoverToDefaults() throws {
-        let withoutKeys = try defaultsDroppingLines(containing: "revealModifier", "revealHoldMilliseconds")
-        let decoded = try SettingsTOMLCodec.decode(withoutKeys)
-
-        XCTAssertEqual(decoded.workspaceBarRevealModifier, WorkspaceBarRevealModifier.off.rawValue)
-        XCTAssertEqual(decoded.workspaceBarRevealHoldMilliseconds, 200)
-    }
-
     @MainActor
-    func testApplyExportClampsDelayAndRecoversInvalidModifier() {
+    func testApplyExportClampsDelay() {
         let settings = makeSettingsStore()
         var export = SettingsExport.defaults()
 
-        export.workspaceBarRevealModifier = WorkspaceBarRevealModifier.option.rawValue
+        export.workspaceBarRevealModifier = .option
         export.workspaceBarRevealHoldMilliseconds = -50
         settings.applyExport(export)
         XCTAssertEqual(settings.workspaceBarRevealModifier, .option)
@@ -57,10 +49,6 @@ final class WorkspaceBarRevealSettingsTests: XCTestCase {
         export.workspaceBarRevealHoldMilliseconds = 5000
         settings.applyExport(export)
         XCTAssertEqual(settings.workspaceBarRevealHoldMilliseconds, 1000)
-
-        export.workspaceBarRevealModifier = "bogus"
-        settings.applyExport(export)
-        XCTAssertEqual(settings.workspaceBarRevealModifier, .off)
     }
 
     @MainActor
@@ -81,12 +69,18 @@ final class WorkspaceBarRevealSettingsTests: XCTestCase {
         )
 
         XCTAssertFalse(controller.isWorkspaceBarVisible(on: monitor))
-        XCTAssertEqual(controller.insetWorkingFrame(for: monitor), monitor.visibleFrame)
+        XCTAssertEqual(
+            controller.insetWorkingFrame(for: monitor),
+            CGRect(x: 5, y: 5, width: 1430, height: 850)
+        )
         XCTAssertEqual(controller.fullscreenLayoutFrame(for: monitor), monitor.visibleFrame)
 
         controller.setWorkspaceBarRevealHeld(true)
         XCTAssertTrue(controller.isWorkspaceBarVisible(on: monitor))
-        XCTAssertEqual(controller.insetWorkingFrame(for: monitor), monitor.visibleFrame)
+        XCTAssertEqual(
+            controller.insetWorkingFrame(for: monitor),
+            CGRect(x: 5, y: 5, width: 1430, height: 850)
+        )
         XCTAssertEqual(controller.fullscreenLayoutFrame(for: monitor), monitor.visibleFrame)
 
         settings.workspaceBarRevealModifier = .off
@@ -94,12 +88,49 @@ final class WorkspaceBarRevealSettingsTests: XCTestCase {
         XCTAssertTrue(controller.isWorkspaceBarVisible(on: monitor))
         XCTAssertEqual(
             controller.insetWorkingFrame(for: monitor),
-            CGRect(x: 0, y: 0, width: 1440, height: 836)
+            CGRect(x: 5, y: 5, width: 1430, height: 831)
         )
         XCTAssertEqual(
             controller.fullscreenLayoutFrame(for: monitor),
             CGRect(x: 0, y: 0, width: 1440, height: 836)
         )
+    }
+
+    @MainActor
+    func testRevealModeKeepsFullscreenOuterGapsButDropsReservation() {
+        let settings = makeSettingsStore()
+        settings.outerGapLeft = 12
+        settings.outerGapRight = 12
+        settings.outerGapTop = 46
+        settings.outerGapBottom = 14
+        settings.fullscreenUsesOuterGaps = true
+        settings.workspaceBarEnabled = true
+        settings.workspaceBarReserveLayoutSpace = true
+        settings.workspaceBarHeight = 24
+        settings.workspaceBarRevealModifier = .option
+        let controller = WMController(settings: settings)
+        let monitor = Monitor(
+            id: .init(displayId: 1),
+            displayId: 1,
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 860),
+            hasNotch: false,
+            name: "Built-in"
+        )
+
+        let overlayFrame = CGRect(x: 12, y: 14, width: 1416, height: 840)
+        XCTAssertEqual(controller.insetWorkingFrame(for: monitor), overlayFrame)
+        XCTAssertEqual(controller.fullscreenLayoutFrame(for: monitor), overlayFrame)
+
+        controller.setWorkspaceBarRevealHeld(true)
+        XCTAssertEqual(controller.insetWorkingFrame(for: monitor), overlayFrame)
+        XCTAssertEqual(controller.fullscreenLayoutFrame(for: monitor), overlayFrame)
+
+        settings.workspaceBarRevealModifier = .off
+        controller.setWorkspaceBarRevealHeld(false)
+        let reservedFrame = CGRect(x: 12, y: 14, width: 1416, height: 816)
+        XCTAssertEqual(controller.insetWorkingFrame(for: monitor), reservedFrame)
+        XCTAssertEqual(controller.fullscreenLayoutFrame(for: monitor), reservedFrame)
     }
 
     private func defaultsDroppingLines(containing fragments: String...) throws -> Data {

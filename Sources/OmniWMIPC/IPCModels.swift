@@ -4,7 +4,7 @@
 import Foundation
 
 public enum OmniWMIPCProtocol {
-    public static let version = 11
+    public static let version = 15
 }
 
 public struct IPCRequestEnvelope: Decodable, Sendable {
@@ -22,6 +22,7 @@ public enum IPCRequestKind: String, Codable, Equatable, Sendable {
     case ping
     case version
     case command
+    case capture
     case query
     case rule
     case workspace
@@ -33,6 +34,7 @@ public enum IPCResponseKind: String, Codable, Equatable, Sendable {
     case ping
     case version
     case command
+    case capture
     case query
     case rule
     case workspace
@@ -48,6 +50,8 @@ public enum IPCResponseKind: String, Codable, Equatable, Sendable {
             self = .version
         case .command:
             self = .command
+        case .capture:
+            self = .capture
         case .query:
             self = .query
         case .rule:
@@ -80,8 +84,11 @@ public enum IPCErrorCode: String, Codable, Equatable, Sendable, Error {
     case unauthorized = "unauthorized"
     case staleWindowId = "stale_window_id"
     case notFound = "not_found"
+    case noChange = "no_change"
+    case windowActionFailed = "window_action_failed"
     case workspaceAssignmentConflict = "workspace_assignment_conflict"
     case workspaceStateConflict = "workspace_state_conflict"
+    case captureStateConflict = "capture_state_conflict"
     case internalError = "internal_error"
 }
 
@@ -235,10 +242,12 @@ public enum IPCCommandName: String, Codable, CaseIterable, Equatable, Sendable {
     case switchWorkspacePrevious = "switch-workspace-previous"
     case switchWorkspaceBackAndForth = "switch-workspace-back-and-forth"
     case switchWorkspaceAnywhere = "switch-workspace-anywhere"
+    case switchWorkspaceSlot = "switch-workspace-slot"
     case moveToWorkspace = "move-to-workspace"
     case moveToWorkspaceUp = "move-to-workspace-up"
     case moveToWorkspaceDown = "move-to-workspace-down"
     case moveToWorkspaceOnMonitor = "move-to-workspace-on-monitor"
+    case moveToWorkspaceSlot = "move-to-workspace-slot"
     case moveToMonitor = "move-to-monitor"
     case focusMonitorPrevious = "focus-monitor-previous"
     case focusMonitorNext = "focus-monitor-next"
@@ -285,6 +294,7 @@ public enum IPCCommandName: String, Codable, CaseIterable, Equatable, Sendable {
     case toggleWorkspaceBar = "toggle-workspace-bar"
     case hiddenBarPanel = "hidden-bar-panel"
     case toggleFocusedWindowFloating = "toggle-focused-window-floating"
+    case closeFocusedWindow = "close-focused-window"
     case scratchpadAssign = "scratchpad-assign"
     case scratchpadToggle = "scratchpad-toggle"
     case openMenuAnywhere = "open-menu-anywhere"
@@ -368,10 +378,12 @@ public enum IPCCommandRequest: Equatable, Sendable {
     case switchWorkspacePrevious
     case switchWorkspaceBackAndForth
     case switchWorkspaceAnywhere(workspaceNumber: Int)
+    case switchWorkspaceSlot(slotNumber: Int)
     case moveToWorkspace(workspaceNumber: Int)
     case moveToWorkspaceUp
     case moveToWorkspaceDown
     case moveToWorkspaceOnMonitor(workspaceNumber: Int, direction: IPCDirection)
+    case moveToWorkspaceSlot(slotNumber: Int)
     case moveToMonitor(direction: IPCDirection)
     case focusMonitorPrevious
     case focusMonitorNext
@@ -418,8 +430,9 @@ public enum IPCCommandRequest: Equatable, Sendable {
     case toggleWorkspaceBar
     case hiddenBarPanel
     case toggleFocusedWindowFloating
-    case scratchpadAssign
-    case scratchpadToggle
+    case closeFocusedWindow
+    case scratchpadAssign(index: Int)
+    case scratchpadToggle(index: Int)
     case openMenuAnywhere
 
     public var name: IPCCommandName {
@@ -484,6 +497,8 @@ public enum IPCCommandRequest: Equatable, Sendable {
             .switchWorkspaceBackAndForth
         case .switchWorkspaceAnywhere:
             .switchWorkspaceAnywhere
+        case .switchWorkspaceSlot:
+            .switchWorkspaceSlot
         case .moveToWorkspace:
             .moveToWorkspace
         case .moveToWorkspaceUp:
@@ -492,6 +507,8 @@ public enum IPCCommandRequest: Equatable, Sendable {
             .moveToWorkspaceDown
         case .moveToWorkspaceOnMonitor:
             .moveToWorkspaceOnMonitor
+        case .moveToWorkspaceSlot:
+            .moveToWorkspaceSlot
         case .moveToMonitor:
             .moveToMonitor
         case .focusMonitorPrevious:
@@ -584,6 +601,8 @@ public enum IPCCommandRequest: Equatable, Sendable {
             .hiddenBarPanel
         case .toggleFocusedWindowFloating:
             .toggleFocusedWindowFloating
+        case .closeFocusedWindow:
+            .closeFocusedWindow
         case .scratchpadAssign:
             .scratchpadAssign
         case .scratchpadToggle:
@@ -740,6 +759,8 @@ public enum IPCCommandRequest: Equatable, Sendable {
             self = .switchWorkspaceBackAndForth
         case .switchWorkspaceAnywhere:
             self = .switchWorkspaceAnywhere(workspaceNumber: try requireInteger())
+        case .switchWorkspaceSlot:
+            self = .switchWorkspaceSlot(slotNumber: try requireInteger())
         case .moveToWorkspace:
             self = .moveToWorkspace(workspaceNumber: try requireInteger())
         case .moveToWorkspaceUp:
@@ -754,6 +775,8 @@ public enum IPCCommandRequest: Equatable, Sendable {
                 workspaceNumber: arguments.workspaceNumber,
                 direction: arguments.direction
             )
+        case .moveToWorkspaceSlot:
+            self = .moveToWorkspaceSlot(slotNumber: try requireInteger())
         case .moveToMonitor:
             self = .moveToMonitor(direction: try requireDirection())
         case .focusMonitorPrevious:
@@ -881,12 +904,13 @@ public enum IPCCommandRequest: Equatable, Sendable {
         case .toggleFocusedWindowFloating:
             try requireNoArguments()
             self = .toggleFocusedWindowFloating
+        case .closeFocusedWindow:
+            try requireNoArguments()
+            self = .closeFocusedWindow
         case .scratchpadAssign:
-            try requireNoArguments()
-            self = .scratchpadAssign
+            self = try .scratchpadAssign(index: requireInteger())
         case .scratchpadToggle:
-            try requireNoArguments()
-            self = .scratchpadToggle
+            self = try .scratchpadToggle(index: requireInteger())
         case .openMenuAnywhere:
             try requireNoArguments()
             self = .openMenuAnywhere
@@ -908,8 +932,16 @@ extension IPCCommandRequest: Codable {
         let workspaceNumber: Int
     }
 
+    private struct IPCSlotNumberArguments: Codable, Equatable, Sendable {
+        let slotNumber: Int
+    }
+
     private struct IPCColumnIndexArguments: Codable, Equatable, Sendable {
         let columnIndex: Int
+    }
+
+    private struct IPCScratchpadIndexArguments: Codable, Equatable, Sendable {
+        let scratchpadIndex: Int
     }
 
     private struct IPCWindowIndexArguments: Codable, Equatable, Sendable {
@@ -1009,6 +1041,12 @@ extension IPCCommandRequest: Codable {
         case .switchWorkspaceAnywhere:
             let arguments = try container.decode(IPCWorkspaceNumberArguments.self, forKey: .arguments)
             self = .switchWorkspaceAnywhere(workspaceNumber: arguments.workspaceNumber)
+        case .switchWorkspaceSlot:
+            let arguments = try container.decode(IPCSlotNumberArguments.self, forKey: .arguments)
+            self = .switchWorkspaceSlot(slotNumber: arguments.slotNumber)
+        case .moveToWorkspaceSlot:
+            let arguments = try container.decode(IPCSlotNumberArguments.self, forKey: .arguments)
+            self = .moveToWorkspaceSlot(slotNumber: arguments.slotNumber)
         case .moveToWorkspace:
             let arguments = try container.decode(IPCWorkspaceNumberArguments.self, forKey: .arguments)
             self = .moveToWorkspace(workspaceNumber: arguments.workspaceNumber)
@@ -1123,10 +1161,14 @@ extension IPCCommandRequest: Codable {
             self = .hiddenBarPanel
         case .toggleFocusedWindowFloating:
             self = .toggleFocusedWindowFloating
+        case .closeFocusedWindow:
+            self = .closeFocusedWindow
         case .scratchpadAssign:
-            self = .scratchpadAssign
+            let arguments = try container.decode(IPCScratchpadIndexArguments.self, forKey: .arguments)
+            self = .scratchpadAssign(index: arguments.scratchpadIndex)
         case .scratchpadToggle:
-            self = .scratchpadToggle
+            let arguments = try container.decode(IPCScratchpadIndexArguments.self, forKey: .arguments)
+            self = .scratchpadToggle(index: arguments.scratchpadIndex)
         case .openMenuAnywhere:
             self = .openMenuAnywhere
         }
@@ -1197,6 +1239,9 @@ extension IPCCommandRequest: Codable {
             break
         case let .switchWorkspaceAnywhere(workspaceNumber):
             try container.encode(IPCWorkspaceNumberArguments(workspaceNumber: workspaceNumber), forKey: .arguments)
+        case let .switchWorkspaceSlot(slotNumber),
+             let .moveToWorkspaceSlot(slotNumber):
+            try container.encode(IPCSlotNumberArguments(slotNumber: slotNumber), forKey: .arguments)
         case let .moveToWorkspace(workspaceNumber):
             try container.encode(IPCWorkspaceNumberArguments(workspaceNumber: workspaceNumber), forKey: .arguments)
         case .moveToWorkspaceUp:
@@ -1303,10 +1348,12 @@ extension IPCCommandRequest: Codable {
             break
         case .toggleFocusedWindowFloating:
             break
-        case .scratchpadAssign:
+        case .closeFocusedWindow:
             break
-        case .scratchpadToggle:
-            break
+        case let .scratchpadAssign(index):
+            try container.encode(IPCScratchpadIndexArguments(scratchpadIndex: index), forKey: .arguments)
+        case let .scratchpadToggle(index):
+            try container.encode(IPCScratchpadIndexArguments(scratchpadIndex: index), forKey: .arguments)
         case .openMenuAnywhere:
             break
         }
@@ -1328,6 +1375,7 @@ public enum IPCQueryName: String, Codable, CaseIterable, Equatable, Sendable {
     case commands
     case subscriptions
     case capabilities
+    case metrics
 }
 
 public struct IPCQuerySelectors: Codable, Equatable, Sendable {
@@ -1754,11 +1802,13 @@ extension IPCRuleRequest: Codable {
 public enum IPCWorkspaceActionName: String, Codable, Equatable, Sendable {
     case focusName = "focus-name"
     case moveToMonitor = "move-to-monitor"
+    case rename
 }
 
 public enum IPCWorkspaceRequest: Equatable, Sendable {
     case focusName(target: WorkspaceTarget)
     case moveToMonitor(target: WorkspaceTarget, direction: IPCDirection, force: Bool = false)
+    case rename(target: WorkspaceTarget, displayName: String)
 
     public var name: IPCWorkspaceActionName {
         switch self {
@@ -1766,13 +1816,16 @@ public enum IPCWorkspaceRequest: Equatable, Sendable {
             .focusName
         case .moveToMonitor:
             .moveToMonitor
+        case .rename:
+            .rename
         }
     }
 
     public var target: WorkspaceTarget {
         switch self {
         case let .focusName(target),
-             let .moveToMonitor(target, _, _):
+             let .moveToMonitor(target, _, _),
+             let .rename(target, _):
             target
         }
     }
@@ -1784,6 +1837,7 @@ extension IPCWorkspaceRequest: Codable {
         case workspaceTarget
         case direction
         case force
+        case displayName
     }
 
     public init(from decoder: Decoder) throws {
@@ -1800,6 +1854,11 @@ extension IPCWorkspaceRequest: Codable {
                 direction: try container.decode(IPCDirection.self, forKey: .direction),
                 force: try container.decodeIfPresent(Bool.self, forKey: .force) ?? false
             )
+        case .rename:
+            self = .rename(
+                target: target,
+                displayName: try container.decode(String.self, forKey: .displayName)
+            )
         }
     }
 
@@ -1814,6 +1873,8 @@ extension IPCWorkspaceRequest: Codable {
         case let .moveToMonitor(_, direction, force):
             try container.encode(direction, forKey: .direction)
             try container.encode(force, forKey: .force)
+        case let .rename(_, displayName):
+            try container.encode(displayName, forKey: .displayName)
         }
     }
 }
@@ -1822,15 +1883,111 @@ public enum IPCWindowActionName: String, Codable, Equatable, Sendable {
     case focus
     case navigate
     case summonRight = "summon-right"
+    case moveToWorkspace = "move-to-workspace"
+    case close
 }
 
 public struct IPCWindowRequest: Codable, Equatable, Sendable {
     public let name: IPCWindowActionName
     public let windowId: String
+    public let workspaceTarget: WorkspaceTarget?
 
-    public init(name: IPCWindowActionName, windowId: String) {
+    public init(name: IPCWindowActionName, windowId: String, workspaceTarget: WorkspaceTarget? = nil) {
         self.name = name
         self.windowId = windowId
+        self.workspaceTarget = workspaceTarget
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case windowId
+        case workspaceTarget
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(IPCWindowActionName.self, forKey: .name)
+        windowId = try container.decode(String.self, forKey: .windowId)
+        workspaceTarget = try container.decodeIfPresent(WorkspaceTarget.self, forKey: .workspaceTarget)
+        guard (name == .moveToWorkspace) == (workspaceTarget != nil) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .workspaceTarget,
+                in: container,
+                debugDescription: "workspaceTarget is required by move-to-workspace and rejected by other actions"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(windowId, forKey: .windowId)
+        try container.encodeIfPresent(workspaceTarget, forKey: .workspaceTarget)
+    }
+}
+
+public enum IPCCaptureProfile: String, Codable, CaseIterable, Equatable, Sendable {
+    case trace
+    case performance
+}
+
+public enum IPCCapturePhase: String, Codable, CaseIterable, Equatable, Sendable {
+    case idle
+    case starting
+    case recording
+    case finalizing
+}
+
+public enum IPCCaptureActionName: String, Codable, CaseIterable, Equatable, Sendable {
+    case start
+    case stop
+    case status
+}
+
+public enum IPCCaptureRequest: Equatable, Sendable {
+    case start(IPCCaptureProfile)
+    case stop
+    case status
+
+    public var name: IPCCaptureActionName {
+        switch self {
+        case .start:
+            .start
+        case .stop:
+            .stop
+        case .status:
+            .status
+        }
+    }
+}
+
+extension IPCCaptureRequest: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case profile
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let name = try container.decode(IPCCaptureActionName.self, forKey: .name)
+
+        switch name {
+        case .start:
+            self = .start(try container.decode(IPCCaptureProfile.self, forKey: .profile))
+        case .stop:
+            self = .stop
+        case .status:
+            self = .status
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+
+        if case let .start(profile) = self {
+            try container.encode(profile, forKey: .profile)
+        }
     }
 }
 
@@ -1854,6 +2011,7 @@ public struct IPCRequest: Codable, Equatable, Sendable {
     public enum Payload: Equatable, Sendable {
         case none(IPCNoPayload)
         case command(IPCCommandRequest)
+        case capture(IPCCaptureRequest)
         case query(IPCQueryRequest)
         case rule(IPCRuleRequest)
         case workspace(IPCWorkspaceRequest)
@@ -1883,6 +2041,10 @@ public struct IPCRequest: Codable, Equatable, Sendable {
 
     public init(id: String, command: IPCCommandRequest, authorizationToken: String? = nil) {
         self.init(id: id, kind: .command, authorizationToken: authorizationToken, payload: .command(command))
+    }
+
+    public init(id: String, capture: IPCCaptureRequest, authorizationToken: String? = nil) {
+        self.init(id: id, kind: .capture, authorizationToken: authorizationToken, payload: .capture(capture))
     }
 
     public init(id: String, query: IPCQueryRequest, authorizationToken: String? = nil) {
@@ -1940,6 +2102,8 @@ public struct IPCRequest: Codable, Equatable, Sendable {
             payload = .none(try container.decodeIfPresent(IPCNoPayload.self, forKey: .payload) ?? .init())
         case .command:
             payload = .command(try container.decode(IPCCommandRequest.self, forKey: .payload))
+        case .capture:
+            payload = .capture(try container.decode(IPCCaptureRequest.self, forKey: .payload))
         case .query:
             payload = .query(try container.decode(IPCQueryRequest.self, forKey: .payload))
         case .rule:
@@ -1965,6 +2129,8 @@ public struct IPCRequest: Codable, Equatable, Sendable {
             try container.encode(payload, forKey: .payload)
         case let .command(payload):
             try container.encode(payload, forKey: .payload)
+        case let .capture(payload):
+            try container.encode(payload, forKey: .payload)
         case let .query(payload):
             try container.encode(payload, forKey: .payload)
         case let .rule(payload):
@@ -1979,9 +2145,172 @@ public struct IPCRequest: Codable, Equatable, Sendable {
     }
 }
 
+public struct IPCAXWriteMetricsBucket: Codable, Equatable, Sendable {
+    public let pid: Int32
+    public let context: UInt64
+    public let app: String?
+    public let bundleId: String?
+    public let lane: String
+    public let count: Int
+    public let failureCount: Int
+    public let meanMicroseconds: Double
+    public let maxMicroseconds: Double
+    public let totalMicroseconds: Double
+
+    public init(
+        pid: Int32,
+        context: UInt64,
+        app: String?,
+        bundleId: String?,
+        lane: String,
+        count: Int,
+        failureCount: Int,
+        meanMicroseconds: Double,
+        maxMicroseconds: Double,
+        totalMicroseconds: Double
+    ) {
+        self.pid = pid
+        self.context = context
+        self.app = app
+        self.bundleId = bundleId
+        self.lane = lane
+        self.count = count
+        self.failureCount = failureCount
+        self.meanMicroseconds = meanMicroseconds
+        self.maxMicroseconds = maxMicroseconds
+        self.totalMicroseconds = totalMicroseconds
+    }
+}
+
+public struct IPCAXWriteMetrics: Codable, Equatable, Sendable {
+    public let count: Int
+    public let failureCount: Int
+    public let meanMicroseconds: Double
+    public let maxMicroseconds: Double
+    public let totalMicroseconds: Double
+    public let byApp: [IPCAXWriteMetricsBucket]
+
+    public init(
+        count: Int,
+        failureCount: Int,
+        meanMicroseconds: Double,
+        maxMicroseconds: Double,
+        totalMicroseconds: Double,
+        byApp: [IPCAXWriteMetricsBucket]
+    ) {
+        self.count = count
+        self.failureCount = failureCount
+        self.meanMicroseconds = meanMicroseconds
+        self.maxMicroseconds = maxMicroseconds
+        self.totalMicroseconds = totalMicroseconds
+        self.byApp = byApp
+    }
+}
+
+public struct IPCProcessResourceMetrics: Codable, Equatable, Sendable {
+    public let energyNanojoules: UInt64
+    public let userTimeNanoseconds: UInt64
+    public let systemTimeNanoseconds: UInt64
+    public let packageIdleWakeups: UInt64
+    public let interruptWakeups: UInt64
+    public let residentSizeBytes: UInt64
+    public let physicalFootprintBytes: UInt64
+
+    public init(
+        energyNanojoules: UInt64,
+        userTimeNanoseconds: UInt64,
+        systemTimeNanoseconds: UInt64,
+        packageIdleWakeups: UInt64,
+        interruptWakeups: UInt64,
+        residentSizeBytes: UInt64,
+        physicalFootprintBytes: UInt64
+    ) {
+        self.energyNanojoules = energyNanojoules
+        self.userTimeNanoseconds = userTimeNanoseconds
+        self.systemTimeNanoseconds = systemTimeNanoseconds
+        self.packageIdleWakeups = packageIdleWakeups
+        self.interruptWakeups = interruptWakeups
+        self.residentSizeBytes = residentSizeBytes
+        self.physicalFootprintBytes = physicalFootprintBytes
+    }
+}
+
+public struct IPCDisplayTickMetrics: Codable, Equatable, Sendable {
+    public let tickCount: Int
+    public let timingAnomalyCount: Int
+    public let longTimestampGapCount: Int
+    public let workExceededNominalPeriodCount: Int
+    public let completionPastTargetCount: Int
+    public let timingAnomalyPercent: Double
+    public let meanWorkMicroseconds: Double
+    public let maxWorkMicroseconds: Double
+    public let maxIntervalMicroseconds: Double
+    public let minEntrySlackMicroseconds: Double
+    public let minCompletionSlackMicroseconds: Double
+
+    public init(
+        tickCount: Int,
+        timingAnomalyCount: Int,
+        longTimestampGapCount: Int,
+        workExceededNominalPeriodCount: Int,
+        completionPastTargetCount: Int,
+        timingAnomalyPercent: Double,
+        meanWorkMicroseconds: Double,
+        maxWorkMicroseconds: Double,
+        maxIntervalMicroseconds: Double,
+        minEntrySlackMicroseconds: Double,
+        minCompletionSlackMicroseconds: Double
+    ) {
+        self.tickCount = tickCount
+        self.timingAnomalyCount = timingAnomalyCount
+        self.longTimestampGapCount = longTimestampGapCount
+        self.workExceededNominalPeriodCount = workExceededNominalPeriodCount
+        self.completionPastTargetCount = completionPastTargetCount
+        self.timingAnomalyPercent = timingAnomalyPercent
+        self.meanWorkMicroseconds = meanWorkMicroseconds
+        self.maxWorkMicroseconds = maxWorkMicroseconds
+        self.maxIntervalMicroseconds = maxIntervalMicroseconds
+        self.minEntrySlackMicroseconds = minEntrySlackMicroseconds
+        self.minCompletionSlackMicroseconds = minCompletionSlackMicroseconds
+    }
+}
+
+public struct IPCLayoutBuildMetrics: Codable, Equatable, Sendable {
+    public let totalBuilds: Int
+    public let completedRelayoutCycles: Int
+
+    public init(totalBuilds: Int, completedRelayoutCycles: Int) {
+        self.totalBuilds = totalBuilds
+        self.completedRelayoutCycles = completedRelayoutCycles
+    }
+}
+
+public struct IPCMetricsQueryResult: Codable, Equatable, Sendable {
+    public let traceCaptureActive: Bool
+    public let axWrites: IPCAXWriteMetrics
+    public let displayTicks: IPCDisplayTickMetrics
+    public let layoutBuilds: IPCLayoutBuildMetrics
+    public let process: IPCProcessResourceMetrics?
+
+    public init(
+        traceCaptureActive: Bool,
+        axWrites: IPCAXWriteMetrics,
+        displayTicks: IPCDisplayTickMetrics,
+        layoutBuilds: IPCLayoutBuildMetrics,
+        process: IPCProcessResourceMetrics?
+    ) {
+        self.traceCaptureActive = traceCaptureActive
+        self.axWrites = axWrites
+        self.displayTicks = displayTicks
+        self.layoutBuilds = layoutBuilds
+        self.process = process
+    }
+}
+
 public enum IPCResultKind: String, Codable, Equatable, Sendable {
     case pong
     case version
+    case capture
     case workspaceBar = "workspace-bar"
     case activeWorkspace = "active-workspace"
     case focusedMonitor = "focused-monitor"
@@ -1997,6 +2326,7 @@ public enum IPCResultKind: String, Codable, Equatable, Sendable {
     case subscriptions
     case capabilities
     case subscribed
+    case metrics
 }
 
 public struct IPCPingResult: Codable, Equatable, Sendable {
@@ -2010,10 +2340,58 @@ public struct IPCPingResult: Codable, Equatable, Sendable {
 public struct IPCVersionResult: Codable, Equatable, Sendable {
     public let protocolVersion: Int
     public let appVersion: String?
+    public let gitHash: String?
+    public let buildConfiguration: String?
+    public let executableSHA256: String?
 
-    public init(protocolVersion: Int = OmniWMIPCProtocol.version, appVersion: String?) {
+    public init(
+        protocolVersion: Int = OmniWMIPCProtocol.version,
+        appVersion: String?,
+        gitHash: String? = nil,
+        buildConfiguration: String? = nil,
+        executableSHA256: String? = nil
+    ) {
         self.protocolVersion = protocolVersion
         self.appVersion = appVersion
+        self.gitHash = gitHash
+        self.buildConfiguration = buildConfiguration
+        self.executableSHA256 = executableSHA256
+    }
+}
+
+public struct IPCCaptureArtifact: Codable, Equatable, Sendable {
+    public let profile: IPCCaptureProfile
+    public let path: String
+    public let startedAt: String
+    public let endedAt: String
+
+    public init(profile: IPCCaptureProfile, path: String, startedAt: String, endedAt: String) {
+        self.profile = profile
+        self.path = path
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+    }
+}
+
+public struct IPCCaptureResult: Codable, Equatable, Sendable {
+    public let phase: IPCCapturePhase
+    public let profile: IPCCaptureProfile?
+    public let startedAt: String?
+    public let lastArtifact: IPCCaptureArtifact?
+    public let failureReason: String?
+
+    public init(
+        phase: IPCCapturePhase,
+        profile: IPCCaptureProfile? = nil,
+        startedAt: String? = nil,
+        lastArtifact: IPCCaptureArtifact? = nil,
+        failureReason: String? = nil
+    ) {
+        self.phase = phase
+        self.profile = profile
+        self.startedAt = startedAt
+        self.lastArtifact = lastArtifact
+        self.failureReason = failureReason
     }
 }
 
@@ -2049,20 +2427,6 @@ public struct IPCRect: Codable, Equatable, Sendable {
     }
 }
 
-public struct IPCWorkspaceSummary: Codable, Equatable, Sendable {
-    public let id: String
-    public let rawName: String
-    public let displayName: String
-    public let number: Int?
-
-    public init(id: String, rawName: String, displayName: String, number: Int?) {
-        self.id = id
-        self.rawName = rawName
-        self.displayName = displayName
-        self.number = number
-    }
-}
-
 public struct IPCWorkspaceBarWindow: Codable, Equatable, Sendable {
     public let id: String
     public let title: String
@@ -2078,6 +2442,7 @@ public struct IPCWorkspaceBarWindow: Codable, Equatable, Sendable {
 public struct IPCWorkspaceBarApp: Codable, Equatable, Sendable {
     public let id: String
     public let appName: String
+    public let bundleId: String?
     public let isFocused: Bool
     public let windowCount: Int
     public let allWindows: [IPCWorkspaceBarWindow]
@@ -2085,12 +2450,14 @@ public struct IPCWorkspaceBarApp: Codable, Equatable, Sendable {
     public init(
         id: String,
         appName: String,
+        bundleId: String?,
         isFocused: Bool,
         windowCount: Int,
         allWindows: [IPCWorkspaceBarWindow]
     ) {
         self.id = id
         self.appName = appName
+        self.bundleId = bundleId
         self.isFocused = isFocused
         self.windowCount = windowCount
         self.allWindows = allWindows
@@ -2098,11 +2465,15 @@ public struct IPCWorkspaceBarApp: Codable, Equatable, Sendable {
 }
 
 public struct IPCWorkspaceBarScratchpad: Codable, Equatable, Sendable {
-    public let window: IPCWorkspaceBarApp
+    public let index: Int
+    public let label: String?
+    public let windows: [IPCWorkspaceBarApp]
     public let isVisible: Bool
 
-    public init(window: IPCWorkspaceBarApp, isVisible: Bool) {
-        self.window = window
+    public init(index: Int, label: String?, windows: [IPCWorkspaceBarApp], isVisible: Bool) {
+        self.index = index
+        self.label = label
+        self.windows = windows
         self.isVisible = isVisible
     }
 }
@@ -2140,7 +2511,7 @@ public struct IPCWorkspaceBarMonitor: Codable, Equatable, Sendable {
     public let showLabels: Bool
     public let backgroundOpacity: Double
     public let barHeight: Double
-    public let scratchpad: IPCWorkspaceBarScratchpad?
+    public let scratchpads: [IPCWorkspaceBarScratchpad]
     public let workspaces: [IPCWorkspaceBarWorkspace]
 
     public init(
@@ -2151,7 +2522,7 @@ public struct IPCWorkspaceBarMonitor: Codable, Equatable, Sendable {
         showLabels: Bool,
         backgroundOpacity: Double,
         barHeight: Double,
-        scratchpad: IPCWorkspaceBarScratchpad?,
+        scratchpads: [IPCWorkspaceBarScratchpad],
         workspaces: [IPCWorkspaceBarWorkspace]
     ) {
         self.id = id
@@ -2161,7 +2532,7 @@ public struct IPCWorkspaceBarMonitor: Codable, Equatable, Sendable {
         self.showLabels = showLabels
         self.backgroundOpacity = backgroundOpacity
         self.barHeight = barHeight
-        self.scratchpad = scratchpad
+        self.scratchpads = scratchpads
         self.workspaces = workspaces
     }
 }
@@ -2257,6 +2628,7 @@ public struct IPCFocusedWindowQueryResult: Codable, Equatable, Sendable {
 public struct IPCWindowQuerySnapshot: Codable, Equatable, Sendable {
     public let id: String?
     public let pid: Int32?
+    public let windowId: Int?
     public let workspace: IPCWorkspaceRef?
     public let display: IPCDisplayRef?
     public let app: IPCAppRef?
@@ -2269,11 +2641,13 @@ public struct IPCWindowQuerySnapshot: Codable, Equatable, Sendable {
     public let isVisible: Bool?
     public let isAppHidden: Bool?
     public let isScratchpad: Bool?
+    public let scratchpadIndex: Int?
     public let hiddenReason: IPCHiddenReason?
 
     public init(
         id: String? = nil,
         pid: Int32? = nil,
+        windowId: Int? = nil,
         workspace: IPCWorkspaceRef? = nil,
         display: IPCDisplayRef? = nil,
         app: IPCAppRef? = nil,
@@ -2286,10 +2660,12 @@ public struct IPCWindowQuerySnapshot: Codable, Equatable, Sendable {
         isVisible: Bool? = nil,
         isAppHidden: Bool? = nil,
         isScratchpad: Bool? = nil,
+        scratchpadIndex: Int? = nil,
         hiddenReason: IPCHiddenReason? = nil
     ) {
         self.id = id
         self.pid = pid
+        self.windowId = windowId
         self.workspace = workspace
         self.display = display
         self.app = app
@@ -2302,6 +2678,7 @@ public struct IPCWindowQuerySnapshot: Codable, Equatable, Sendable {
         self.isVisible = isVisible
         self.isAppHidden = isAppHidden
         self.isScratchpad = isScratchpad
+        self.scratchpadIndex = scratchpadIndex
         self.hiddenReason = hiddenReason
     }
 }
@@ -2376,6 +2753,7 @@ public struct IPCDisplayQuerySnapshot: Codable, Equatable, Sendable {
     public let outerGapRight: Double?
     public let outerGapTop: Double?
     public let outerGapBottom: Double?
+    public let fullscreenUsesOuterGaps: Bool?
     public let activeWorkspace: IPCWorkspaceRef?
 
     public init(
@@ -2392,6 +2770,7 @@ public struct IPCDisplayQuerySnapshot: Codable, Equatable, Sendable {
         outerGapRight: Double? = nil,
         outerGapTop: Double? = nil,
         outerGapBottom: Double? = nil,
+        fullscreenUsesOuterGaps: Bool? = nil,
         activeWorkspace: IPCWorkspaceRef? = nil
     ) {
         self.id = id
@@ -2407,6 +2786,7 @@ public struct IPCDisplayQuerySnapshot: Codable, Equatable, Sendable {
         self.outerGapRight = outerGapRight
         self.outerGapTop = outerGapTop
         self.outerGapBottom = outerGapBottom
+        self.fullscreenUsesOuterGaps = fullscreenUsesOuterGaps
         self.activeWorkspace = activeWorkspace
     }
 }
@@ -2559,6 +2939,7 @@ public struct IPCCapabilitiesQueryResult: Codable, Equatable, Sendable {
     public let windowIdScope: String
     public let queries: [IPCQueryDescriptor]
     public let commands: [IPCCommandDescriptor]
+    public let captureActions: [IPCCaptureActionDescriptor]
     public let ruleActions: [IPCRuleActionDescriptor]
     public let workspaceActions: [IPCWorkspaceActionDescriptor]
     public let windowActions: [IPCWindowActionDescriptor]
@@ -2571,6 +2952,7 @@ public struct IPCCapabilitiesQueryResult: Codable, Equatable, Sendable {
         windowIdScope: String,
         queries: [IPCQueryDescriptor],
         commands: [IPCCommandDescriptor],
+        captureActions: [IPCCaptureActionDescriptor],
         ruleActions: [IPCRuleActionDescriptor],
         workspaceActions: [IPCWorkspaceActionDescriptor],
         windowActions: [IPCWindowActionDescriptor],
@@ -2582,6 +2964,7 @@ public struct IPCCapabilitiesQueryResult: Codable, Equatable, Sendable {
         self.windowIdScope = windowIdScope
         self.queries = queries
         self.commands = commands
+        self.captureActions = captureActions
         self.ruleActions = ruleActions
         self.workspaceActions = workspaceActions
         self.windowActions = windowActions
@@ -2593,6 +2976,7 @@ public struct IPCResult: Codable, Equatable, Sendable {
     public enum Payload: Equatable, Sendable {
         case pong(IPCPingResult)
         case version(IPCVersionResult)
+        case capture(IPCCaptureResult)
         case workspaceBar(IPCWorkspaceBarQueryResult)
         case activeWorkspace(IPCActiveWorkspaceQueryResult)
         case focusedMonitor(IPCFocusedMonitorQueryResult)
@@ -2608,6 +2992,7 @@ public struct IPCResult: Codable, Equatable, Sendable {
         case subscriptions(IPCSubscriptionsQueryResult)
         case capabilities(IPCCapabilitiesQueryResult)
         case subscribed(IPCSubscribeResult)
+        case metrics(IPCMetricsQueryResult)
     }
 
     public let kind: IPCResultKind
@@ -2624,6 +3009,10 @@ public struct IPCResult: Codable, Equatable, Sendable {
 
     public init(version: IPCVersionResult) {
         self.init(kind: .version, payload: .version(version))
+    }
+
+    public init(capture: IPCCaptureResult) {
+        self.init(kind: .capture, payload: .capture(capture))
     }
 
     public init(workspaceBar: IPCWorkspaceBarQueryResult) {
@@ -2686,6 +3075,10 @@ public struct IPCResult: Codable, Equatable, Sendable {
         self.init(kind: .subscribed, payload: .subscribed(subscribed))
     }
 
+    public init(metrics: IPCMetricsQueryResult) {
+        self.init(kind: .metrics, payload: .metrics(metrics))
+    }
+
     private enum CodingKeys: String, CodingKey {
         case kind
         case payload
@@ -2700,6 +3093,8 @@ public struct IPCResult: Codable, Equatable, Sendable {
             payload = .pong(try container.decode(IPCPingResult.self, forKey: .payload))
         case .version:
             payload = .version(try container.decode(IPCVersionResult.self, forKey: .payload))
+        case .capture:
+            payload = .capture(try container.decode(IPCCaptureResult.self, forKey: .payload))
         case .workspaceBar:
             payload = .workspaceBar(try container.decode(IPCWorkspaceBarQueryResult.self, forKey: .payload))
         case .activeWorkspace:
@@ -2730,6 +3125,8 @@ public struct IPCResult: Codable, Equatable, Sendable {
             payload = .capabilities(try container.decode(IPCCapabilitiesQueryResult.self, forKey: .payload))
         case .subscribed:
             payload = .subscribed(try container.decode(IPCSubscribeResult.self, forKey: .payload))
+        case .metrics:
+            payload = .metrics(try container.decode(IPCMetricsQueryResult.self, forKey: .payload))
         }
     }
 
@@ -2741,6 +3138,8 @@ public struct IPCResult: Codable, Equatable, Sendable {
         case let .pong(payload):
             try container.encode(payload, forKey: .payload)
         case let .version(payload):
+            try container.encode(payload, forKey: .payload)
+        case let .capture(payload):
             try container.encode(payload, forKey: .payload)
         case let .workspaceBar(payload):
             try container.encode(payload, forKey: .payload)
@@ -2771,6 +3170,8 @@ public struct IPCResult: Codable, Equatable, Sendable {
         case let .capabilities(payload):
             try container.encode(payload, forKey: .payload)
         case let .subscribed(payload):
+            try container.encode(payload, forKey: .payload)
+        case let .metrics(payload):
             try container.encode(payload, forKey: .payload)
         }
     }

@@ -187,6 +187,90 @@ final class EventIntakeReplayTests: XCTestCase {
     }
 
     @MainActor
+    func testPerformanceCategoriesCountMixedCGSAndAXBurstExactly() throws {
+        let intake = EventIntake()
+        let sink = RecordingSink()
+        intake.open(sink: sink)
+        defer { intake.close() }
+        let axRef = AXWindowRef(
+            element: AXUIElementCreateApplication(9_001),
+            windowId: 9_002
+        )
+
+        intake.beginPerformanceCapture()
+        intake.enqueue(.cgs(.created(windowId: 1, spaceId: 11)))
+        intake.enqueue(.cgs(.destroyed(windowId: 2, spaceId: 12)))
+        intake.enqueue(.cgs(.closed(windowId: 3)))
+        for _ in 0 ..< 5 {
+            intake.enqueue(.cgs(.frameChanged(windowId: 4)))
+        }
+        for _ in 0 ..< 7 {
+            intake.enqueue(.cgs(.titleChanged(windowId: 5)))
+        }
+        for _ in 0 ..< 2 {
+            intake.enqueue(.axFocusedWindowChanged(pid: 9_001, callbackGeneration: nil))
+        }
+        intake.enqueue(
+            .axWindowDestroyed(
+                pid: 9_001,
+                axRef: axRef,
+                callbackGeneration: nil
+            )
+        )
+        for _ in 0 ..< 2 {
+            intake.enqueue(
+                .axWindowMiniaturized(
+                    pid: 9_001,
+                    windowId: axRef.windowId,
+                    callbackGeneration: nil
+                )
+            )
+        }
+
+        let queued = try XCTUnwrap(intake.performanceSnapshot())
+        XCTAssertEqual(queued.acceptedEvents, 20)
+        XCTAssertEqual(queued.coalescedEvents, 4)
+        XCTAssertEqual(queued.deliveredEvents, 0)
+        XCTAssertEqual(queued.currentQueueDepth, 16)
+        XCTAssertEqual(queued.maximumQueueDepth, 16)
+
+        intake.drainNow()
+
+        let snapshot = try XCTUnwrap(intake.endPerformanceCapture())
+        XCTAssertEqual(snapshot.acceptedEvents, 20)
+        XCTAssertEqual(snapshot.coalescedEvents, 4)
+        XCTAssertEqual(snapshot.deliveredEvents, 16)
+        XCTAssertEqual(snapshot.drainBatches, 1)
+        XCTAssertEqual(snapshot.currentQueueDepth, 0)
+        XCTAssertEqual(snapshot.maximumQueueDepth, 16)
+        XCTAssertEqual(snapshot.maximumBatchSize, 16)
+        XCTAssertEqual(
+            snapshot.cgsCreatedEvents,
+            .init(acceptedEvents: 1, coalescedEvents: 0, deliveredEvents: 1)
+        )
+        XCTAssertEqual(
+            snapshot.cgsDestroyedEvents,
+            .init(acceptedEvents: 2, coalescedEvents: 0, deliveredEvents: 2)
+        )
+        XCTAssertEqual(
+            snapshot.cgsFrameChangedEvents,
+            .init(acceptedEvents: 5, coalescedEvents: 4, deliveredEvents: 1)
+        )
+        XCTAssertEqual(
+            snapshot.cgsTitleChangedEvents,
+            .init(acceptedEvents: 7, coalescedEvents: 0, deliveredEvents: 7)
+        )
+        XCTAssertEqual(
+            snapshot.axLifecycleEvents,
+            .init(acceptedEvents: 3, coalescedEvents: 0, deliveredEvents: 3)
+        )
+        XCTAssertEqual(
+            snapshot.axFocusedWindowChangedEvents,
+            .init(acceptedEvents: 2, coalescedEvents: 0, deliveredEvents: 2)
+        )
+    }
+
+    @MainActor
     func testMouseMovedCoalescesLatestPayloadInPlace() {
         let intake = EventIntake()
         let sink = RecordingSink()
@@ -464,7 +548,7 @@ final class EventIntakeReplayTests: XCTestCase {
         XCTAssertTrue(
             controller.workspaceManager.markNativeFullscreenSuspended(
                 liveToken,
-                ownsNonManagedFocus: false
+                ownsNativeFocus: false
             )
         )
         XCTAssertTrue(controller.workspaceManager.markNativeFullscreenSuspended(deadToken))
@@ -488,8 +572,8 @@ final class EventIntakeReplayTests: XCTestCase {
 
         XCTAssertNil(controller.workspaceManager.entry(for: deadToken))
         XCTAssertNil(controller.workspaceManager.nativeFullscreenRecord(for: deadToken))
-        XCTAssertFalse(controller.workspaceManager.isNonManagedFocusActive)
-        XCTAssertNil(controller.workspaceManager.nonManagedFocusToken)
+        XCTAssertFalse(controller.workspaceManager.nativeFocusOwner.isExternal)
+        XCTAssertNil(controller.workspaceManager.externalFocusToken)
         XCTAssertNil(controller.workspaceManager.activeNativeFullscreenFocusOwnerToken)
         XCTAssertEqual(controller.workspaceManager.nativeFullscreenTransitionTimeoutCount, 1)
         XCTAssertNotNil(controller.workspaceManager.entry(for: liveToken))
@@ -549,8 +633,8 @@ final class EventIntakeReplayTests: XCTestCase {
             controller.workspaceManager.nativeFullscreenRecord(for: liveToken)?.transition,
             .suspended
         )
-        XCTAssertTrue(controller.workspaceManager.isNonManagedFocusActive)
-        XCTAssertEqual(controller.workspaceManager.nonManagedFocusToken, liveToken)
+        XCTAssertTrue(controller.workspaceManager.nativeFocusOwner.isExternal)
+        XCTAssertEqual(controller.workspaceManager.externalFocusToken, liveToken)
         XCTAssertEqual(controller.workspaceManager.activeNativeFullscreenFocusOwnerToken, liveToken)
         XCTAssertFalse(controller.eventIntake.hasPendingEvents)
     }
@@ -613,7 +697,7 @@ final class EventIntakeReplayTests: XCTestCase {
                     ) != nil,
                         controller.workspaceManager.markNativeFullscreenSuspended(
                             replacementToken,
-                            ownsNonManagedFocus: false
+                            ownsNativeFocus: false
                         )
                     else {
                         return .notFound
@@ -673,7 +757,7 @@ final class EventIntakeReplayTests: XCTestCase {
         }
 
         func committedState() -> String {
-            let focused = controller.workspaceManager.focusedToken?.windowId ?? -1
+            let focused = controller.workspaceManager.selectedManagedToken?.windowId ?? -1
             let intents = controller.intentLedger.entries
                 .filter { $0.kind.isFocusWindow }
                 .map { intent in
@@ -718,7 +802,7 @@ final class EventIntakeReplayTests: XCTestCase {
                 scenario.controller.eventIntake.enqueue(event)
             }
             scenario.drainToQuiescence()
-            XCTAssertEqual(scenario.controller.workspaceManager.focusedToken, scenario.tokenB)
+            XCTAssertEqual(scenario.controller.workspaceManager.selectedManagedToken, scenario.tokenB)
             outcomes.append(scenario.committedState())
             scenario.tearDown()
         }
@@ -745,7 +829,7 @@ final class EventIntakeReplayTests: XCTestCase {
                 scenario.controller.eventIntake.enqueue(event)
             }
             scenario.drainToQuiescence()
-            XCTAssertEqual(scenario.controller.workspaceManager.focusedToken, scenario.tokenB)
+            XCTAssertEqual(scenario.controller.workspaceManager.selectedManagedToken, scenario.tokenB)
             let newestIntentForB = scenario.controller.intentLedger.entries
                 .last { $0.kind.focusTargetToken == scenario.tokenB }
             XCTAssertEqual(newestIntentForB?.phase, .confirmed)
@@ -804,7 +888,7 @@ final class EventIntakeReplayTests: XCTestCase {
         scenario.drainToQuiescence()
 
         controller.workspaceManager.setSystemModalFocus(scenario.tokenA)
-        let world = WorldView(controller: controller, borderFrameResolver: { windowId in
+        let world = WorldView(controller: controller, liveBoundsProvider: { windowId in
             windowId == scenario.tokenB.windowId ? CGRect(x: 0, y: 0, width: 200, height: 150) : nil
         })
 
@@ -826,13 +910,13 @@ final class EventIntakeReplayTests: XCTestCase {
         scenario.drainToQuiescence()
 
         let frame = CGRect(x: 0, y: 0, width: 200, height: 150)
-        let enabledWorld = WorldView(controller: controller, borderFrameResolver: { _ in frame })
+        let enabledWorld = WorldView(controller: controller, liveBoundsProvider: { _ in frame })
         let border = try XCTUnwrap(SurfaceDerivation.deriveBorder(world: enabledWorld))
         XCTAssertEqual(border.windowId, scenario.tokenB.windowId)
         XCTAssertEqual(border.frame, frame)
 
         controller.settings.bordersEnabled = false
-        let disabledWorld = WorldView(controller: controller, borderFrameResolver: { _ in frame })
+        let disabledWorld = WorldView(controller: controller, liveBoundsProvider: { _ in frame })
         XCTAssertNil(SurfaceDerivation.deriveBorder(world: disabledWorld))
     }
 
@@ -847,7 +931,7 @@ final class EventIntakeReplayTests: XCTestCase {
         controller.eventIntake.enqueue(.axFocusedWindowChanged(pid: pid, callbackGeneration: nil))
         scenario.drainToQuiescence()
 
-        let world = WorldView(controller: controller, borderFrameResolver: { _ in .zero })
+        let world = WorldView(controller: controller, liveBoundsProvider: { _ in .zero })
         XCTAssertNil(SurfaceDerivation.deriveBorder(world: world))
     }
 
@@ -899,7 +983,7 @@ final class EventIntakeReplayTests: XCTestCase {
         controller.focusWindow(tokenA)
         controller.eventIntake.enqueue(.axFocusedWindowChanged(pid: pid, callbackGeneration: nil))
         scenario.drainToQuiescence()
-        XCTAssertEqual(controller.workspaceManager.focusedToken, tokenA)
+        XCTAssertEqual(controller.workspaceManager.selectedManagedToken, tokenA)
 
         controller.focusWindow(tokenB)
         return scenario

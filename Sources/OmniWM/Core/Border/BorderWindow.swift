@@ -7,60 +7,61 @@ import QuartzCore
 @MainActor
 final class BorderWindow {
     struct Operations {
-        var createBorderWindow: @MainActor (CGRect) -> UInt32
-        var releaseBorderWindow: @MainActor (UInt32) -> Void
-        var configureWindow: @MainActor (UInt32, Float, Bool) -> Void
-        var setWindowTags: @MainActor (UInt32, UInt64) -> Void
+        var createLayerPanel: @MainActor (CGRect) -> BorderLayerPanel
         var excludeFromScreencaptureSelection: @MainActor (UInt32) -> Void
-        var createWindowContext: @MainActor (UInt32) -> CGContext?
-        var setWindowShape: @MainActor (UInt32, CGRect) -> Void
-        var flushWindow: @MainActor (UInt32) -> Void
-        var transactionMove: @MainActor (UInt32, CGPoint) -> Void
-        var transactionMoveAndOrder: @MainActor (UInt32, CGPoint, Int32, UInt32, SkyLightWindowOrder) -> Void
-        var transactionHide: @MainActor (UInt32) -> Void
+        var queryWindowInfoDeferred: @MainActor (UInt32) async throws -> WindowServerInfo?
         var backingScaleForFrame: @MainActor (CGRect) -> (scale: CGFloat, screenFrame: CGRect)
+        var orderWindow: @MainActor (UInt32, UInt32, SkyLightWindowOrder) -> Void
 
         static let live = Self(
-            createBorderWindow: { SkyLight.shared.createBorderWindow(frame: $0) },
-            releaseBorderWindow: { SkyLight.shared.releaseBorderWindow($0) },
-            configureWindow: { SkyLight.shared.configureWindow($0, resolution: $1, opaque: $2) },
-            setWindowTags: { SkyLight.shared.setWindowTags($0, tags: $1) },
+            createLayerPanel: { BorderLayerPanel(frame: $0) },
             excludeFromScreencaptureSelection: { SkyLight.shared.excludeFromScreencaptureWindowSelection($0) },
-            createWindowContext: { SkyLight.shared.createWindowContext(for: $0) },
-            setWindowShape: { SkyLight.shared.setWindowShape($0, frame: $1) },
-            flushWindow: { SkyLight.shared.flushWindow($0) },
-            transactionMove: { SkyLight.shared.transactionMove($0, origin: $1) },
-            transactionMoveAndOrder: {
-                SkyLight.shared.transactionMoveAndOrder($0, origin: $1, level: $2, relativeTo: $3, order: $4)
+            queryWindowInfoDeferred: {
+                try await SkyLight.shared.queryWindowInfoDeferred(windowIds: [$0])?[$0]
             },
-            transactionHide: { SkyLight.shared.transactionHide($0) },
             backingScaleForFrame: { targetFrame in
                 let targetScreen = NSScreen.screens.first(where: {
                     $0.frame.contains(targetFrame.center)
                 }) ?? NSScreen.main ?? NSScreen.screens.first
                 return (targetScreen?.backingScaleFactor ?? 2.0, targetScreen?.frame ?? .null)
-            }
+            },
+            orderWindow: { SkyLight.shared.orderWindow($0, relativeTo: $1, order: $2) }
         )
     }
 
     private var wid: UInt32 = 0
-    private var context: CGContext?
+    private var layerPanel: BorderLayerPanel?
     private var config: BorderConfig
     private let operations: Operations
 
-    private var currentFrame: CGRect = .zero
-    private var appliedFrame: CGRect = .zero
-    private var origin: CGPoint = .zero
+    private struct CachedTargetLevel {
+        let token: WindowToken
+        let level: Int32
+    }
+
+    private var currentSurfaceFrame: CGRect = .zero
+    private var appliedTargetFrame: CGRect = .zero
+    private var appliedSurfaceFrame: CGRect = .zero
+    private var appliedTargetToken: WindowToken?
     private var needsRedraw = true
     private var isVisible = false
-    private var lastOrderedTargetWid: UInt32 = 0
+    private var lastOrderedTargetToken: WindowToken?
     private var lastConfiguredScale: CGFloat = 0
     private var currentCornerRadii = WindowCornerRadii(uniform: 9.0)
     private var cachedScale: CGFloat = 0
     private var cachedScaleScreenFrame: CGRect = .null
+    private var cachedTargetLevel: CachedTargetLevel?
+    private var deferredLevelTarget: WindowToken?
+    private var deferredLevelGeneration: UInt64 = 0
+    private var deferredLevelTask: Task<Void, Never>?
+    private(set) var hasDeferredLevelUpdate = false
+    var onWindowLevelResolved: (@MainActor () -> Void)?
+    private var pendingTargetLevelRetryToken: WindowToken?
+    private(set) var needsWindowLevelRetry = false
+    private(set) var appliedTargetLevel: Int32 = 0
 
     private let defaultCornerRadii = WindowCornerRadii(uniform: 9.0)
-    private let orderingLevel: Int32 = 3
+    private static let borderColorSpace = CGColorSpaceCreateDeviceRGB()
 
     init(config: BorderConfig, operations: Operations = .live) {
         self.config = config
@@ -72,35 +73,51 @@ final class BorderWindow {
     }
 
     func destroy() {
-        context = nil
+        invalidateDeferredLevel(target: nil)
         if wid != 0 {
-            operations.releaseBorderWindow(wid)
+            layerPanel?.close()
+            layerPanel = nil
             wid = 0
         }
         isVisible = false
-        lastOrderedTargetWid = 0
+        lastOrderedTargetToken = nil
+        appliedTargetToken = nil
+        cachedTargetLevel = nil
+        pendingTargetLevelRetryToken = nil
+        needsWindowLevelRetry = false
         currentCornerRadii = defaultCornerRadii
     }
 
     @discardableResult
     func update(
         frame targetFrame: CGRect,
-        targetWid: UInt32,
+        targetToken: WindowToken,
         cornerRadii: WindowCornerRadii = WindowCornerRadii(uniform: 9.0),
         forceOrdering: Bool = false
     ) -> Bool {
         BorderOpMetricsRecorder.shared.noteUpdate()
+        needsWindowLevelRetry = false
+        guard let targetWid = UInt32(exactly: targetToken.windowId), targetWid != 0 else { return false }
         let scale = backingScale(for: targetFrame)
         let resolvedCornerRadii = cornerRadii.nonnegative
-
-        var frame = targetFrame.roundedToPhysicalPixels(scale: scale)
-        appliedFrame = frame
-        origin = ScreenCoordinateSpace.toWindowServer(rect: frame).origin
-        frame.origin = .zero
+        let geometry = config.resolvedGeometry(for: targetFrame, scale: scale)
+        let surfaceFrame = geometry.surfaceFrame
+        appliedTargetFrame = geometry.targetFrame
+        appliedSurfaceFrame = surfaceFrame
+        let localSurfaceFrame = CGRect(origin: .zero, size: surfaceFrame.size)
+        let localTargetFrame = CGRect(
+            origin: CGPoint(x: geometry.width, y: geometry.width),
+            size: geometry.targetFrame.size
+        )
+        let targetChanged = appliedTargetToken != targetToken
+        if targetChanged {
+            pendingTargetLevelRetryToken = nil
+            invalidateDeferredLevel(target: targetToken)
+        }
 
         let createdWindow: Bool
         if wid == 0 {
-            createWindow(frame: frame, scale: scale)
+            createWindow(scale: scale)
             guard wid != 0 else { return false }
             createdWindow = true
         } else {
@@ -108,35 +125,49 @@ final class BorderWindow {
         }
 
         if scale != lastConfiguredScale, wid != 0 {
-            operations.configureWindow(wid, Float(scale), false)
+            BorderOpMetricsRecorder.shared.noteScaleReconfiguration()
             lastConfiguredScale = scale
             needsRedraw = true
         }
 
-        if frame.size != currentFrame.size {
-            reshapeWindow(frame: frame)
+        if localSurfaceFrame.size != currentSurfaceFrame.size {
+            BorderOpMetricsRecorder.shared.noteReshape()
             needsRedraw = true
         }
         if currentCornerRadii != resolvedCornerRadii {
             needsRedraw = true
         }
-        currentFrame = frame
+        currentSurfaceFrame = localSurfaceFrame
         currentCornerRadii = resolvedCornerRadii
 
         if needsRedraw {
-            draw(frame: frame)
+            draw(
+                surfaceFrame: localSurfaceFrame,
+                targetFrame: localTargetFrame,
+                borderWidth: geometry.width
+            )
         }
 
-        let needsOrdering = forceOrdering || createdWindow || !isVisible || lastOrderedTargetWid != targetWid
-        move(relativeTo: targetWid, needsOrdering: needsOrdering)
+        let retryingTargetLevel = pendingTargetLevelRetryToken == targetToken
+        let needsOrdering = forceOrdering || createdWindow || !isVisible
+            || lastOrderedTargetToken != targetToken || retryingTargetLevel || hasDeferredLevelUpdate
+        move(
+            relativeTo: targetToken,
+            targetWid: targetWid,
+            needsOrdering: needsOrdering,
+            retryingTargetLevel: retryingTargetLevel
+        )
         isVisible = true
-        lastOrderedTargetWid = targetWid
+        appliedTargetToken = targetToken
+        lastOrderedTargetToken = targetToken
         return true
     }
 
     func invalidateScaleCache() {
         cachedScale = 0
         cachedScaleScreenFrame = .null
+        lastConfiguredScale = 0
+        needsRedraw = true
     }
 
     private func backingScale(for targetFrame: CGRect) -> CGFloat {
@@ -149,61 +180,47 @@ final class BorderWindow {
         return scale
     }
 
-    private func createWindow(frame: CGRect, scale: CGFloat) {
-        wid = operations.createBorderWindow(frame)
-        guard wid != 0 else { return }
-
-        operations.configureWindow(wid, Float(scale), false)
-        lastConfiguredScale = scale
-
-        let tags: UInt64 = (1 << 1) | (1 << 9)
-        operations.setWindowTags(wid, tags)
-        operations.excludeFromScreencaptureSelection(wid)
-
-        guard let context = operations.createWindowContext(wid) else {
-            operations.releaseBorderWindow(wid)
-            wid = 0
+    private func createWindow(scale: CGFloat) {
+        let panel = operations.createLayerPanel(appliedSurfaceFrame)
+        guard let windowId = UInt32(exactly: panel.windowNumber), windowId != 0 else {
+            panel.close()
             return
         }
-        context.interpolationQuality = .none
-        self.context = context
+        layerPanel = panel
+        wid = windowId
+        needsRedraw = true
+        lastConfiguredScale = scale
+        BorderOpMetricsRecorder.shared.noteWindowCreation()
+        BorderOpMetricsRecorder.shared.noteScaleReconfiguration()
+        operations.excludeFromScreencaptureSelection(wid)
     }
 
-    private func reshapeWindow(frame: CGRect) {
-        BorderOpMetricsRecorder.shared.noteReshape()
-        operations.setWindowShape(wid, frame)
-    }
-
-    private func draw(frame: CGRect) {
-        guard let context else { return }
+    private func draw(surfaceFrame: CGRect, targetFrame: CGRect, borderWidth: CGFloat) {
+        guard let layerPanel else { return }
+        layerPanel.updateBorder(
+            surfaceFrame: surfaceFrame, targetFrame: targetFrame,
+            cornerRadii: currentCornerRadii, width: borderWidth,
+            color: Self.cgColor(config.color), scale: lastConfiguredScale
+        )
         needsRedraw = false
-        BorderOpMetricsRecorder.shared.noteRedraw()
+        BorderOpMetricsRecorder.shared.noteRedraw(rasterizedArea: surfaceFrame.width * surfaceFrame.height)
+    }
 
-        let borderWidth = config.width
-        let cornerRadii = currentCornerRadii
-        let outerRadii = cornerRadii.adding(borderWidth)
+    private static func cgColor(_ color: SettingsColor) -> CGColor {
+        CGColor(
+            colorSpace: borderColorSpace,
+            components: [
+                component(color.red),
+                component(color.green),
+                component(color.blue),
+                component(color.alpha)
+            ]
+        )!
+    }
 
-        context.saveGState()
-        context.clear(frame)
-
-        let innerRect = frame.insetBy(dx: borderWidth, dy: borderWidth)
-        let innerPath = Self.roundedRectPath(in: innerRect, radii: cornerRadii)
-
-        let clipPath = CGMutablePath()
-        clipPath.addRect(frame)
-        clipPath.addPath(innerPath)
-        context.addPath(clipPath)
-        context.clip(using: .evenOdd)
-
-        context.setFillColor(config.color.cgColor)
-
-        let outerPath = Self.roundedRectPath(in: frame, radii: outerRadii)
-        context.addPath(outerPath)
-        context.fillPath()
-
-        context.restoreGState()
-        context.flush()
-        operations.flushWindow(wid)
+    private static func component(_ value: Double) -> CGFloat {
+        guard value.isFinite else { return 0 }
+        return CGFloat(min(max(value, 0), 1))
     }
 
     static func roundedRectPath(in rect: CGRect, radii: WindowCornerRadii) -> CGPath {
@@ -244,30 +261,140 @@ final class BorderWindow {
         return path
     }
 
-    private func move(relativeTo targetWid: UInt32, needsOrdering: Bool) {
+    private func move(
+        relativeTo targetToken: WindowToken,
+        targetWid: UInt32,
+        needsOrdering: Bool,
+        retryingTargetLevel: Bool
+    ) {
+        layerPanel?.applyFrame(appliedSurfaceFrame)
         if needsOrdering {
             BorderOpMetricsRecorder.shared.noteMoveAndOrder()
-            operations.transactionMoveAndOrder(wid, origin, orderingLevel, targetWid, .below)
+            let level = resolvedTargetLevel(
+                for: targetToken,
+                retrying: retryingTargetLevel
+            )
+            appliedTargetLevel = level
+            if let layerPanel {
+                layerPanel.level = NSWindow.Level(rawValue: Int(level))
+                if !isVisible {
+                    layerPanel.orderFront(nil)
+                }
+                operations.orderWindow(wid, targetWid, .below)
+            }
             return
         }
 
         BorderOpMetricsRecorder.shared.noteMoveOnly()
-        operations.transactionMove(wid, origin)
     }
 
-    func reorder(relativeTo targetWid: UInt32) {
-        guard wid != 0 else { return }
-        move(relativeTo: targetWid, needsOrdering: true)
+    private func resolvedTargetLevel(
+        for targetToken: WindowToken,
+        retrying: Bool
+    ) -> Int32 {
+        if deferredLevelTarget != targetToken {
+            invalidateDeferredLevel(target: targetToken)
+        }
+        if hasDeferredLevelUpdate {
+            hasDeferredLevelUpdate = false
+            if retrying {
+                startDeferredLevelQuery(for: targetToken, retrying: true)
+            }
+        } else {
+            startDeferredLevelQuery(for: targetToken, retrying: retrying)
+        }
+        return cachedLevel(for: targetToken)
+    }
+
+    private func cachedLevel(for targetToken: WindowToken) -> Int32 {
+        guard let cachedTargetLevel, cachedTargetLevel.token == targetToken else { return 0 }
+        return cachedTargetLevel.level
+    }
+
+    private func acceptTargetLevel(
+        _ info: WindowServerInfo?, for targetToken: WindowToken, retrying: Bool
+    ) -> Int32 {
+        if let info, Int(info.id) == targetToken.windowId, info.pid == targetToken.pid {
+            cachedTargetLevel = CachedTargetLevel(token: targetToken, level: info.level)
+            pendingTargetLevelRetryToken = nil
+            return info.level
+        }
+        BorderOpMetricsRecorder.shared.noteLevelFallback()
+        FallbackFiringRecorder.shared.note(.skylight, "borderTargetLevelDefault")
+        if retrying {
+            pendingTargetLevelRetryToken = nil
+        } else {
+            pendingTargetLevelRetryToken = targetToken
+            needsWindowLevelRetry = true
+        }
+        return cachedLevel(for: targetToken)
+    }
+
+    private func invalidateDeferredLevel(target: WindowToken?) {
+        deferredLevelGeneration &+= 1
+        deferredLevelTarget = target
+        deferredLevelTask?.cancel()
+        hasDeferredLevelUpdate = false
+        pendingTargetLevelRetryToken = nil
+        needsWindowLevelRetry = false
+    }
+
+    private func startDeferredLevelQuery(for targetToken: WindowToken, retrying: Bool) {
+        guard deferredLevelTask == nil,
+              let targetWid = UInt32(exactly: targetToken.windowId)
+        else { return }
+        let generation = deferredLevelGeneration
+        let query = operations.queryWindowInfoDeferred
+        if retrying {
+            pendingTargetLevelRetryToken = nil
+            BorderOpMetricsRecorder.shared.noteLevelRetry()
+        }
+        BorderOpMetricsRecorder.shared.noteLevelQuery()
+        deferredLevelTask = Task { @MainActor [weak self] in
+            let info = try? await query(targetWid)
+            guard let self else { return }
+            deferredLevelTask = nil
+            guard generation == deferredLevelGeneration,
+                  deferredLevelTarget == targetToken, isVisible, wid != 0
+            else {
+                if isVisible, let deferredLevelTarget {
+                    startDeferredLevelQuery(for: deferredLevelTarget, retrying: false)
+                }
+                return
+            }
+            _ = acceptTargetLevel(info, for: targetToken, retrying: retrying)
+            hasDeferredLevelUpdate = true
+            onWindowLevelResolved?()
+        }
+    }
+
+    func reorder(relativeTo targetToken: WindowToken) {
+        needsWindowLevelRetry = false
+        guard wid != 0,
+              let targetWid = UInt32(exactly: targetToken.windowId),
+              targetWid != 0
+        else { return }
+        let retryingTargetLevel = pendingTargetLevelRetryToken == targetToken
+        move(
+            relativeTo: targetToken,
+            targetWid: targetWid,
+            needsOrdering: true,
+            retryingTargetLevel: retryingTargetLevel
+        )
         isVisible = true
-        lastOrderedTargetWid = targetWid
+        appliedTargetToken = targetToken
+        lastOrderedTargetToken = targetToken
     }
 
     func hide() {
+        invalidateDeferredLevel(target: nil)
         guard wid != 0 else { return }
         BorderOpMetricsRecorder.shared.noteHide()
-        operations.transactionHide(wid)
+        layerPanel?.orderOut(nil)
         isVisible = false
-        lastOrderedTargetWid = 0
+        lastOrderedTargetToken = nil
+        pendingTargetLevelRetryToken = nil
+        needsWindowLevelRetry = false
     }
 
     func updateConfig(_ newConfig: BorderConfig) {
@@ -283,6 +410,10 @@ final class BorderWindow {
     }
 
     var frameOnScreen: CGRect? {
-        wid == 0 || !isVisible ? nil : appliedFrame
+        wid == 0 || !isVisible ? nil : appliedSurfaceFrame
+    }
+
+    var targetFrameOnScreen: CGRect? {
+        wid == 0 || !isVisible ? nil : appliedTargetFrame
     }
 }

@@ -3,16 +3,11 @@
 
 import AppKit
 import QuartzCore
-import SwiftUI
 
 @MainActor
 final class StatusBarController: NSObject {
-    nonisolated static let mainAutosaveName = StatusItemPersistence.OwnedItem.main.autosaveName
-
     private var statusItem: NSStatusItem?
-    private var menuModel: StatusMenuModel?
-    private var menu: NSMenu?
-    private var menus: [NSMenu] = []
+    private var menuHost: StatusMenuHost?
 
     private let hiddenBarController: HiddenBarController
     private let settings: SettingsStore
@@ -72,8 +67,11 @@ final class StatusBarController: NSObject {
         model.checkForUpdatesAction = { [weak self] in
             self?.updateCoordinator?.checkForUpdatesManually()
         }
-        menuModel = model
-        installHostedMenu(model: model, motionPolicy: controller.motionPolicy)
+        let host = StatusMenuHost(model: model, controller: controller)
+        host.isExemptWindow = { [weak hiddenBarController] in
+            hiddenBarController?.ownsStatusItemWindow($0) == true
+        }
+        menuHost = host
 
         hiddenBarController.bind(omniButton: button, statusItem: ownedStatusItem)
         hiddenBarController.onFallbackIconClick = { [weak self] event, anchor in
@@ -114,53 +112,12 @@ final class StatusBarController: NSObject {
         }
     }
 
-    private func installHostedMenu(model: StatusMenuModel, motionPolicy: MotionPolicy) {
-        let menu = StatusMenuHost.makeMenu()
-        let advanced = StatusMenuHost.makeMenu()
-        let diagnostics = StatusMenuHost.makeMenu()
-        let helpLinks = StatusMenuHost.makeMenu()
-
-        menu.addItem(StatusMenuHost.makeHostedItem(
-            dismissing: menu,
-            content: StatusMenuPrimaryView(model: model).environment(motionPolicy)
-        ))
-        advanced.addItem(StatusMenuHost.makeHostedItem(
-            dismissing: menu,
-            content: StatusMenuAdvancedView(model: model).environment(motionPolicy)
-        ))
-        diagnostics.addItem(StatusMenuHost.makeHostedItem(
-            dismissing: menu,
-            content: StatusMenuDiagnosticsView(model: model).environment(motionPolicy)
-        ))
-        helpLinks.addItem(StatusMenuHost.makeHostedItem(
-            dismissing: menu,
-            content: StatusMenuHelpLinksView(model: model).environment(motionPolicy)
-        ))
-        menu.addItem(submenuParent(title: "Advanced", icon: "slider.horizontal.3", submenu: advanced))
-        menu.addItem(submenuParent(title: "Diagnostics", icon: "stethoscope", submenu: diagnostics))
-        menu.addItem(submenuParent(title: "Help & Links", icon: "questionmark.circle", submenu: helpLinks))
-        menu.addItem(StatusMenuHost.makeHostedItem(
-            dismissing: menu,
-            content: StatusMenuFooterView(model: model).environment(motionPolicy)
-        ))
-
-        self.menu = menu
-        menus = [menu, advanced, diagnostics, helpLinks]
-    }
-
-    private func submenuParent(title: String, icon: String, submenu: NSMenu) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.image = NSImage(systemSymbolName: icon, accessibilityDescription: title)
-        item.submenu = submenu
-        return item
+    func dismissPanel() {
+        menuHost?.dismiss()
     }
 
     private func showMenu(from anchor: NSView) {
-        guard let menu, let menuModel else { return }
-        menuModel.menuWillOpen()
-        StatusMenuHost.prepareForDisplay(menus, appearance: NSApplication.shared.appearance)
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 5), in: anchor)
-        menuModel.menuDidClose()
+        menuHost?.toggle(from: anchor)
     }
 
     func handleTraceCaptureStateChange() {
@@ -170,7 +127,7 @@ final class StatusBarController: NSObject {
     func updateButtonAppearance() {
         guard let button = statusItem?.button else { return }
         button.wantsLayer = true
-        if controller?.isTraceCaptureActive == true {
+        if controller?.traceCaptureStatus.profile == .problem {
             let config = NSImage.SymbolConfiguration(paletteColors: [.systemRed])
             button.image = NSImage(
                 systemSymbolName: "record.circle.fill",
@@ -180,6 +137,17 @@ final class StatusBarController: NSObject {
             button.contentTintColor = nil
             button.toolTip = "OmniWM — recording diagnostics (auto-stops in 10 min)"
             applyRecordingPulse(to: button)
+        } else if controller?.traceCaptureStatus.profile == .performance {
+            button.layer?.removeAnimation(forKey: recordingPulseKey)
+            button.layer?.opacity = 1
+            let config = NSImage.SymbolConfiguration(paletteColors: [.systemBlue])
+            button.image = NSImage(
+                systemSymbolName: "gauge.with.dots.needle.67percent",
+                accessibilityDescription: "OmniWM, measuring performance"
+            )?.withSymbolConfiguration(config)
+            button.image?.isTemplate = false
+            button.contentTintColor = nil
+            button.toolTip = "OmniWM — measuring performance (auto-stops in 10 min)"
         } else {
             button.layer?.removeAnimation(forKey: recordingPulseKey)
             button.layer?.opacity = 1
@@ -254,7 +222,7 @@ final class StatusBarController: NSObject {
                 isRecording: controller?.isTraceCaptureActive == true
             )
         )
-        button.setAccessibilityHelp("Press to open the OmniWM menu.")
+        button.setAccessibilityHelp("Press to open OmniWM controls.")
     }
 
     func refreshWorkspaces() {
@@ -281,13 +249,12 @@ final class StatusBarController: NSObject {
     }
 
     private func cleanupOwnedStatusItems() {
+        dismissPanel()
+        menuHost = nil
         hiddenBarController.cleanup()
         if let item = statusItem {
             NSStatusBar.system.removeStatusItem(item)
             statusItem = nil
         }
-        menuModel = nil
-        menu = nil
-        menus = []
     }
 }

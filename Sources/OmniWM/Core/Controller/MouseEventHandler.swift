@@ -20,6 +20,100 @@ private let mouseRelevantModifierFlags: CGEventFlags = [
 
 @MainActor
 final class MouseEventHandler {
+    enum ViewportGestureTerminationDisposition {
+        case settleLiveOffset
+        case settleLiveOffsetWithoutRelayout
+        case viewportAlreadySettled
+    }
+
+    struct PerformanceSnapshot: Equatable, Sendable {
+        let cgEvents: UInt64
+        let mouseMovedEvents: UInt64
+        let mouseDraggedEvents: UInt64
+        let scrollEvents: UInt64
+        let buttonEvents: UInt64
+        let droppedTrackpadScrollEvents: UInt64
+        let mouseWarpSamples: UInt64
+        let multitouch: MultitouchFrameMailbox.PerformanceSnapshot?
+    }
+
+    private struct PerformanceCounters {
+        var cgEvents: UInt64 = 0
+        var mouseMovedEvents: UInt64 = 0
+        var mouseDraggedEvents: UInt64 = 0
+        var scrollEvents: UInt64 = 0
+        var buttonEvents: UInt64 = 0
+        var droppedTrackpadScrollEvents: UInt64 = 0
+        var mouseWarpSamples: UInt64 = 0
+        var retiredMultitouch: MultitouchFrameMailbox.PerformanceSnapshot?
+
+        func snapshot(multitouch: MultitouchFrameMailbox.PerformanceSnapshot?) -> PerformanceSnapshot {
+            PerformanceSnapshot(
+                cgEvents: cgEvents,
+                mouseMovedEvents: mouseMovedEvents,
+                mouseDraggedEvents: mouseDraggedEvents,
+                scrollEvents: scrollEvents,
+                buttonEvents: buttonEvents,
+                droppedTrackpadScrollEvents: droppedTrackpadScrollEvents,
+                mouseWarpSamples: mouseWarpSamples,
+                multitouch: mergedMultitouch(with: multitouch)
+            )
+        }
+
+        mutating func accumulateRetiredMultitouch(
+            _ snapshot: MultitouchFrameMailbox.PerformanceSnapshot
+        ) {
+            retiredMultitouch = if let retiredMultitouch {
+                Self.mergeMultitouch(retiredMultitouch, snapshot, pendingFrames: 0)
+            } else {
+                Self.mergeMultitouch(snapshot, nil, pendingFrames: 0)
+            }
+        }
+
+        private func mergedMultitouch(
+            with current: MultitouchFrameMailbox.PerformanceSnapshot?
+        ) -> MultitouchFrameMailbox.PerformanceSnapshot? {
+            guard let retiredMultitouch else { return current }
+            return Self.mergeMultitouch(
+                retiredMultitouch,
+                current,
+                pendingFrames: current?.pendingFrames ?? 0
+            )
+        }
+
+        private static func mergeMultitouch(
+            _ accumulated: MultitouchFrameMailbox.PerformanceSnapshot,
+            _ current: MultitouchFrameMailbox.PerformanceSnapshot?,
+            pendingFrames: Int
+        ) -> MultitouchFrameMailbox.PerformanceSnapshot {
+            guard let current else {
+                return MultitouchFrameMailbox.PerformanceSnapshot(
+                    rawCallbacks: accumulated.rawCallbacks,
+                    staleCallbacks: accumulated.staleCallbacks,
+                    drainBatches: accumulated.drainBatches,
+                    overwrittenChanges: accumulated.overwrittenChanges,
+                    transitionsQueued: accumulated.transitionsQueued,
+                    cursorSamples: accumulated.cursorSamples,
+                    pendingFrames: pendingFrames,
+                    maximumPendingFrames: accumulated.maximumPendingFrames
+                )
+            }
+            return MultitouchFrameMailbox.PerformanceSnapshot(
+                rawCallbacks: accumulated.rawCallbacks &+ current.rawCallbacks,
+                staleCallbacks: accumulated.staleCallbacks &+ current.staleCallbacks,
+                drainBatches: accumulated.drainBatches &+ current.drainBatches,
+                overwrittenChanges: accumulated.overwrittenChanges &+ current.overwrittenChanges,
+                transitionsQueued: accumulated.transitionsQueued &+ current.transitionsQueued,
+                cursorSamples: accumulated.cursorSamples &+ current.cursorSamples,
+                pendingFrames: pendingFrames,
+                maximumPendingFrames: max(
+                    accumulated.maximumPendingFrames,
+                    current.maximumPendingFrames
+                )
+            )
+        }
+    }
+
     enum MouseButton: Hashable {
         case left
         case right
@@ -109,6 +203,12 @@ final class MouseEventHandler {
             var terminalFailureRetryRequestId: AXFrameRequestId?
         }
 
+        struct FocusFollowsMouseSample {
+            let location: CGPoint
+            let modifiersRawValue: UInt64
+            let windowIdUnderPointer: Int?
+        }
+
         var eventTap: CFMachPort?
         var runLoopSource: CFRunLoopSource?
         var moveTap: CFMachPort?
@@ -119,12 +219,14 @@ final class MouseEventHandler {
         var activeInteractionButton: MouseButton?
         var capturedInteractionButton: MouseButton?
         var resizeLayout: LayoutType?
+        var moveLayout: LayoutType?
         var awaitsNativeTitleBarDragTarget = false
         var nativeTitleBarDragFallbackToken: WindowToken?
         var nativeTitleBarDragFallbackReleased = false
         var nativeTitleBarDrag: NativeTitleBarDrag?
 
         var lastFocusFollowsMouseTime: Date = .distantPast
+        var latestFocusFollowsMouseSample: FocusFollowsMouseSample?
         let focusFollowsMouseDebounce: TimeInterval = 0.1
         var dragGhostController: DragGhostController?
 
@@ -135,6 +237,7 @@ final class MouseEventHandler {
         var gestureLastAverageY: CGFloat = 0.0
         var lockedGestureContext: LockedGestureContext?
         var activeGestureMode: TrackpadGestureMode?
+        var viewportGestureSessionID: AnimationDriver.GestureSessionID?
         var workspaceSwipeFired = false
         let workspaceSwipeTracker = SwipeTracker()
         var suppressGestureStartUntilAllTouchesLift = false
@@ -149,6 +252,8 @@ final class MouseEventHandler {
     weak var controller: WMController?
     var state = State()
     private var multitouchSource: MultitouchGestureSource?
+    private var performanceCounters: PerformanceCounters?
+    var multitouchSourceFactory: @MainActor () -> MultitouchGestureSource = { MultitouchGestureSource() }
     var pressedMouseButtonsProvider: @MainActor () -> Int = { Int(NSEvent.pressedMouseButtons) }
     var nativeWindowFrameProvider: @MainActor (AXWindowRef) -> CGRect? = {
         AXWindowService.framePreferFast($0)
@@ -174,6 +279,7 @@ final class MouseEventHandler {
     }
 
     func setup() {
+        tearDownEventTaps()
         MouseEventHandler._instance = self
 
         let moveCallback: CGEventTapCallBack = { _, type, event, _ in
@@ -190,6 +296,9 @@ final class MouseEventHandler {
                     guard let handler = MouseEventHandler._instance,
                           handler.state.awaitsNativeTitleBarDragTarget
                     else { return }
+                    if handler.performanceCounters != nil {
+                        handler.recordCGEvent(type)
+                    }
                     handler.receiveAnnotatedNativeMouseDragged(
                         windowIdUnderPointer: MouseEventHandler.eventWindowIdUnderPointer(event)
                     )
@@ -218,8 +327,7 @@ final class MouseEventHandler {
                 CGEvent.tapEnable(tap: tap, enable: true)
                 annotatedMoveTapInstalled = true
             } else {
-                CGEvent.tapEnable(tap: tap, enable: false)
-                state.moveTap = nil
+                tearDownMoveEventTap()
                 FallbackFiringRecorder.shared.note(.input, "mouseMoveTapRunLoopSourceFailed")
             }
         } else {
@@ -261,10 +369,11 @@ final class MouseEventHandler {
             state.runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
             if let source = state.runLoopSource {
                 CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+                CGEvent.tapEnable(tap: tap, enable: true)
             } else {
+                tearDownSessionEventTap()
                 FallbackFiringRecorder.shared.note(.input, "mouseTapRunLoopSourceFailed")
             }
-            CGEvent.tapEnable(tap: tap, enable: true)
         } else {
             FallbackFiringRecorder.shared.note(.input, "mouseTapCreateFailed")
         }
@@ -272,15 +381,18 @@ final class MouseEventHandler {
             name: state.eventTap != nil ? "mouse.tap.installed" : "mouse.tap.failed"
         )
 
-        if !installMultitouchSource(MultitouchGestureSource()) {
-            FallbackFiringRecorder.shared.note(.input, "multitouchSourceCleanupBlocked")
+        controller?.settings.onTrackpadGestureAvailabilityChanged = { [weak self] _ in
+            self?.reconcileMultitouchSource()
         }
+        reconcileMultitouchSource()
     }
 
     @discardableResult
     func installMultitouchSource(_ source: MultitouchGestureSource) -> Bool {
-        if let current = multitouchSource, current !== source {
+        let current = multitouchSource
+        if let current, current !== source {
             guard current.shutdown() else { return false }
+            accumulateRetiredMultitouchPerformance(from: current)
         }
         source.onSnapshot = { [weak self] snapshot in
             self?.receiveTapGestureEvent(snapshot)
@@ -289,7 +401,11 @@ final class MouseEventHandler {
             self?.resetForMultitouchSourceReplacement()
         }
         multitouchSource = source
+        if performanceCounters != nil, current !== source {
+            source.beginPerformanceCapture()
+        }
         guard source.startLifecycle() else {
+            accumulateRetiredMultitouchPerformance(from: source)
             multitouchSource = nil
             return false
         }
@@ -297,26 +413,16 @@ final class MouseEventHandler {
     }
 
     func cleanup() {
+        state.latestFocusFollowsMouseSample = nil
         clearNativeTitleBarDrag()
         cancelActiveMouseInteraction()
         state.capturedInteractionButton = nil
-        if let source = state.moveTapRunLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-            state.moveTapRunLoopSource = nil
-        }
-        if let tap = state.moveTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            state.moveTap = nil
-        }
-        if let source = state.runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-            state.runLoopSource = nil
-        }
-        if let tap = state.eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            state.eventTap = nil
-        }
-        if multitouchSource?.shutdown() != false {
+        tearDownEventTaps()
+        let retiringMultitouchSource = multitouchSource
+        if retiringMultitouchSource?.shutdown() != false {
+            if let retiringMultitouchSource {
+                accumulateRetiredMultitouchPerformance(from: retiringMultitouchSource)
+            }
             multitouchSource = nil
         }
         MouseEventHandler._instance = nil
@@ -324,6 +430,80 @@ final class MouseEventHandler {
         DiagnosticsEventRecorder.shared.recordLifecycle(name: "mouse.tap.removed")
         controller?.eventIntake.removePendingMouseEvents()
         resetForMultitouchSourceReplacement()
+    }
+
+    func reconcileMultitouchSource() {
+        guard let controller, controller.hasStartedServices else { return }
+        let shouldRun = controller.settings.scrollGestureEnabled || controller.settings.workspaceSwipeEnabled
+        if shouldRun {
+            if let multitouchSource {
+                if !multitouchSource.startLifecycle() {
+                    FallbackFiringRecorder.shared.note(.input, "multitouchSourceCleanupBlocked")
+                }
+                return
+            }
+            if !installMultitouchSource(multitouchSourceFactory()) {
+                FallbackFiringRecorder.shared.note(.input, "multitouchSourceCleanupBlocked")
+            }
+        } else {
+            let retiringMultitouchSource = multitouchSource
+            if retiringMultitouchSource?.shutdown() != false {
+                if let retiringMultitouchSource {
+                    accumulateRetiredMultitouchPerformance(from: retiringMultitouchSource)
+                }
+                multitouchSource = nil
+                resetForMultitouchSourceReplacement()
+            } else {
+                FallbackFiringRecorder.shared.note(.input, "multitouchSourceCleanupBlocked")
+            }
+        }
+    }
+
+    func beginPerformanceCapture() {
+        performanceCounters = PerformanceCounters()
+        multitouchSource?.beginPerformanceCapture()
+    }
+
+    func performanceSnapshot() -> PerformanceSnapshot? {
+        guard let performanceCounters else { return nil }
+        return performanceCounters.snapshot(multitouch: multitouchSource?.performanceSnapshot())
+    }
+
+    func endPerformanceCapture() -> PerformanceSnapshot? {
+        guard let performanceCounters else { return nil }
+        let multitouch = multitouchSource?.endPerformanceCapture()
+        let snapshot = performanceCounters.snapshot(multitouch: multitouch)
+        self.performanceCounters = nil
+        return snapshot
+    }
+
+    private func accumulateRetiredMultitouchPerformance(from source: MultitouchGestureSource) {
+        guard var performanceCounters,
+              let snapshot = source.endPerformanceCapture()
+        else { return }
+        performanceCounters.accumulateRetiredMultitouch(snapshot)
+        self.performanceCounters = performanceCounters
+    }
+
+    private func tearDownEventTaps() {
+        tearDownMoveEventTap()
+        tearDownSessionEventTap()
+    }
+
+    private func tearDownMoveEventTap() {
+        var tap = state.moveTap
+        var source = state.moveTapRunLoopSource
+        EventTapTeardown.tearDown(tap: &tap, runLoopSource: &source)
+        state.moveTap = tap
+        state.moveTapRunLoopSource = source
+    }
+
+    private func tearDownSessionEventTap() {
+        var tap = state.eventTap
+        var source = state.runLoopSource
+        EventTapTeardown.tearDown(tap: &tap, runLoopSource: &source)
+        state.eventTap = tap
+        state.runLoopSource = source
     }
 
     func requestMultitouchRevalidation(_ reason: MultitouchGestureSource.RevalidationReason) {
@@ -355,11 +535,18 @@ final class MouseEventHandler {
         modifiersRawValue: UInt64 = 0,
         windowIdUnderPointer: Int? = nil
     ) {
+        state.latestFocusFollowsMouseSample = .init(
+            location: location,
+            modifiersRawValue: modifiersRawValue,
+            windowIdUnderPointer: windowIdUnderPointer
+        )
         guard !isInputSuppressed else {
             handleInputSuppressionBegan()
             resetHoveredEdgesIfNeeded()
             return
         }
+        controller?.mouseWarpHandler.handleMouseWarpMoved(at: location)
+        performanceCounters?.mouseWarpSamples &+= 1
         handleMouseMovedFromTap(
             at: location,
             modifiersRawValue: modifiersRawValue,
@@ -407,6 +594,8 @@ final class MouseEventHandler {
             handleInputSuppressionBegan()
             return
         }
+        controller?.mouseWarpHandler.handleMouseWarpMoved(at: location)
+        performanceCounters?.mouseWarpSamples &+= 1
         beginNativeTitleBarDragIfNeeded(button: button)
         if !isCapturedInteraction(button), shouldBlockOwnWindowInput(at: location) {
             cancelActiveMouseInteraction()
@@ -470,7 +659,51 @@ final class MouseEventHandler {
         state.gesturePhase != .idle
     }
 
+    func handleExpiredViewportGesture(
+        in workspaceId: WorkspaceDescriptor.ID,
+        sessionID: AnimationDriver.GestureSessionID
+    ) {
+        terminateViewportGesture(
+            in: workspaceId,
+            sessionID: sessionID,
+            disposition: .viewportAlreadySettled
+        )
+    }
+
+    @discardableResult
+    func terminateViewportGesture(
+        in workspaceId: WorkspaceDescriptor.ID,
+        sessionID: AnimationDriver.GestureSessionID,
+        disposition: ViewportGestureTerminationDisposition
+    ) -> Bool {
+        guard state.gesturePhase == .committed,
+              state.lockedGestureContext?.workspaceId == workspaceId,
+              state.activeGestureMode == .columnScroll,
+              state.viewportGestureSessionID == sessionID
+        else { return false }
+        let liveSessionID = controller?.workspaceManager.animationDriver.gestureSessionID(in: workspaceId)
+        guard liveSessionID == sessionID || disposition == .viewportAlreadySettled && liveSessionID == nil else {
+            return false
+        }
+        switch disposition {
+        case .settleLiveOffset:
+            cancelCommittedGestureViewportState(for: workspaceId)
+        case .settleLiveOffsetWithoutRelayout:
+            cancelCommittedGestureViewportState(for: workspaceId, requestRelayout: false)
+        case .viewportAlreadySettled:
+            break
+        }
+        if disposition != .viewportAlreadySettled {
+            state.suppressGestureStartUntilAllTouchesLift = true
+            state.consumeTrackpadScrollUntilAllTouchesLift = true
+            state.suppressTrackpadMomentumScroll = true
+        }
+        resetGestureState(settleViewportGesture: false)
+        return true
+    }
+
     func handleInputSuppressionBegan() {
+        state.latestFocusFollowsMouseSample = nil
         clearNativeTitleBarDrag()
         cancelActiveMouseInteraction()
         dropPendingTapEvents()
@@ -480,6 +713,7 @@ final class MouseEventHandler {
     }
 
     func handleAppVisibilityChanged() {
+        state.latestFocusFollowsMouseSample = nil
         clearNativeTitleBarDrag()
         cancelActiveMouseInteraction()
         dropPendingTapEvents()
@@ -587,18 +821,22 @@ final class MouseEventHandler {
         if suppress, MouseTrace.shared.isActive {
             MouseTrace.record("tap: scroll suppressed loc=\(TraceFormat.point(location))")
         }
-        EventIntake.post(
-            .mouseScroll(
-                MouseScrollIntake(
-                    location: location,
-                    deltaX: deltaX,
-                    deltaY: deltaY,
-                    momentumPhase: momentumPhase,
-                    phase: phase,
-                    modifiersRawValue: modifiers.rawValue
+        if momentumPhase == 0, phase == 0 {
+            EventIntake.post(
+                .mouseScroll(
+                    MouseScrollIntake(
+                        location: location,
+                        deltaX: deltaX,
+                        deltaY: deltaY,
+                        momentumPhase: momentumPhase,
+                        phase: phase,
+                        modifiersRawValue: modifiers.rawValue
+                    )
                 )
             )
-        )
+        } else {
+            performanceCounters?.droppedTrackpadScrollEvents &+= 1
+        }
         return suppress
     }
 
@@ -702,8 +940,10 @@ final class MouseEventHandler {
 
         if state.isMoving {
             controller.niriEngine?.interactiveMoveCancel()
+            controller.dwindleEngine?.interactiveMoveCancel()
             state.dragGhostController?.endDrag()
             state.isMoving = false
+            state.moveLayout = nil
             state.activeInteractionButton = nil
         }
 
@@ -759,14 +999,13 @@ final class MouseEventHandler {
             engine.clearInteractiveResize()
             return
         }
-        let workingFrame = controller.insetWorkingFrame(for: monitor)
-        let gaps = controller.innerGap(for: monitor)
+        let geometry = controller.niriInteractionGeometry(for: monitor)
         controller.workspaceManager.withNiriViewportState(for: workspaceId) { viewportState in
             engine.interactiveResizeEnd(
                 motion: controller.motionPolicy.snapshot(),
                 state: &viewportState,
-                workingFrame: workingFrame,
-                gaps: gaps
+                workingFrame: geometry.workingFrame,
+                gaps: geometry.innerGap
             )
         }
         controller.workspaceManager.recordLayoutOperation(
@@ -816,6 +1055,8 @@ final class MouseEventHandler {
             handleInputSuppressionBegan()
             return
         }
+        controller?.mouseWarpHandler.handleMouseWarpMoved(at: location)
+        performanceCounters?.mouseWarpSamples &+= 1
         beginNativeTitleBarDragIfNeeded(button: button)
         if shouldBlockOwnWindowInput(at: location) {
             cancelActiveMouseInteraction()
@@ -898,6 +1139,8 @@ final class MouseEventHandler {
                 : nil)
             if let token = focusIntentToken {
                 controller.axEventHandler.noteMouseFocusIntent(token: token)
+            } else {
+                controller.axEventHandler.noteUnmanagedPointerClick()
             }
             state.nativeTitleBarDragFallbackToken = exactToken == nil ? focusIntentToken : nil
             if let exactToken {
@@ -924,8 +1167,7 @@ final class MouseEventHandler {
             if let tiledWindow = engine.hitTestTiled(point: location, in: wsId),
                let monitor = controller.workspaceManager.monitor(for: wsId)
             {
-                let workingFrame = controller.insetWorkingFrame(for: monitor)
-                let gaps = controller.innerGap(for: monitor)
+                let geometry = controller.niriInteractionGeometry(for: monitor)
                 let orientation = resolvedNiriOrientation(
                     engine: engine,
                     workspaceId: wsId,
@@ -943,8 +1185,8 @@ final class MouseEventHandler {
                         in: wsId,
                         motion: controller.motionPolicy.snapshot(),
                         state: &vstate,
-                        workingFrame: workingFrame,
-                        gaps: gaps,
+                        workingFrame: geometry.workingFrame,
+                        gaps: geometry.innerGap,
                         orientation: orientation
                     ) {
                         moveStarted = true
@@ -952,6 +1194,7 @@ final class MouseEventHandler {
                 }
                 if moveStarted {
                     state.isMoving = true
+                    state.moveLayout = .niri
                     state.activeInteractionButton = button
                     state.capturedInteractionButton = button
                     NSCursor.closedHand.set()
@@ -978,9 +1221,16 @@ final class MouseEventHandler {
               Self.modifierFlagsMatch(modifiers, required: controller.settings.mouseResizeModifierKey.cgEventFlag)
         else { return false }
 
-        guard let tiledWindow = engine.hitTestTiled(point: location, in: wsId),
-              let frame = tiledWindow.renderedFrame ?? tiledWindow.frame,
-              let monitor = controller.workspaceManager.monitor(for: wsId)
+        guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return false }
+        let tiledWindow = engine.hitTestTiled(point: location, in: wsId)
+            ?? focusedBorderResizeToken(
+                at: location,
+                in: wsId,
+                scale: controller.backingScaleFactor(for: monitor),
+                appliedBorder: controller.surfaceReconciler.appliedScene.border
+            ).flatMap { engine.findNode(for: $0, in: wsId) }
+        guard let tiledWindow,
+              let frame = tiledWindow.renderedFrame ?? tiledWindow.frame
         else { return false }
 
         let edges = resizeEdges(for: location, in: frame)
@@ -1016,20 +1266,30 @@ final class MouseEventHandler {
         wsId: WorkspaceDescriptor.ID
     ) -> Bool {
         guard let controller, let engine = controller.dwindleEngine else { return false }
+        if button == .left {
+            return beginDwindleMove(at: location, modifiers: modifiers, engine: engine, wsId: wsId)
+        }
         guard button == .right,
               Self.modifierFlagsMatch(modifiers, required: controller.settings.mouseResizeModifierKey.cgEventFlag)
         else { return false }
 
+        guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return false }
         let now = controller.animationClock.now()
-        guard let token = engine.hitTestFocusableWindow(point: location, in: wsId, at: now),
+        let token = engine.hitTestFocusableWindow(point: location, in: wsId, at: now)
+            ?? focusedBorderResizeToken(
+                at: location,
+                in: wsId,
+                scale: controller.backingScaleFactor(for: monitor),
+                appliedBorder: controller.surfaceReconciler.appliedScene.border
+            )
+        guard let token,
               let node = engine.findNode(for: token, in: wsId),
               let frame = node.presentedFrame(at: now)
         else { return false }
 
         let edges = resizeEdges(for: location, in: frame)
-        guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return false }
         controller.dwindleLayoutHandler.refreshEngineConstraints(workspaceId: wsId, monitor: monitor)
-        let innerGap = controller.settings.resolvedDwindleSettings(for: monitor).innerGap
+        let innerGap = controller.resolvedDwindleSettings(for: monitor).innerGap
         guard engine.interactiveResizeBegin(
             token: token,
             edges: edges,
@@ -1049,6 +1309,129 @@ final class MouseEventHandler {
         state.resizeLayout = .dwindle
         edges.cursor.set()
         return true
+    }
+
+    private func beginDwindleMove(
+        at location: CGPoint,
+        modifiers: CGEventFlags,
+        engine: DwindleLayoutEngine,
+        wsId: WorkspaceDescriptor.ID
+    ) -> Bool {
+        guard let controller else { return false }
+        let now = controller.animationClock.now()
+        guard Self.mouseMoveMode(
+            modifiers: modifiers,
+            required: controller.settings.mouseMoveModifierKey.cgEventFlags
+        ) == .swap,
+            let token = engine.hitTestFocusableWindow(point: location, in: wsId, at: now),
+            let frame = engine.presentedFrame(for: token, in: wsId, at: now),
+            engine.interactiveMoveBegin(token: token, startLocation: location, in: wsId)
+        else { return false }
+
+        state.isMoving = true
+        state.moveLayout = .dwindle
+        state.activeInteractionButton = .left
+        state.capturedInteractionButton = .left
+        NSCursor.closedHand.set()
+        if state.dragGhostController == nil {
+            state.dragGhostController = DragGhostController()
+        }
+        state.dragGhostController?.beginDrag(windowId: token.windowId, originalFrame: frame, cursorLocation: location)
+        return false
+    }
+
+    private func handleDwindleMoveDrag(at location: CGPoint) {
+        guard let controller, let engine = controller.dwindleEngine, let move = engine.interactiveMove else {
+            cancelActiveMouseInteraction()
+            return
+        }
+        let now = controller.animationClock.now()
+        state.dragGhostController?.updatePosition(cursorLocation: location)
+        if let target = engine.interactiveMoveUpdate(currentLocation: location, at: now),
+           let frame = engine.presentedFrame(for: target, in: move.workspaceId, at: now)
+        {
+            state.dragGhostController?.showSwapTarget(frame: frame)
+        } else {
+            state.dragGhostController?.hideSwapTarget()
+        }
+    }
+
+    private func finishDwindleMove() {
+        guard let controller, let engine = controller.dwindleEngine, let move = engine.interactiveMove else { return }
+        guard move.targetToken != nil else {
+            engine.interactiveMoveCancel()
+            return
+        }
+        let wsId = move.workspaceId
+        let swapped = controller.workspaceManager.withEngineMutationScope(
+            in: wsId,
+            label: "dwindle_mouse_swap",
+            source: .mouse
+        ) {
+            engine.interactiveMoveEnd() != nil
+        }
+        guard swapped else { return }
+        controller.workspaceManager.recordLayoutOperation(.windowsSwapped, in: wsId, source: .mouse)
+        if controller.hasStartedServices {
+            controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+        }
+    }
+
+    private func finishNiriMove(at location: CGPoint) {
+        guard let controller else { return }
+        guard let engine = controller.niriEngine, let move = engine.interactiveMove else {
+            controller.niriEngine?.interactiveMoveCancel()
+            return
+        }
+        let wsId = move.workspaceId
+        guard let monitor = controller.workspaceManager.monitor(for: wsId) else {
+            engine.interactiveMoveCancel()
+            return
+        }
+        let geometry = controller.niriInteractionGeometry(for: monitor)
+        let movedToken = move.windowToken
+        var didEnd = false
+        controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+            didEnd = engine.interactiveMoveEnd(
+                at: location,
+                motion: controller.motionPolicy.snapshot(),
+                state: &vstate,
+                workingFrame: geometry.workingFrame,
+                gaps: geometry.innerGap
+            )
+        }
+        guard didEnd else { return }
+        controller.workspaceManager.recordLayoutOperation(
+            .interactiveMoveEnded(token: movedToken),
+            in: wsId,
+            source: .mouse
+        )
+        controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+    }
+
+    func focusedBorderResizeToken(
+        at location: CGPoint,
+        in workspaceId: WorkspaceDescriptor.ID,
+        scale: CGFloat,
+        appliedBorder: DesiredBorderSurface?
+    ) -> WindowToken? {
+        guard let controller,
+              let appliedBorder,
+              appliedBorder.token == controller.workspaceManager.borderFocusToken,
+              let entry = controller.workspaceManager.entry(for: appliedBorder.token),
+              entry.workspaceId == workspaceId,
+              entry.mode == .tiling
+        else {
+            return nil
+        }
+        let geometry = appliedBorder.config.resolvedGeometry(for: appliedBorder.frame, scale: scale)
+        guard geometry.width > 0,
+              geometry.surfaceFrame.contains(location),
+              !geometry.targetFrame.contains(location)
+        else {
+            return nil
+        }
+        return appliedBorder.token
     }
 
     private func resizeEdges(for location: CGPoint, in frame: CGRect) -> ResizeEdge {
@@ -1088,6 +1471,10 @@ final class MouseEventHandler {
 
         if state.isMoving {
             guard shouldAcceptInteractionButton(button) else { return }
+            if state.moveLayout == .dwindle {
+                handleDwindleMoveDrag(at: location)
+                return
+            }
             guard let engine = controller.niriEngine,
                   let move = engine.interactiveMove
             else {
@@ -1112,7 +1499,7 @@ final class MouseEventHandler {
                         targetWindowId: nodeId,
                         position: insertPosition,
                         in: wsId,
-                        gaps: controller.innerGap(for: wsId),
+                        gaps: move.gaps,
                         orientation: move.orientation
                     ) {
                         state.dragGhostController?.showSwapTarget(frame: dropFrame)
@@ -1150,17 +1537,16 @@ final class MouseEventHandler {
             return
         }
 
+        let geometry = controller.niriInteractionGeometry(for: monitor)
         let gaps = LayoutGaps(
-            horizontal: controller.innerGap(for: monitor),
-            vertical: controller.innerGap(for: monitor),
-            outer: controller.workspaceManager.outerGaps
+            horizontal: geometry.innerGap,
+            vertical: geometry.innerGap
         )
-        let insetFrame = controller.insetWorkingFrame(for: monitor)
         let wsId = resize.workspaceId
 
         if engine.interactiveResizeUpdate(
             currentLocation: location,
-            monitorFrame: insetFrame,
+            monitorFrame: geometry.workingFrame,
             gaps: gaps,
             viewportState: { mutate in
                 controller.workspaceManager.withNiriViewportState(for: wsId, mutate)
@@ -1309,9 +1695,10 @@ final class MouseEventHandler {
         let priorTerminalFailureRequestId = drag.terminalFailureRetryRequestId
         var correctionScheduledDuringCancellation = false
         if controller.axManager.pendingFrameWrite(for: entry.windowId) != nil {
-            controller.axManager.cancelPendingFrameJobs([
-                (pid: entry.pid, windowId: entry.windowId)
-            ])
+            controller.axManager.cancelPendingFrameJobs(
+                [(pid: entry.pid, windowId: entry.windowId)],
+                reason: "native-drag-end"
+            )
             if let currentDrag = state.nativeTitleBarDrag,
                currentDrag.token == drag.token,
                currentDrag.terminalFailureRetryRequestId != nil,
@@ -1634,41 +2021,15 @@ final class MouseEventHandler {
 
         if state.isMoving {
             guard shouldAcceptInteractionButton(button) else { return }
-            if let engine = controller.niriEngine,
-               let move = engine.interactiveMove
-            {
-                let wsId = move.workspaceId
-                if let monitor = controller.workspaceManager.monitor(for: wsId) {
-                    let workingFrame = controller.insetWorkingFrame(for: monitor)
-                    let gaps = controller.innerGap(for: monitor)
-                    let movedToken = move.windowToken
-                    var didEnd = false
-                    controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
-                        didEnd = engine.interactiveMoveEnd(
-                            at: location,
-                            motion: controller.motionPolicy.snapshot(),
-                            state: &vstate,
-                            workingFrame: workingFrame,
-                            gaps: gaps
-                        )
-                    }
-                    if didEnd {
-                        controller.workspaceManager.recordLayoutOperation(
-                            .interactiveMoveEnded(token: movedToken),
-                            in: wsId,
-                            source: .mouse
-                        )
-                        controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
-                    }
-                } else {
-                    engine.interactiveMoveCancel()
-                }
+            if state.moveLayout == .dwindle {
+                finishDwindleMove()
             } else {
-                controller.niriEngine?.interactiveMoveCancel()
+                finishNiriMove(at: location)
             }
 
             state.dragGhostController?.endDrag()
             state.isMoving = false
+            state.moveLayout = nil
             state.activeInteractionButton = nil
             NSCursor.arrow.set()
             return
@@ -1746,7 +2107,7 @@ final class MouseEventHandler {
         guard controller.focusPolicyEngine.evaluate(.focusFollowsMouse).allowsFocusChange else {
             return
         }
-        guard !nonManagedFocusBlocksFocusFollowsMouse,
+        guard !externalFocusBlocksFocusFollowsMouse,
               !hasPendingNativeFullscreenTransition(at: location),
               !isPointerDisplayShowingFullscreenSpace(at: location)
         else {
@@ -1764,19 +2125,23 @@ final class MouseEventHandler {
         ) else { return }
         let token = focusFollowsMouseToken(for: target)
 
-        guard token != controller.workspaceManager.focusedToken else { return }
+        guard token != controller.workspaceManager.selectedManagedToken else { return }
 
         state.lastFocusFollowsMouseTime = now
         activateFocusFollowsMouseTarget(target)
     }
 
-    private var nonManagedFocusBlocksFocusFollowsMouse: Bool {
-        guard let workspaceManager = controller?.workspaceManager,
-              workspaceManager.isNonManagedFocusActive
-        else {
+    private var externalFocusBlocksFocusFollowsMouse: Bool {
+        guard let workspaceManager = controller?.workspaceManager else { return false }
+        switch workspaceManager.nativeFocusOwner {
+        case .ownedSurface:
+            return true
+        case .external:
+            return workspaceManager.activeNativeFullscreenFocusOwnerToken == nil
+        case .managed,
+             .none:
             return false
         }
-        return workspaceManager.activeNativeFullscreenFocusOwnerToken == nil
     }
 
     private func hasPendingNativeFullscreenTransition(at location: CGPoint) -> Bool {
@@ -1890,6 +2255,36 @@ final class MouseEventHandler {
         }
     }
 
+    var hasLatestFocusFollowsMouseSample: Bool {
+        state.latestFocusFollowsMouseSample != nil
+    }
+
+    func latestFocusFollowsMouseToken() -> WindowToken? {
+        guard let controller,
+              let sample = state.latestFocusFollowsMouseSample,
+              !isInputSuppressed,
+              controller.isEnabled,
+              controller.focusFollowsMouseEnabled,
+              !controller.isOverviewOpen(),
+              !shouldBlockOwnWindowInput(at: sample.location),
+              !controller.settings.focusLockModifier.isHeld(inRawFlags: sample.modifiersRawValue),
+              !state.isMoving,
+              !state.isResizing,
+              !isTrackpadSwipeSessionActive,
+              controller.focusPolicyEngine.evaluate(.focusFollowsMouse).allowsFocusChange,
+              !externalFocusBlocksFocusFollowsMouse,
+              !hasPendingNativeFullscreenTransition(at: sample.location),
+              !isPointerDisplayShowingFullscreenSpace(at: sample.location),
+              let target = resolveFocusFollowsMouseTarget(
+                  at: sample.location,
+                  windowIdUnderPointer: sample.windowIdUnderPointer
+              )
+        else {
+            return nil
+        }
+        return focusFollowsMouseToken(for: target)
+    }
+
     private func activateFocusFollowsMouseTarget(_ target: FocusFollowsMouseTarget) {
         guard let controller else { return }
 
@@ -1903,11 +2298,11 @@ final class MouseEventHandler {
             controller.dwindleLayoutHandler.activateWindow(
                 token,
                 in: workspaceId,
-                origin: .pointerHover,
+                origin: .focusFollowsMouse,
                 layoutRefresh: false
             )
         case let .floating(token):
-            controller.focusWindow(token, origin: .pointerHover)
+            controller.focusWindow(token, origin: .focusFollowsMouse)
         }
     }
 
@@ -2276,8 +2671,14 @@ final class MouseEventHandler {
                     vstate.jumpOffset(to: liveOffset)
                 }
             }
-            driver.beginGesture(in: wsId, isTrackpad: true)
+            driver.beginGesture(in: wsId, isTrackpad: true, timestamp: timestamp)
         }
+
+        guard let gestureSessionID = driver.gestureSessionID(in: wsId) else {
+            resetGestureState()
+            return
+        }
+        state.viewportGestureSessionID = gestureSessionID
 
         driver.updateGesture(
             in: wsId,
@@ -2296,8 +2697,7 @@ final class MouseEventHandler {
         monitor: Monitor
     ) {
         guard let controller else { return }
-        let insetFrame = controller.insetWorkingFrame(for: monitor)
-        let gap = controller.innerGap(for: monitor)
+        let geometry = controller.niriInteractionGeometry(for: monitor)
         let step = ticks > 0 ? 1 : -1
         let motion = controller.motionPolicy.snapshot()
         let orientation = resolvedNiriOrientation(
@@ -2334,8 +2734,8 @@ final class MouseEventHandler {
                           in: wsId,
                           motion: motion,
                           state: &vstate,
-                          workingFrame: insetFrame,
-                          gaps: gap,
+                          workingFrame: geometry.workingFrame,
+                          gaps: geometry.innerGap,
                           orientation: orientation
                       )
                 else {
@@ -2381,14 +2781,13 @@ final class MouseEventHandler {
             return
         }
 
-        let insetFrame = controller.insetWorkingFrame(for: monitor)
-        let gap = controller.innerGap(for: monitor)
-        let scale = NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?
-            .backingScaleFactor ?? 2.0
+        let geometry = controller.niriInteractionGeometry(for: monitor)
         let orientation: Monitor.Orientation = lockedContext.columnScrollAxis == .horizontal
             ? .horizontal
             : .vertical
-        let viewportSpan = orientation == .horizontal ? insetFrame.width : insetFrame.height
+        let viewportSpan = orientation == .horizontal
+            ? geometry.workingFrame.width
+            : geometry.workingFrame.height
 
         guard let sample = controller.workspaceManager.animationDriver.sampleGestureEnd(
             in: wsId,
@@ -2406,16 +2805,16 @@ final class MouseEventHandler {
                 in: wsId,
                 currentOffset: baseOffset + sample.relativeOffset,
                 projectedOffset: baseOffset + sample.relativeProjectedOffset,
-                gap: gap,
+                gap: geometry.innerGap,
                 viewportSpan: viewportSpan,
                 orientation: orientation,
                 motion: controller.motionPolicy.snapshot(),
                 snapToColumn: controller.settings.trackpadScrollStyle == .snap,
                 centerMode: engine.centerFocusedColumn,
                 alwaysCenterSingleColumn: engine.alwaysCenterSingleColumn,
-                workingArea: insetFrame,
+                workingArea: geometry.workingFrame,
                 viewFrame: monitor.frame,
-                scale: scale
+                scale: geometry.scale
             )
         }
         if let selectedWindow {
@@ -2439,18 +2838,22 @@ final class MouseEventHandler {
         state.suppressTrackpadMomentumScroll = true
     }
 
-    private func cancelCommittedGestureViewportState(for wsId: WorkspaceDescriptor.ID) {
+    private func cancelCommittedGestureViewportState(
+        for wsId: WorkspaceDescriptor.ID,
+        requestRelayout: Bool = true
+    ) {
         guard let controller else { return }
         let driver = controller.workspaceManager.animationDriver
         let semanticOffset = controller.workspaceManager.niriViewportState(for: wsId).viewOffset
         guard let liveOffset = driver.liveViewOffset(in: wsId, semanticOffset: semanticOffset) else { return }
         controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
             vstate.jumpOffset(to: liveOffset)
-            vstate.selectionProgress = 0.0
             vstate.viewOffsetToRestore = nil
             vstate.activatePrevColumnOnRemoval = nil
         }
-        controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+        if requestRelayout {
+            controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+        }
     }
 
     private func abortActiveGestureIfNeeded() {
@@ -2503,8 +2906,9 @@ final class MouseEventHandler {
         }
     }
 
-    private func resetGestureState() {
-        if let lockedContext = state.lockedGestureContext,
+    private func resetGestureState(settleViewportGesture: Bool = true) {
+        if settleViewportGesture,
+           let lockedContext = state.lockedGestureContext,
            controller?.workspaceManager.animationDriver.hasGesture(in: lockedContext.workspaceId) == true
         {
             cancelCommittedGestureViewportState(for: lockedContext.workspaceId)
@@ -2516,6 +2920,7 @@ final class MouseEventHandler {
         state.gestureLastAverageY = 0.0
         state.lockedGestureContext = nil
         state.activeGestureMode = nil
+        state.viewportGestureSessionID = nil
         state.workspaceSwipeFired = false
     }
 
@@ -2550,7 +2955,7 @@ final class MouseEventHandler {
     private func focusViewportSelectionAfterGesture(_ window: NiriWindow) {
         guard let controller else { return }
         guard !controller.hasFrontmostOwnedWindow else { return }
-        guard controller.workspaceManager.focusedToken != window.token else { return }
+        guard controller.workspaceManager.selectedManagedToken != window.token else { return }
         controller.focusWindow(window.token, origin: .pointerHover)
     }
 
@@ -2605,6 +3010,9 @@ final class MouseEventHandler {
 
         MainActor.assumeIsolated {
             guard let handler = MouseEventHandler._instance else { return }
+            if handler.performanceCounters != nil {
+                handler.recordCGEvent(type)
+            }
             switch type {
             case .mouseMoved:
                 handler.receiveTapMouseMoved(
@@ -2648,6 +3056,27 @@ final class MouseEventHandler {
         }
 
         return suppressEvent
+    }
+
+    private func recordCGEvent(_ type: CGEventType) {
+        guard performanceCounters != nil else { return }
+        performanceCounters?.cgEvents &+= 1
+        switch type {
+        case .mouseMoved:
+            performanceCounters?.mouseMovedEvents &+= 1
+        case .leftMouseDragged,
+             .rightMouseDragged:
+            performanceCounters?.mouseDraggedEvents &+= 1
+        case .scrollWheel:
+            performanceCounters?.scrollEvents &+= 1
+        case .leftMouseDown,
+             .leftMouseUp,
+             .rightMouseDown,
+             .rightMouseUp:
+            performanceCounters?.buttonEvents &+= 1
+        default:
+            break
+        }
     }
 
     nonisolated static func eventWindowIdUnderPointer(_ event: CGEvent) -> Int? {
@@ -2695,18 +3124,6 @@ final class MouseEventHandler {
 
     nonisolated static func modifierFlagsMatch(_ modifiers: CGEventFlags, required: CGEventFlags) -> Bool {
         modifiers.intersection(mouseRelevantModifierFlags) == required
-    }
-
-    nonisolated static func resolvedMouseWheelColumnDeltaValue(
-        deltaX: CGFloat,
-        deltaY: CGFloat,
-        allowVerticalFallback: Bool
-    ) -> CGFloat? {
-        resolvedMouseWheelColumnDelta(
-            deltaX: deltaX,
-            deltaY: deltaY,
-            allowVerticalFallback: allowVerticalFallback
-        )?.value
     }
 
     private nonisolated static func resolvedMouseWheelColumnDelta(

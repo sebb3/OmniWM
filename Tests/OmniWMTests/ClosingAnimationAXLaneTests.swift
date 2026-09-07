@@ -7,28 +7,24 @@ import XCTest
 
 @MainActor
 final class ClosingAnimationAXLaneTests: XCTestCase {
-    func testHandsOffWindowDoesNotEnterClosingFrameLane() throws {
+    func testFailedDisplayLinkCreationRollsBackClosingAnimationState() throws {
         let controller = WindowAdmissionTestSupport.controller()
+        controller.setAnimationsEnabled(true, persist: false)
         let workspaceId = try XCTUnwrap(
             controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
         )
-        let displayId: CGDirectDisplayID = 91_000
+        let displayId: CGDirectDisplayID = 91_100
+        controller.layoutRefreshController.displayLinkCreationAllowedForTests = { _ in false }
         let monitor = Monitor(
             id: .init(displayId: displayId),
             displayId: displayId,
             frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
             visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
             hasNotch: false,
-            name: "Closing Lane"
+            name: "Unavailable Display"
         )
-        let token = WindowToken(pid: 91_006, windowId: 91_007)
-        _ = controller.workspaceManager.addWindow(
-            WindowAdmissionTestSupport.axRef(for: token),
-            pid: token.pid,
-            windowId: token.windowId,
-            to: workspaceId,
-            interactionPolicy: .handsOffSurface
-        )
+        let token = WindowToken(pid: 91_106, windowId: 91_107)
+        _ = WindowAdmissionTestSupport.track(token, in: workspaceId, controller: controller)
         controller.layoutRefreshController.fastFrameProvider = { _, _ in
             CGRect(x: 20, y: 20, width: 800, height: 600)
         }
@@ -38,9 +34,9 @@ final class ClosingAnimationAXLaneTests: XCTestCase {
             monitor: monitor
         )
 
-        XCTAssertNil(
-            controller.layoutRefreshController.layoutState.closingAnimationsByDisplay[displayId]
-        )
+        XCTAssertNil(controller.layoutRefreshController.layoutState.closingAnimationsByDisplay[displayId])
+        XCTAssertTrue(controller.layoutRefreshController.closingAnimationIdsByObjectId.isEmpty)
+        XCTAssertTrue(controller.layoutRefreshController.lastSubmittedClosingFramesByAnimationId.isEmpty)
     }
 
     func testClosingFrameWriteUsesExactElementWithoutVerificationOrRefresh() {
@@ -72,30 +68,84 @@ final class ClosingAnimationAXLaneTests: XCTestCase {
         var receivedHint: CGRect?
         var receivedVerify: Bool?
 
-        XCTAssertTrue(
-            applyClosingFrameWriteRequest(
-                request,
-                generations: generations,
-                writeFrame: { window, frame, hint, verify in
-                    writtenWindow = window
-                    receivedHint = hint
-                    receivedVerify = verify
-                    return AXFrameWriteResult(
-                        targetFrame: frame,
-                        observedFrame: nil,
-                        writeOrder: .sizeThenPosition,
-                        sizeError: .success,
-                        positionError: .success,
-                        failureReason: nil
-                    )
-                }
-            )
+        let outcome = applyClosingFrameWriteRequest(
+            request,
+            generations: generations,
+            writeFrame: { window, _, hint, verify in
+                writtenWindow = window
+                receivedHint = hint
+                receivedVerify = verify
+                return AXFrameWriteResult(
+                    observedFrame: nil,
+                    writeOrder: .sizeThenPosition,
+                    sizeError: .success,
+                    positionError: .success,
+                    failureReason: nil
+                )
+            }
         )
 
+        guard case let .attempted(result, _) = outcome else {
+            return XCTFail("Expected an attempted closing write, got \(outcome)")
+        }
+        XCTAssertNil(result.failureReason)
         XCTAssertTrue(writtenWindow.map { sameAXWindowIdentity($0, expectedWindow) } == true)
         XCTAssertFalse(writtenWindow.map { sameAXWindowIdentity($0, replacementWindow) } == true)
         XCTAssertEqual(receivedHint, currentFrameHint)
         XCTAssertEqual(receivedVerify, false)
+    }
+
+    func testCancelledClosingWriteIsIneligibleWhileAFailedSetterIsAnAttempt() {
+        let pid: pid_t = 91_010
+        let animationId = UUID()
+        let generations = LockedClosingFrameGenerationMap()
+        let request = AppAXClosingFrameWriteRequest(
+            target: AXClosingFrameTarget(
+                animationId: animationId,
+                pid: pid,
+                expectedWindow: AXWindowRef(element: AXUIElementCreateApplication(pid), windowId: 91_011),
+                frame: CGRect(x: 40, y: 50, width: 600, height: 400),
+                currentFrameHint: nil
+            ),
+            generation: generations.nextGeneration(for: animationId)
+        )
+        var setterCalls = 0
+
+        let cancelled = applyClosingFrameWriteRequest(
+            request,
+            generations: generations,
+            isCancelled: { true },
+            writeFrame: { _, _, _, _ in
+                setterCalls += 1
+                return AXFrameWriteResult(
+                    observedFrame: nil,
+                    writeOrder: .sizeThenPosition,
+                    sizeError: .success,
+                    positionError: .success,
+                    failureReason: nil
+                )
+            }
+        )
+        XCTAssertEqual(cancelled, .ineligible)
+        XCTAssertEqual(setterCalls, 0)
+
+        let failed = applyClosingFrameWriteRequest(
+            request,
+            generations: generations,
+            writeFrame: { _, frame, hint, _ in
+                setterCalls += 1
+                return .skipped(
+                    targetFrame: frame,
+                    currentFrameHint: hint,
+                    failureReason: .sizeWriteFailed(.cannotComplete)
+                )
+            }
+        )
+        guard case let .attempted(result, _) = failed else {
+            return XCTFail("Expected an attempted closing write, got \(failed)")
+        }
+        XCTAssertEqual(result.failureReason, .sizeWriteFailed(.cannotComplete))
+        XCTAssertEqual(setterCalls, 1)
     }
 
     func testClosingFrameGenerationIsAnimationScopedAcrossSameWindowIdReuse() {

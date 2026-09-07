@@ -36,9 +36,32 @@ struct LayoutMonitorSnapshot {
     let frame: CGRect
     let visibleFrame: CGRect
     let workingFrame: CGRect
+    let borderSafeFillFrame: CGRect
     let fullscreenLayoutFrame: CGRect
     let scale: CGFloat
     let orientation: Monitor.Orientation
+
+    init(
+        monitorId: Monitor.ID,
+        displayId: CGDirectDisplayID,
+        frame: CGRect,
+        visibleFrame: CGRect,
+        workingFrame: CGRect,
+        borderSafeFillFrame: CGRect? = nil,
+        fullscreenLayoutFrame: CGRect,
+        scale: CGFloat,
+        orientation: Monitor.Orientation
+    ) {
+        self.monitorId = monitorId
+        self.displayId = displayId
+        self.frame = frame
+        self.visibleFrame = visibleFrame
+        self.workingFrame = workingFrame
+        self.borderSafeFillFrame = borderSafeFillFrame ?? fullscreenLayoutFrame
+        self.fullscreenLayoutFrame = fullscreenLayoutFrame
+        self.scale = scale
+        self.orientation = orientation
+    }
 }
 
 struct WorkspaceRefreshInput {
@@ -68,7 +91,6 @@ struct NiriWorkspaceSnapshot {
     let useScrollAnimationPath: Bool
     let removalSeed: NiriWindowRemovalSeed?
     let gap: CGFloat
-    let outerGaps: LayoutGaps.OuterGaps
     let displayRefreshRate: Double
     let isActiveWorkspace: Bool
 }
@@ -85,22 +107,86 @@ struct DwindleWorkspaceSnapshot {
     let isActiveWorkspace: Bool
 }
 
+struct DwindleAnimationGeometryContext: Equatable {
+    let monitorId: Monitor.ID
+    let displayId: CGDirectDisplayID
+    let workingFrame: CGRect
+    let borderSafeFillFrame: CGRect
+    let fullscreenLayoutFrame: CGRect
+    let scale: CGFloat
+    let settings: ResolvedDwindleSettings
+    let tabRailWidth: CGFloat
+
+    init(
+        monitorId: Monitor.ID,
+        displayId: CGDirectDisplayID,
+        workingFrame: CGRect,
+        borderSafeFillFrame: CGRect? = nil,
+        fullscreenLayoutFrame: CGRect,
+        scale: CGFloat,
+        settings: ResolvedDwindleSettings,
+        tabRailWidth: CGFloat
+    ) {
+        self.monitorId = monitorId
+        self.displayId = displayId
+        self.workingFrame = workingFrame
+        self.borderSafeFillFrame = borderSafeFillFrame ?? fullscreenLayoutFrame
+        self.fullscreenLayoutFrame = fullscreenLayoutFrame
+        self.scale = scale
+        self.settings = settings
+        self.tabRailWidth = tabRailWidth
+    }
+}
+
+struct DwindleAnimationTargetCandidate {
+    let workspaceId: WorkspaceDescriptor.ID
+    let engineIdentifier: ObjectIdentifier
+    let geometry: DwindleAnimationGeometryContext
+    let targetFrames: [WindowToken: CGRect]
+}
+
+enum DwindleAnimationTargetDisposition {
+    case replace(DwindleAnimationTargetCandidate)
+    case clear(engineIdentifier: ObjectIdentifier, geometry: DwindleAnimationGeometryContext)
+}
+
+struct FrameMutationComponents: OptionSet, Equatable, Hashable, Sendable {
+    let rawValue: UInt8
+
+    static let position = Self(rawValue: 1 << 0)
+    static let size = Self(rawValue: 1 << 1)
+    static let all: Self = [.position, .size]
+}
+
 struct LayoutFrameChange {
     let token: WindowToken
     let frame: CGRect
+    let components: FrameMutationComponents
     let forceApply: Bool
     let allowsTerminalRecovery: Bool
 
     init(
         token: WindowToken,
         frame: CGRect,
+        components: FrameMutationComponents = .all,
         forceApply: Bool,
         allowsTerminalRecovery: Bool = false
     ) {
         self.token = token
         self.frame = frame
+        self.components = components
         self.forceApply = forceApply
         self.allowsTerminalRecovery = allowsTerminalRecovery
+    }
+
+    func writing(_ frame: CGRect, components: FrameMutationComponents) -> Self {
+        Self(
+            token: token,
+            frame: frame,
+            components: components,
+            forceApply: forceApply,
+            allowsTerminalRecovery: allowsTerminalRecovery
+        )
     }
 }
 
@@ -126,6 +212,12 @@ struct NativeFullscreenSlotProjection: Equatable {
     let visible: Bool
 }
 
+struct TabRailGeometryCommand: Equatable {
+    let key: TabRailKey
+    let tileFrame: CGRect
+    let visibleTileFrame: CGRect
+}
+
 // `frameChanges` imply active, restore-eligible windows for this pass.
 // `visibilityChanges` are reserved for explicit hide/show transitions.
 struct WorkspaceLayoutDiff {
@@ -134,6 +226,7 @@ struct WorkspaceLayoutDiff {
     var restoreChanges: [LayoutRestoreChange] = []
     var deferredHides: [LayoutDeferredHide] = []
     var nativeFullscreenSlots: [WindowToken: NativeFullscreenSlotProjection] = [:]
+    var tabRailGeometryCommands: [TabRailGeometryCommand] = []
 }
 
 struct WorkspaceSessionPatch {
@@ -168,7 +261,9 @@ struct WorkspaceLayoutPlan {
     var sessionPatch: WorkspaceSessionPatch
     var diff: WorkspaceLayoutDiff
     var niriRestorePlacements: [WindowToken: PersistedNiriPlacement] = [:]
+    var dwindleRestorePlacements: [WindowToken: PersistedDwindlePlacement] = [:]
     var animationDirectives: [AnimationDirective] = []
+    var dwindleAnimationTargetDisposition: DwindleAnimationTargetDisposition?
     var isAnimationTick = false
     var isActiveWorkspace = true
 }

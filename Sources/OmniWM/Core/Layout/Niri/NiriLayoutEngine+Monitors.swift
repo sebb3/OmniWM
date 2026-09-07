@@ -84,40 +84,12 @@ extension NiriLayoutEngine {
         monitorForWorkspace(workspaceId)?.refreshRate ?? 60.0
     }
 
-    func effectiveVisibleContainerCount(for monitorId: Monitor.ID) -> Int {
-        effectiveSettings(for: monitorId).visibleContainerCount
-    }
-
     func effectiveVisibleContainerCount(in workspaceId: WorkspaceDescriptor.ID) -> Int {
         effectiveSettings(in: workspaceId).visibleContainerCount
     }
 
-    func effectiveCenterFocusedColumn(for monitorId: Monitor.ID) -> CenterFocusedColumn {
-        effectiveSettings(for: monitorId).centerFocusedColumn
-    }
-
-    func effectiveCenterFocusedColumn(in workspaceId: WorkspaceDescriptor.ID) -> CenterFocusedColumn {
-        effectiveSettings(in: workspaceId).centerFocusedColumn
-    }
-
-    func effectiveAlwaysCenterSingleColumn(for monitorId: Monitor.ID) -> Bool {
-        effectiveSettings(for: monitorId).alwaysCenterSingleColumn
-    }
-
-    func effectiveAlwaysCenterSingleColumn(in workspaceId: WorkspaceDescriptor.ID) -> Bool {
-        effectiveSettings(in: workspaceId).alwaysCenterSingleColumn
-    }
-
-    func effectiveSingleWindowFit(for monitorId: Monitor.ID) -> SingleWindowFit {
-        effectiveSettings(for: monitorId).singleWindowFit
-    }
-
     func effectiveSingleWindowFit(in workspaceId: WorkspaceDescriptor.ID) -> SingleWindowFit {
         effectiveSettings(in: workspaceId).singleWindowFit
-    }
-
-    func effectiveInfiniteLoop(for monitorId: Monitor.ID) -> Bool {
-        effectiveSettings(for: monitorId).infiniteLoop
     }
 
     func effectiveInfiniteLoop(in workspaceId: WorkspaceDescriptor.ID) -> Bool {
@@ -190,15 +162,44 @@ extension NiriLayoutEngine {
         _ workspaceId: WorkspaceDescriptor.ID,
         to targetMonitor: NiriMonitor
     ) {
-        let root = ensureRoot(for: workspaceId)
+        let state = ensureState(for: workspaceId)
+        let root = state.root
         if let existing = targetMonitor.workspaceRoots[workspaceId], existing === root {
             return
         }
+        if let previousMonitorId = state.attachedMonitorId, previousMonitorId != targetMonitor.id {
+            rederiveAutomaticContainerSpans(in: root, for: targetMonitor)
+        }
+        state.attachedMonitorId = targetMonitor.id
         for column in root.columns {
             column.invalidateCachedPrimarySpan(orientation: .horizontal)
             column.invalidateCachedPrimarySpan(orientation: .vertical)
         }
         targetMonitor.workspaceRoots[workspaceId] = root
+    }
+
+    private func rederiveAutomaticContainerSpans(in root: NiriRoot, for monitor: NiriMonitor) {
+        guard defaultContainerPrimarySpan == nil else { return }
+        let reset = resolvedContainerResetPrimarySpan(for: monitor.id)
+        switch monitor.orientation {
+        case .horizontal:
+            for column in root.columns
+                where !column.isFullWidth && !column.hasManualSingleWindowWidthOverride
+            {
+                column.width = .proportion(reset.proportion)
+                column.presetWidthIdx = reset.presetWidthIdx
+                column.savedWidth = nil
+                column.widthAnimation = nil
+                column.targetWidth = nil
+            }
+        case .vertical:
+            for column in root.columns
+                where !column.isFullHeight && !column.hasManualSingleWindowHeightOverride
+            {
+                column.height = .proportion(reset.proportion)
+                column.savedHeight = nil
+            }
+        }
     }
 
     private func pruneStaleWorkspaceRootCopies(

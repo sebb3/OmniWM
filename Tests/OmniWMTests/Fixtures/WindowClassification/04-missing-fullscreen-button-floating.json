@@ -19,6 +19,18 @@
         "bundleId": "com.example.nofullscreen",
         "attributeFetchSucceeded": true
       },
+      "windowServer": {
+        "id": 4,
+        "pid": 1000,
+        "level": 0,
+        "frameX": 0,
+        "frameY": 0,
+        "frameWidth": 720,
+        "frameHeight": 540,
+        "tags": 0,
+        "attributes": 0,
+        "parentId": 0
+      },
       "appFullscreen": false
     },
     "observedDecision": {
@@ -38,6 +50,5 @@
       "missingFullscreenButton"
     ],
     "layoutDecisionKind": "fallbackLayout"
-  },
-  "expectedPolicy": "full"
+  }
 }

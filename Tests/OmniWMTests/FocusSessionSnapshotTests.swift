@@ -5,6 +5,74 @@
 import XCTest
 
 final class FocusSessionSnapshotTests: XCTestCase {
+    func testSelectedManagedWindowRemainsIndependentFromNativeFocusOwner() {
+        let selected = WindowToken(pid: 1, windowId: 10)
+        let external = WindowToken(pid: 1, windowId: 11)
+        var focus = FocusSessionSnapshot(
+            selectedManagedToken: selected,
+            nativeFocusOwner: .external(pid: external.pid, windowId: external.windowId)
+        )
+
+        XCTAssertEqual(focus.selectedManagedToken, selected)
+        XCTAssertEqual(focus.nativeFocusOwner.externalToken, external)
+        XCTAssertNil(focus.nativeFocusOwner.managedToken)
+
+        focus.nativeFocusOwner = .ownedSurface
+
+        XCTAssertEqual(focus.selectedManagedToken, selected)
+        XCTAssertEqual(focus.nativeFocusOwner, .ownedSurface)
+    }
+
+    func testExternalFocusIdentityRequiresExactChildForParentContinuity() {
+        let parent = WindowToken(pid: 1, windowId: 10)
+
+        XCTAssertNil(
+            ExternalFocusIdentity(
+                pid: parent.pid,
+                windowId: nil,
+                verifiedManagedParentToken: parent
+            ).verifiedManagedParentToken
+        )
+        XCTAssertNil(
+            ExternalFocusIdentity(
+                pid: nil,
+                windowId: 11,
+                verifiedManagedParentToken: parent
+            ).verifiedManagedParentToken
+        )
+
+        let exact = ExternalFocusIdentity(
+            pid: parent.pid,
+            windowId: 11,
+            verifiedManagedParentToken: parent
+        )
+        XCTAssertEqual(exact.exactToken, WindowToken(pid: parent.pid, windowId: 11))
+        XCTAssertEqual(exact.verifiedManagedParentToken, parent)
+    }
+
+    func testExternalFocusIdentityClearsParentAcrossRemovalAndRekey() {
+        let parent = WindowToken(pid: 2, windowId: 20)
+        let replacement = WindowToken(pid: 2, windowId: 21)
+        let child = WindowToken(pid: 2, windowId: 22)
+        let identity = ExternalFocusIdentity(
+            pid: child.pid,
+            windowId: child.windowId,
+            verifiedManagedParentToken: parent
+        )
+
+        let rekeyed = identity.rekeying(from: parent, to: replacement)
+        XCTAssertEqual(rekeyed.exactToken, child)
+        XCTAssertNil(rekeyed.verifiedManagedParentToken)
+
+        let removed = identity.removingManagedToken(parent)
+        XCTAssertEqual(removed.exactToken, child)
+        XCTAssertNil(removed.verifiedManagedParentToken)
+
+        let removedChild = identity.removingManagedToken(child)
+        XCTAssertEqual(removedChild.exactToken, child)
+        XCTAssertNil(removedChild.verifiedManagedParentToken)
+    }
+
     func testRecordTiledFocusReportsOnlyHistoryChangesAndMaintainsBound() {
         let newest = WindowToken(pid: 1, windowId: 1)
         let second = WindowToken(pid: 1, windowId: 2)

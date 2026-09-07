@@ -1,0 +1,52 @@
+{
+  "observation": {
+    "tokenPid": 1000,
+    "tokenWindowId": 15,
+    "appName": "Finder",
+    "bundleId": "com.apple.finder",
+    "rulesRevision": 1,
+    "input": {
+      "appName": "Finder",
+      "ax": {
+        "role": "AXWindow",
+        "subrole": "Quick Look",
+        "title": "Quick Look",
+        "hasCloseButton": true,
+        "hasFullscreenButton": false,
+        "hasZoomButton": false,
+        "hasMinimizeButton": false,
+        "appPolicy": "regular",
+        "bundleId": "com.apple.finder",
+        "attributeFetchSucceeded": true,
+        "isMain": false,
+        "isModal": false
+      },
+      "windowServer": {
+        "id": 15,
+        "pid": 1000,
+        "level": 3,
+        "frameX": 0,
+        "frameY": 0,
+        "frameWidth": 720,
+        "frameHeight": 540,
+        "tags": 0,
+        "attributes": 0,
+        "parentId": 0
+      },
+      "appFullscreen": false
+    },
+    "observedDecision": {
+      "disposition": "floating",
+      "source": "builtInRule(finderQuickLook)",
+      "heuristicReasons": [],
+      "layoutDecisionKind": "explicitLayout"
+    }
+  },
+  "rules": [],
+  "expectedDecision": {
+    "disposition": "floating",
+    "source": "builtInRule(finderQuickLook)",
+    "heuristicReasons": [],
+    "layoutDecisionKind": "explicitLayout"
+  }
+}

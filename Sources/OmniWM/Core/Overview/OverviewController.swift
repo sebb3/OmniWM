@@ -4,6 +4,7 @@
 import AppKit
 import Carbon
 import Foundation
+import QuartzCore
 import ScreenCaptureKit
 
 enum OverviewHotkeyDisposition: Equatable {
@@ -39,6 +40,13 @@ struct OverviewEnvironment {
 
     var notificationCenter: NotificationCenter = .default
     var selectionDismissDelayNanoseconds: UInt64 = 50_000_000
+    var schedulePostCloseHandoff: (@escaping @MainActor () -> Void) -> Void = { handoff in
+        Task { @MainActor in
+            await Task.yield()
+            handoff()
+        }
+    }
+
     var windowTitle: (WindowState) -> String? = { entry in
         AXWindowService.titlePreferFast(windowId: UInt32(entry.windowId))
     }
@@ -52,23 +60,49 @@ struct OverviewEnvironment {
 }
 
 struct DwindleOverviewWorkspaceProjection {
+    let eligibleTokens: Set<WindowToken>
     let inactiveTokens: Set<WindowToken>
     let frames: [WindowToken: CGRect]
     let groupCountByToken: [WindowToken: Int]
 
-    init(engine: DwindleLayoutEngine, workspaceId: WorkspaceDescriptor.ID) {
-        inactiveTokens = engine.inactiveGroupTokens(in: workspaceId)
-        frames = engine.currentFrames(in: workspaceId)
+    init(
+        engine: DwindleLayoutEngine,
+        workspaceId: WorkspaceDescriptor.ID,
+        eligibleTokens: Set<WindowToken>
+    ) {
+        self.eligibleTokens = eligibleTokens
+
+        var inactiveTokens = engine.inactiveGroupTokens(in: workspaceId)
+        var frames = engine.currentFrames(in: workspaceId)
 
         var groupCounts: [WindowToken: Int] = [:]
         for snapshot in engine.groupedTileSnapshots(in: workspaceId) {
-            groupCounts[snapshot.activeToken] = snapshot.members.count
+            let eligibleMembers = snapshot.members.filter { eligibleTokens.contains($0.token) }
+            let representative = eligibleMembers.first { $0.token == snapshot.activeToken }
+                ?? eligibleMembers.first
+            let frame = frames[snapshot.activeToken] ?? snapshot.contentFrame ?? snapshot.tileFrame
+
+            inactiveTokens.formUnion(snapshot.members.map(\.token))
+            for member in snapshot.members {
+                frames.removeValue(forKey: member.token)
+            }
+
+            guard let representative else { continue }
+            inactiveTokens.remove(representative.token)
+            if let frame {
+                frames[representative.token] = frame
+            }
+            if eligibleMembers.count > 1 {
+                groupCounts[representative.token] = eligibleMembers.count
+            }
         }
+        self.inactiveTokens = inactiveTokens
+        self.frames = frames
         groupCountByToken = groupCounts
     }
 
     func includes(_ token: WindowToken) -> Bool {
-        !inactiveTokens.contains(token)
+        eligibleTokens.contains(token) && !inactiveTokens.contains(token)
     }
 }
 
@@ -95,6 +129,16 @@ final class OverviewController {
                 false
             }
         }
+    }
+
+    private enum PostCloseHandoff {
+        case activateApplication(pid_t)
+        case focusWindow(WindowHandle)
+    }
+
+    private struct PostCloseHandoffValidity {
+        let intentIssuanceWatermark: IntentID
+        let focusEpochSeq: UInt64
     }
 
     private struct OverviewSnapshot {
@@ -149,6 +193,7 @@ final class OverviewController {
     private(set) var activeInteractionMonitorId: Monitor.ID?
 
     private var windows: [OverviewWindow] = []
+    private var windowsByDisplayId: [CGDirectDisplayID: OverviewWindow] = [:]
     private var animator: OverviewAnimator?
     private var thumbnailCache: [Int: CGImage] = [:]
     private var thumbnailCaptureTask: Task<Void, Never>?
@@ -162,9 +207,14 @@ final class OverviewController {
     private var keyEventMonitor: Any?
     private var flagsEventMonitor: Any?
     private var applicationDidResignObserver: NSObjectProtocol?
+    private var screenParametersObserver: NSObjectProtocol?
     private var previousFrontmostApplicationPID: pid_t?
     private var pendingDismissReason: OverviewDismissReason = .cancel
     private var pendingFocusTargetWindow: WindowHandle?
+    private var pendingPostCloseHandoffValidity: PostCloseHandoffValidity?
+    private var postCloseHandoffGeneration: UInt64 = 0
+    private var selectionDismissTask: Task<Void, Never>?
+    private var selectionDismissGeneration: UInt64 = 0
 
     private var inputHandler: OverviewInputHandler?
     private var dragGhostController: DragGhostController?
@@ -184,7 +234,9 @@ final class OverviewController {
         wmController: WMController,
         motionPolicy: MotionPolicy,
         environment: OverviewEnvironment = .init(),
-        ownedWindowRegistry: OwnedWindowRegistry = .shared
+        ownedWindowRegistry: OwnedWindowRegistry = .shared,
+        displayLinkFactory: @escaping OverviewAnimator.DisplayLinkFactory = OverviewAnimator.makeLiveDisplayLink,
+        animationMediaTimeProvider: @escaping OverviewAnimator.MediaTimeProvider = CACurrentMediaTime
     ) {
         let appearance = OverviewAppearance(settings: wmController.settings)
         let configuredScale = OverviewLayoutCalculator.clampedScale(CGFloat(wmController.settings.overviewZoom))
@@ -196,7 +248,11 @@ final class OverviewController {
         scale = configuredScale
         self.appearance = appearance
         renderPalette = appearance.renderPalette
-        animator = OverviewAnimator(controller: self)
+        animator = OverviewAnimator(
+            controller: self,
+            displayLinkFactory: displayLinkFactory,
+            mediaTimeProvider: animationMediaTimeProvider
+        )
         inputHandler = OverviewInputHandler(controller: self)
     }
 
@@ -208,7 +264,7 @@ final class OverviewController {
              .open:
             dismissToSelection(animated: true)
         case .closing:
-            break
+            reverseClosingTransition()
         }
     }
 
@@ -250,14 +306,7 @@ final class OverviewController {
 
         switch command {
         case .toggleOverview:
-            switch state {
-            case .opening,
-                 .open:
-                dismissToSelection(animated: true)
-            case .closed,
-                 .closing:
-                break
-            }
+            toggle()
             return .handled
         case let .focus(direction):
             guard case .open = state, dragSession == nil else { return .handled }
@@ -404,12 +453,6 @@ final class OverviewController {
                 containing: selectedHandle,
                 direction: .down
             )
-        case let .moveWindowToWorkspaceOnMonitor(workspaceIndex, monitorDirection):
-            return wmController.workspaceNavigationHandler.moveWindowToWorkspaceOnMonitor(
-                handle: selectedHandle,
-                workspaceIndex: workspaceIndex,
-                monitorDirection: monitorDirection
-            )
         default:
             return nil
         }
@@ -434,8 +477,7 @@ final class OverviewController {
              .moveWindowToWorkspaceDown,
              .moveColumnToWorkspace,
              .moveColumnToWorkspaceUp,
-             .moveColumnToWorkspaceDown,
-             .moveWindowToWorkspaceOnMonitor:
+             .moveColumnToWorkspaceDown:
             true
         default:
             false
@@ -578,18 +620,17 @@ final class OverviewController {
         guard case .closed = state else { return }
         guard wmController != nil else { return }
 
+        invalidateSelectionDismissal()
+        advancePostCloseHandoffGeneration()
+        pendingPostCloseHandoffValidity = nil
+
         prepareOpenState()
         createWindows()
         beginOwnedSession()
         startThumbnailCapture()
 
-        let monitor = animationMonitor()
-        let displayId = monitor?.displayId ?? CGMainDisplayID()
-        let refreshRate = detectRefreshRate(for: displayId)
-
         if motionPolicy.animationsEnabled {
-            state = .opening(progress: 0)
-            animator?.startOpenAnimation(displayId: displayId, refreshRate: refreshRate)
+            state = .opening
         } else {
             state = .open
             animator?.cancelAnimation()
@@ -599,6 +640,29 @@ final class OverviewController {
         showWindows()
         activateOwnedSession()
         primaryOverviewWindow()?.show(asKeyWindow: true)
+        if motionPolicy.animationsEnabled {
+            animator?.startOpenAnimation(displayIds: windows.map(\.displayId))
+        }
+    }
+
+    private func reverseClosingTransition() {
+        guard case .closing = state else { return }
+
+        invalidateSelectionDismissal()
+        advancePostCloseHandoffGeneration()
+        pendingDismissReason = .cancel
+        pendingFocusTargetWindow = nil
+        pendingPostCloseHandoffValidity = nil
+        state = motionPolicy.animationsEnabled ? .opening : .open
+        updateWindowDisplays()
+        activateOwnedSession()
+        primaryOverviewWindow()?.show(asKeyWindow: true)
+
+        if motionPolicy.animationsEnabled {
+            animator?.startOpenAnimation(displayIds: windows.map(\.displayId))
+        } else {
+            animator?.cancelAnimation()
+        }
     }
 
     func prepareOpenState() {
@@ -611,7 +675,7 @@ final class OverviewController {
         renderPalette = appearance.renderPalette
         buildOverviewSnapshot()
 
-        if let focusedHandle = wmController.workspaceManager.focusedHandle,
+        if let focusedHandle = wmController.workspaceManager.selectedManagedHandle,
            overviewSnapshot.windows[focusedHandle] != nil
         {
             selectedWindowHandle = focusedHandle
@@ -664,6 +728,7 @@ final class OverviewController {
             if reason == .externalDeactivation {
                 pendingDismissReason = .externalDeactivation
                 pendingFocusTargetWindow = nil
+                pendingPostCloseHandoffValidity = nil
             }
             return
         case .opening,
@@ -671,6 +736,7 @@ final class OverviewController {
             break
         }
 
+        invalidateSelectionDismissal()
         if hasActiveDragSession {
             cancelDrag()
         }
@@ -678,27 +744,18 @@ final class OverviewController {
         let resolvedTargetWindow = reason == .selection ? targetWindow : nil
         pendingDismissReason = reason
         pendingFocusTargetWindow = resolvedTargetWindow
+        pendingPostCloseHandoffValidity = currentPostCloseHandoffValidity()
 
-        let monitor = animationMonitor()
-        let displayId = monitor?.displayId ?? CGMainDisplayID()
-        let refreshRate = detectRefreshRate(for: displayId)
-
-        state = .closing(targetWindow: resolvedTargetWindow, progress: 0)
+        state = .closing(targetWindow: resolvedTargetWindow)
 
         if animated && motionPolicy.animationsEnabled {
             animator?.startCloseAnimation(
                 targetWindow: resolvedTargetWindow,
-                displayId: displayId,
-                refreshRate: refreshRate
+                displayIds: windows.map(\.displayId)
             )
         } else {
             completeCloseTransition(targetWindow: resolvedTargetWindow)
         }
-    }
-
-    private func buildOverviewState() {
-        buildOverviewSnapshot()
-        rebuildProjectedLayouts()
     }
 
     private func buildOverviewSnapshot() {
@@ -722,8 +779,7 @@ final class OverviewController {
                 let dwindleProjection = dwindleOverviewProjection(for: ws.id)
 
                 for entry in workspaceManager.entries(in: ws.id) {
-                    guard entry.layoutReason == .standard,
-                          !workspaceManager.isAppHidden(pid: entry.pid),
+                    guard isOverviewEligible(entry, workspaceManager: workspaceManager),
                           dwindleProjection?.includes(entry.token) != false,
                           let handle = workspaceManager.handle(for: entry.token)
                     else {
@@ -798,11 +854,7 @@ final class OverviewController {
                     overviewSnapshot.niriSnapshotsByWorkspace.removeValue(forKey: workspaceId)
                 }
             case .dwindle:
-                if let engine = wmController.dwindleEngine {
-                    let projection = DwindleOverviewWorkspaceProjection(
-                        engine: engine,
-                        workspaceId: workspaceId
-                    )
+                if let projection = dwindleOverviewProjection(for: workspaceId) {
                     dwindleProjections[workspaceId] = projection
                     engineFrames.merge(projection.frames) { _, new in new }
                 }
@@ -877,7 +929,16 @@ final class OverviewController {
         else {
             return nil
         }
-        return DwindleOverviewWorkspaceProjection(engine: engine, workspaceId: workspaceId)
+        let eligibleTokens = Set(
+            wmController.workspaceManager.entries(in: workspaceId).lazy
+                .filter { self.isOverviewEligible($0, workspaceManager: wmController.workspaceManager) }
+                .map(\.token)
+        )
+        return DwindleOverviewWorkspaceProjection(
+            engine: engine,
+            workspaceId: workspaceId,
+            eligibleTokens: eligibleTokens
+        )
     }
 
     private func reconcileDwindleOverviewProjection(
@@ -889,8 +950,7 @@ final class OverviewController {
         var desiredHandles: Set<WindowHandle> = []
 
         for entry in workspaceManager.entries(in: workspaceId) {
-            guard entry.layoutReason == .standard,
-                  !workspaceManager.isAppHidden(pid: entry.pid),
+            guard isOverviewEligible(entry, workspaceManager: workspaceManager),
                   projection.includes(entry.token),
                   let handle = workspaceManager.handle(for: entry.token)
             else {
@@ -944,8 +1004,7 @@ final class OverviewController {
         var desiredHandles: Set<WindowHandle> = []
 
         for entry in workspaceManager.entries(in: workspaceId) {
-            guard entry.layoutReason == .standard,
-                  !workspaceManager.isAppHidden(pid: entry.pid),
+            guard isOverviewEligible(entry, workspaceManager: workspaceManager),
                   let handle = workspaceManager.handle(for: entry.token)
             else {
                 continue
@@ -1006,11 +1065,19 @@ final class OverviewController {
         guard let workspaceManager = wmController?.workspaceManager,
               workspaceManager.handle(for: handle.id) === handle,
               let entry = workspaceManager.entry(for: handle),
-              !workspaceManager.isAppHidden(pid: entry.pid)
+              isOverviewEligible(entry, workspaceManager: workspaceManager)
         else {
             return nil
         }
         return entry
+    }
+
+    private func isOverviewEligible(
+        _ entry: WindowState,
+        workspaceManager: WorkspaceManager
+    ) -> Bool {
+        entry.layoutReason == .standard
+            && !workspaceManager.isAppHidden(pid: entry.pid)
     }
 
     private func cachedNiriSnapshot(
@@ -1018,9 +1085,13 @@ final class OverviewController {
     ) -> NiriOverviewWorkspaceSnapshot? {
         let columns = snapshot.columns.compactMap { column -> NiriOverviewColumnSnapshot? in
             let tiles = column.tiles.filter { tile in
-                guard let workspaceManager = wmController?.workspaceManager else { return false }
-                return workspaceManager.workspace(for: tile.token) == snapshot.workspaceId
-                    && !workspaceManager.isAppHidden(tile.token)
+                guard let workspaceManager = wmController?.workspaceManager,
+                      let entry = workspaceManager.entry(for: tile.token)
+                else {
+                    return false
+                }
+                return entry.workspaceId == snapshot.workspaceId
+                    && isOverviewEligible(entry, workspaceManager: workspaceManager)
             }
             guard !tiles.isEmpty else { return nil }
             return NiriOverviewColumnSnapshot(
@@ -1185,6 +1256,7 @@ final class OverviewController {
             }
 
             windows.append(window)
+            windowsByDisplayId[monitor.displayId] = window
         }
     }
 
@@ -1232,16 +1304,7 @@ final class OverviewController {
             window.close()
         }
         windows.removeAll()
-    }
-
-    func isPointInside(_ point: CGPoint) -> Bool {
-        guard state.isOpen else { return false }
-        for window in windows {
-            if window.frame.contains(point) {
-                return true
-            }
-        }
-        return false
+        windowsByDisplayId.removeAll(keepingCapacity: true)
     }
 
     private func updateWindowDisplays(
@@ -1387,9 +1450,17 @@ final class OverviewController {
         NSScreen.screens.first(where: { $0.displayId == displayId })?.backingScaleFactor ?? 1.0
     }
 
-    func updateAnimationProgress(_ progress: Double, state: OverviewState) {
-        self.state = state
-        updateWindowDisplays()
+    func updateAnimationProgress(
+        _ progress: Double,
+        on displayId: CGDirectDisplayID,
+        generation: UInt64,
+        sequence: UInt64
+    ) {
+        windowsByDisplayId[displayId]?.updateAnimationProgress(
+            progress,
+            generation: generation,
+            sequence: sequence
+        )
     }
 
     func onAnimationComplete(state: OverviewState) {
@@ -1401,32 +1472,88 @@ final class OverviewController {
         let dismissReason = pendingDismissReason
         let previousFrontmostApplicationPID = previousFrontmostApplicationPID
         let requestedTargetWindow = pendingFocusTargetWindow ?? targetWindow
+        let handoffValidity = pendingPostCloseHandoffValidity ?? currentPostCloseHandoffValidity()
         let resolvedTargetWindow = requestedTargetWindow.flatMap { handle in
-            wmController?.workspaceManager.entry(for: handle) == nil ? nil : handle
+            wmController?.workspaceManager.handle(for: handle.id) === handle ? handle : nil
         }
+        let handoff: PostCloseHandoff?
+        if (dismissReason.shouldRestorePreviousApplication
+            || dismissReason == .selection && resolvedTargetWindow == nil),
+            let previousFrontmostApplicationPID
+        {
+            handoff = .activateApplication(previousFrontmostApplicationPID)
+        } else if dismissReason == .selection,
+                  let resolvedTargetWindow
+        {
+            handoff = .focusWindow(resolvedTargetWindow)
+        } else {
+            handoff = nil
+        }
+        let handoffGeneration = advancePostCloseHandoffGeneration()
 
         animator?.cancelAnimation()
         state = .closed
         cleanup()
         endOwnedSession()
-
-        if (dismissReason
-            .shouldRestorePreviousApplication || dismissReason == .selection && resolvedTargetWindow == nil),
-            let previousFrontmostApplicationPID
-        {
-            environment.activateApplication(previousFrontmostApplicationPID)
-        } else if dismissReason == .selection,
-                  let resolvedTargetWindow
-        {
-            focusTargetWindow(resolvedTargetWindow)
-        }
-
         updateWindowDisplays()
+
+        if let handoff, let handoffValidity {
+            schedulePostCloseHandoff(
+                handoff,
+                validity: handoffValidity,
+                generation: handoffGeneration
+            )
+        }
+    }
+
+    @discardableResult
+    private func advancePostCloseHandoffGeneration() -> UInt64 {
+        postCloseHandoffGeneration &+= 1
+        return postCloseHandoffGeneration
+    }
+
+    private func currentPostCloseHandoffValidity() -> PostCloseHandoffValidity? {
+        guard let wmController else { return nil }
+        return PostCloseHandoffValidity(
+            intentIssuanceWatermark: wmController.intentLedger.issuanceWatermark(),
+            focusEpochSeq: wmController.workspaceManager.worldSeq
+        )
+    }
+
+    private func schedulePostCloseHandoff(
+        _ handoff: PostCloseHandoff,
+        validity: PostCloseHandoffValidity,
+        generation: UInt64
+    ) {
+        guard let wmController else { return }
+        environment.schedulePostCloseHandoff { [weak self, weak wmController] in
+            guard let self,
+                  let wmController,
+                  self.postCloseHandoffGeneration == generation,
+                  case .closed = self.state,
+                  wmController.intentLedger.issuanceWatermark() == validity.intentIssuanceWatermark,
+                  wmController.workspaceManager.isSeqEpochCurrent(validity.focusEpochSeq, domains: .focus)
+            else {
+                return
+            }
+
+            switch handoff {
+            case let .activateApplication(pid):
+                self.environment.activateApplication(pid)
+            case let .focusWindow(handle):
+                guard wmController.workspaceManager.handle(for: handle.id) === handle else { return }
+                self.focusTargetWindow(handle)
+            }
+        }
     }
 
     func focusTargetWindow(_ handle: WindowHandle) {
         guard let wmController else { return }
-        guard let entry = wmController.workspaceManager.entry(for: handle) else { return }
+        guard wmController.workspaceManager.handle(for: handle.id) === handle,
+              let entry = wmController.workspaceManager.entry(for: handle)
+        else {
+            return
+        }
 
         onActivateWindow?(handle, entry.workspaceId)
     }
@@ -1436,11 +1563,46 @@ final class OverviewController {
         setSelectedWindowHandle(handle)
         updateWindowDisplays()
 
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: self.environment.selectionDismissDelayNanoseconds)
-            guard self.state.isOpen else { return }
-            self.dismissToSelection(animated: true)
+        invalidateSelectionDismissal()
+        let generation = selectionDismissGeneration
+        let delayNanoseconds = environment.selectionDismissDelayNanoseconds
+        selectionDismissTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            } catch {
+                return
+            }
+            guard let self,
+                  self.selectionDismissGeneration == generation
+            else {
+                return
+            }
+            self.selectionDismissTask = nil
+            guard case .open = self.state,
+                  self.selectedWindowHandle === handle,
+                  self.wmController?.workspaceManager.handle(for: handle.id) === handle,
+                  self.overviewSnapshot.windows[handle] != nil
+            else {
+                return
+            }
+            self.dismiss(reason: .selection, targetWindow: handle, animated: true)
         }
+    }
+
+    private func invalidateSelectionDismissal() {
+        selectionDismissGeneration &+= 1
+        selectionDismissTask?.cancel()
+        selectionDismissTask = nil
+    }
+
+    func invalidateDeferredActionsForServiceStop() {
+        invalidateSelectionDismissal()
+        advancePostCloseHandoffGeneration()
+        pendingDismissReason = .externalDeactivation
+        pendingFocusTargetWindow = nil
+        pendingPostCloseHandoffValidity = nil
+        guard state.isOpen else { return }
+        completeCloseTransition(targetWindow: nil)
     }
 
     @discardableResult
@@ -1565,15 +1727,6 @@ final class OverviewController {
         closeWindow(selectedWindowHandle)
     }
 
-    func adjustScrollOffset(by delta: CGFloat) {
-        guard let monitorId = activeInteractionMonitorId
-            ?? wmController?.workspaceManager.monitors.first?.id
-        else {
-            return
-        }
-        adjustScrollOffset(by: delta, on: monitorId)
-    }
-
     func adjustScrollOffset(by delta: CGFloat, on monitorId: Monitor.ID) {
         activeInteractionMonitorId = monitorId
         mutateLayout(for: monitorId) { layout in
@@ -1618,8 +1771,10 @@ final class OverviewController {
         capturePreviousFrontmostApplication()
         installEventMonitors()
         installApplicationDidResignObserver()
+        installScreenParametersObserver()
         pendingDismissReason = .cancel
         pendingFocusTargetWindow = nil
+        pendingPostCloseHandoffValidity = nil
     }
 
     func activateOwnedSession() {
@@ -1632,6 +1787,7 @@ final class OverviewController {
     }
 
     private func cleanup() {
+        invalidateSelectionDismissal()
         thumbnailCaptureTask?.cancel()
         thumbnailCaptureTask = nil
         thumbnailCache.removeAll()
@@ -1713,29 +1869,39 @@ final class OverviewController {
         }
     }
 
+    private func installScreenParametersObserver() {
+        removeScreenParametersObserver()
+        screenParametersObserver = environment.notificationCenter.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleDisplayConfigurationChanged()
+            }
+        }
+    }
+
+    private func removeScreenParametersObserver() {
+        if let screenParametersObserver {
+            environment.notificationCenter.removeObserver(screenParametersObserver)
+            self.screenParametersObserver = nil
+        }
+    }
+
+    private func handleDisplayConfigurationChanged() {
+        guard state.isOpen else { return }
+        completeCloseTransition(targetWindow: nil)
+    }
+
     private func endOwnedSession() {
         removeEventMonitors()
         removeApplicationDidResignObserver()
+        removeScreenParametersObserver()
         previousFrontmostApplicationPID = nil
         pendingDismissReason = .cancel
         pendingFocusTargetWindow = nil
-    }
-
-    private func detectRefreshRate(for displayId: CGDirectDisplayID) -> Double {
-        if let mode = CGDisplayCopyDisplayMode(displayId) {
-            return mode.refreshRate > 0 ? mode.refreshRate : 60.0
-        }
-        return 60.0
-    }
-
-    private func animationMonitor() -> Monitor? {
-        guard let wmController else { return nil }
-        if let activeInteractionMonitorId,
-           let monitor = wmController.workspaceManager.monitor(byId: activeInteractionMonitorId)
-        {
-            return monitor
-        }
-        return wmController.workspaceManager.monitors.first
+        pendingPostCloseHandoffValidity = nil
     }
 
     private func canonicalLayout(preferredMonitorId: Monitor.ID? = nil) -> OverviewLayout? {

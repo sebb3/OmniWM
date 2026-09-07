@@ -11,23 +11,18 @@ enum WindowAdmissionPendingReason: String, Equatable {
     case windowServerEvidenceMissing = "window_server_evidence_missing"
     case degenerateGeometry = "degenerate_geometry"
 
-    var suppressesNonManagedFocusTarget: Bool {
-        self == .windowServerEvidenceMissing
+    var hasVerifiedExternalWindowIdentity: Bool {
+        self != .windowServerEvidenceMissing
     }
 }
 
 enum WindowAdmissionRejectionReason: String, Equatable {
     case invalidIdentity = "invalid_identity"
     case ownedWindow = "owned_window"
-    case policyIgnored = "policy_ignored"
-    case nonRenderableTransientSurface = "non_renderable_transient_surface"
+    case externalSurface = "external_surface"
     case quarantined = "quarantined"
     case retryExhausted = "retry_exhausted"
     case terminalFrameRefusal = "terminal_frame_refusal"
-
-    var suppressesNonManagedFocusTarget: Bool {
-        self == .nonRenderableTransientSurface
-    }
 }
 
 enum ActivationRetryReason: String, Equatable {
@@ -45,7 +40,7 @@ extension WindowDecision {
 
     @MainActor
     var admissionRejectionReason: WindowAdmissionRejectionReason {
-        isNonRenderableTransientSurfaceDecision ? .nonRenderableTransientSurface : .policyIgnored
+        .externalSurface
     }
 }
 
@@ -219,17 +214,30 @@ struct AdmissionRetryState {
     var attempt: Int
     var generation: UInt64
     var trigger: AdmissionRetryTrigger
+    var identityRebindSource: ManagedWindowIdentityRebindSource? = nil
     var focusedAdmissionContinuation: FocusedAdmissionRetryContinuation? = nil
     var exhausted: Bool
     var executionPhase: AdmissionRetryExecutionPhase = .waiting
     var identityRebindTargetDestroyed = false
+    var preparedSubscriptionRetainCount = 0
     var focusedAdmissionReplayExecutionOwner: UInt64? = nil
     var task: Task<Void, Never>?
 }
 
 enum AdmissionRetryExecutionPhase: Equatable {
     case waiting
+    case queued
     case running(UInt64)
+}
+
+struct ManagedReplacementFocusKey: Hashable, Equatable {
+    let pid: pid_t
+    let workspaceId: WorkspaceDescriptor.ID
+}
+
+struct ManagedWindowIdentityRebindSource {
+    let handle: WindowHandle
+    let requestOrder: UInt64
 }
 
 struct AdmissionRetrySchedule {
@@ -237,7 +245,9 @@ struct AdmissionRetrySchedule {
     let axRef: AXWindowRef?
     let reason: WindowAdmissionPendingReason
     let trigger: AdmissionRetryTrigger
+    var identityRebindSource: ManagedWindowIdentityRebindSource? = nil
     let focusedAdmissionContinuation: FocusedAdmissionRetryContinuation?
+    let preparedSubscriptionRetainCount: Int
 }
 
 struct DeferredReplacementProtection {
@@ -270,6 +280,8 @@ enum FullRescanIdentityResolution {
 
 enum ManagedWindowRetirementReason {
     case destroyed(shouldRecoverFocus: Bool, allowsPreferredRecoveryToken: Bool)
+    case authoritativeRescan
+    case decisionRejection
     case staleIncarnation
     case terminalFrameRefusal
 }
@@ -279,6 +291,7 @@ struct ManagedWindowRetirementPolicy {
     let allowsPreferredRecoveryToken: Bool
     let traceReason: String
     let removesIdentityAliases: Bool
+    let preservesLiveFocusAsExternal: Bool
 }
 
 struct WindowIdentityAliasGeneration {

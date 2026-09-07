@@ -5,8 +5,8 @@ import Foundation
 import OmniWMIPC
 
 enum CLICompletionGenerator {
-    private static let subscribeFlags = ["--all", "--no-send-initial"]
-    private static let watchFlags = ["--all", "--no-send-initial", "--exec"]
+    private static let subscribeFlags = ["--all", "--no-send-initial", "--reconnect"]
+    private static let watchFlags = ["--all", "--no-send-initial", "--reconnect", "--exec"]
 
     static func script(for shell: CLIShell) -> String {
         switch shell {
@@ -89,6 +89,13 @@ enum CLICompletionGenerator {
                 if [[ "$prev" != "--window" && "$prev" != "--pid" ]]; then
                   suggestions="\(shellWords(ruleApplyFlags))"
                 fi
+              fi
+              ;;
+            capture)
+              if (( CURRENT == 3 )); then
+                suggestions="\(shellWords(captureActionNames))"
+              elif (( CURRENT == 4 )) && [[ "${words[3]}" == "start" ]]; then
+                suggestions="\(shellWords(captureProfiles))"
               fi
               ;;
             subscribe)
@@ -230,6 +237,15 @@ enum CLICompletionGenerator {
               fi
               if [[ "${COMP_WORDS[2]}" == "apply" && "$prev" != "--window" && "$prev" != "--pid" ]]; then
                 __omniwmctl_compgen "\(shellWords(ruleApplyFlags))"
+                return 0
+              fi
+              ;;
+            capture)
+              if [[ ${COMP_CWORD} -eq 2 ]]; then
+                __omniwmctl_compgen "\(shellWords(captureActionNames))"
+                return 0
+              elif [[ ${COMP_CWORD} -eq 3 && "${COMP_WORDS[2]}" == "start" ]]; then
+                __omniwmctl_compgen "\(shellWords(captureProfiles))"
                 return 0
               fi
               ;;
@@ -386,6 +402,12 @@ enum CLICompletionGenerator {
         let ruleApplyLines = ruleApplyFlags.map { flag in
             "complete -c omniwmctl -f -n '__fish_seen_subcommand_from rule; and __fish_seen_subcommand_from apply' -a '\(flag)'"
         }
+        let captureActionLines = captureActionNames.map { action in
+            "complete -c omniwmctl -f -n '__fish_seen_subcommand_from capture; and not __fish_seen_subcommand_from \(shellWords(captureActionNames))' -a '\(action)'"
+        }
+        let captureProfileLines = captureProfiles.map { profile in
+            "complete -c omniwmctl -f -n '__fish_seen_subcommand_from capture; and __fish_seen_subcommand_from start; and not __fish_seen_subcommand_from \(shellWords(captureProfiles))' -a '\(profile)'"
+        }
         let subscribeLines = sortedUnique(subscriptionNames + subscribeFlags).map { token in
             "complete -c omniwmctl -f -n '__fish_seen_subcommand_from subscribe' -a '\(token)'"
         }
@@ -422,6 +444,8 @@ enum CLICompletionGenerator {
                 + ruleLines
                 + ruleDefinitionLines
                 + ruleApplyLines
+                + captureActionLines
+                + captureProfileLines
                 + subscribeLines
                 + watchLines
                 + workspaceLines
@@ -442,6 +466,7 @@ enum CLICompletionGenerator {
             "command",
             "query",
             "rule",
+            "capture",
             "workspace",
             "window",
             "subscribe",
@@ -467,6 +492,14 @@ enum CLICompletionGenerator {
 
     private static var ruleDefinitionFlags: [String] {
         IPCAutomationManifest.ruleDefinitionOptionDescriptors.map(\.flag)
+    }
+
+    private static var captureActionNames: [String] {
+        IPCAutomationManifest.captureActionDescriptors.map(\.name.rawValue)
+    }
+
+    private static var captureProfiles: [String] {
+        [IPCCaptureProfile.trace.rawValue, IPCCaptureProfile.performance.rawValue]
     }
 
     private static var workspaceActionNames: [String] {
@@ -583,6 +616,8 @@ enum CLICompletionGenerator {
             return ["horizontal", "vertical"]
         case .resizeOperation:
             return ["grow", "shrink"]
+        case .scratchpadIndex:
+            return IPCScratchpadSlots.range.map(String.init)
         case .workspaceNumber,
              .columnIndex,
              .windowIndex,

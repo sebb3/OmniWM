@@ -16,9 +16,15 @@ final class SettingsFilePersistence {
         let fileSize: UInt64
     }
 
-    private struct FileSnapshot {
-        let export: SettingsExport
+    private struct FileContents {
+        let data: Data
         let fingerprint: FileFingerprint
+    }
+
+    private enum BackupSlotState {
+        case absent
+        case matching
+        case occupied
     }
 
     private struct FileIdentity: Equatable {
@@ -31,11 +37,42 @@ final class SettingsFilePersistence {
         }
     }
 
+    private struct MigrationRewrite {
+        let data: Data
+        let backupURL: URL
+    }
+
+    private enum ExistingSettings {
+        case absent
+        case decoded(data: Data, result: SettingsTOMLDecodeResult)
+        case invalid(data: Data, reason: String)
+
+        var data: Data? {
+            switch self {
+            case .absent:
+                nil
+            case let .decoded(data, _),
+                 let .invalid(data, _):
+                data
+            }
+        }
+    }
+
     private static let nanosecondsPerSecond: Int64 = 1_000_000_000
 
     nonisolated static let defaultDirectoryURL = OmniWMStoragePaths.live.configDirectory
     nonisolated static let fileName = "settings.toml"
     nonisolated static let corruptFileName = "settings.toml.corrupt"
+    nonisolated static let secondaryCorruptFileName = "settings.toml.corrupt.1"
+    nonisolated static let corruptFileNames = [corruptFileName, secondaryCorruptFileName]
+    nonisolated static let preVersionOneFileName = "settings.toml.pre-v1"
+    nonisolated static let secondaryPreVersionOneFileName = "settings.toml.pre-v1.1"
+    nonisolated static let preVersionOneFileNames = [preVersionOneFileName, secondaryPreVersionOneFileName]
+    nonisolated static func migrationBackupFileNames(for targetVersion: Int) -> [String] {
+        let primary = "settings.toml.pre-v\(targetVersion)"
+        return [primary, "\(primary).1"]
+    }
+
     nonisolated static var fileURL: URL {
         defaultDirectoryURL.appendingPathComponent(fileName, isDirectory: false)
     }
@@ -53,8 +90,11 @@ final class SettingsFilePersistence {
     private var saveScheduled = false
     private var lastWrittenFingerprint: FileFingerprint?
     private var lastObservedFingerprint: FileFingerprint?
+    private var lastRejectedFingerprint: FileFingerprint?
     private var lastPersistedExport: SettingsExport?
-    private var onExternalChange: (@MainActor (SettingsExport) -> Void)?
+    private var writeBlockNotice: SettingsConfigNotice?
+    private var onExternalChange: (@MainActor (SettingsFileLoadOutcome) -> Void)?
+    private var onSaveNotice: (@MainActor (SettingsConfigNotice) -> Void)?
 
     init(
         directory: URL = SettingsFilePersistence.defaultDirectoryURL,
@@ -81,69 +121,204 @@ final class SettingsFilePersistence {
         }
     }
 
-    func setExternalChangeHandler(_ handler: @escaping @MainActor (SettingsExport) -> Void) {
+    var settingsWritesBlocked: Bool {
+        writeBlockNotice != nil
+    }
+
+    func setExternalChangeHandler(_ handler: @escaping @MainActor (SettingsFileLoadOutcome) -> Void) {
         onExternalChange = handler
     }
 
+    func setSaveNoticeHandler(_ handler: @escaping @MainActor (SettingsConfigNotice) -> Void) {
+        onSaveNotice = handler
+    }
+
     func load() -> SettingsExport {
-        var targetURL: URL?
+        loadOutcome().export ?? SettingsExport.defaults()
+    }
+
+    func loadOutcome() -> SettingsFileLoadOutcome {
         do {
             try ensureDirectoryExists()
-            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            let targetURL = try Self.settingsTarget(for: fileURL)
+            guard FileManager.default.fileExists(atPath: targetURL.path) else {
+                writeBlockNotice = nil
                 let defaults = SettingsExport.defaults()
-                save(defaults)
-                return defaults
+                let notice = try saveImmediately(defaults, to: targetURL)
+                return SettingsFileLoadOutcome(export: defaults, notice: notice)
             }
 
-            let resolvedTargetURL = try Self.settingsTarget(for: fileURL)
-            targetURL = resolvedTargetURL
-            let snapshot = try readSnapshot(at: resolvedTargetURL)
-            lastObservedFingerprint = snapshot.fingerprint
-            lastPersistedExport = snapshot.export
-            return snapshot.export
+            let contents = try readContents(at: targetURL)
+            return decodeContents(
+                contents,
+                at: targetURL,
+                fallback: SettingsExport.defaults(),
+                isInitialLoad: true
+            )
         } catch {
-            report("Failed to load \(fileURL.path): \(error.localizedDescription)")
-            let defaults = SettingsExport.defaults()
-            if let targetURL {
-                recoverCorruptFile(at: targetURL, with: defaults)
-            }
-            return defaults
+            let reason = SettingsTOMLCodec.diagnosticDescription(for: error)
+            let notice = SettingsConfigNotice.persistenceWriteBlocked(reason: reason)
+            writeBlockNotice = notice
+            report("Failed to load \(fileURL.path): \(reason)")
+            return SettingsFileLoadOutcome(
+                export: SettingsExport.defaults(),
+                notice: notice
+            )
         }
     }
 
     func save(_ export: SettingsExport) {
         do {
-            try saveImmediately(export)
+            if let notice = try saveImmediately(export) {
+                onSaveNotice?(notice)
+            }
         } catch {
             report("Failed to save \(fileURL.path): \(error.localizedDescription)")
         }
     }
 
-    func saveImmediately(_ export: SettingsExport) throws {
-        try ensureDirectoryExists()
-        let targetURL = try Self.settingsTarget(for: fileURL)
-        try saveImmediately(export, to: targetURL)
+    @discardableResult
+    func saveImmediately(_ export: SettingsExport) throws -> SettingsConfigNotice? {
+        do {
+            if let reason = writeBlockNotice?.blockingReason {
+                throw SettingsFilePersistenceError.writesBlocked(reason)
+            }
+            try ensureDirectoryExists()
+            let targetURL = try Self.settingsTarget(for: fileURL)
+            return try saveImmediately(export, to: targetURL)
+        } catch {
+            if writeBlockNotice == nil {
+                let reason = SettingsTOMLCodec.diagnosticDescription(for: error)
+                writeBlockNotice = .persistenceWriteBlocked(reason: reason)
+            }
+            if let writeBlockNotice {
+                onSaveNotice?(writeBlockNotice)
+            }
+            throw error
+        }
     }
 
-    private func saveImmediately(_ export: SettingsExport, to targetURL: URL) throws {
+    private func saveImmediately(_ export: SettingsExport, to targetURL: URL) throws -> SettingsConfigNotice? {
         let observedFingerprint = currentFingerprint()
         if let fingerprint = observedFingerprint,
            fingerprint == lastObservedFingerprint,
            export == lastPersistedExport
         {
             refreshSettingsFileWatcher(for: fingerprint)
-            return
+            return nil
         }
 
-        let previous = FileManager.default.fileExists(atPath: targetURL.path) ? try? Data(contentsOf: targetURL) : nil
-        let data = try SettingsTOMLCodec.encode(export, preservingUnknownKeysFrom: previous)
-        try data.write(to: targetURL, options: .atomic)
+        let existing = try inspectExistingSettings(at: targetURL)
+        if case let .decoded(data, result) = existing, let migration = result.migration {
+            return try rewriteMigration(
+                originalData: data,
+                decoded: result,
+                export: export,
+                migration: migration,
+                targetURL: targetURL
+            )
+        }
+        return try preserveAndPersist(export, over: existing, at: targetURL)
+    }
 
-        let fingerprint = currentFingerprint()
-        lastWrittenFingerprint = fingerprint
-        lastObservedFingerprint = fingerprint
-        lastPersistedExport = export
-        refreshSettingsFileWatcher(for: fingerprint)
+    private func inspectExistingSettings(at targetURL: URL) throws -> ExistingSettings {
+        guard let data = try existingData(at: targetURL) else { return .absent }
+        do {
+            return .decoded(data: data, result: try SettingsTOMLCodec.decodeForLoad(data))
+        } catch let error as SettingsTOMLCodecError {
+            guard case let .unsupportedSchemaVersion(found, supported) = error else {
+                return .invalid(data: data, reason: SettingsTOMLCodec.diagnosticDescription(for: error))
+            }
+            let notice = SettingsConfigNotice.unsupportedVersion(found: found, supported: supported)
+            writeBlockNotice = notice
+            report("Refusing to overwrite unsupported settings at \(fileURL.path): \(error.localizedDescription)")
+            throw error
+        } catch {
+            return .invalid(data: data, reason: SettingsTOMLCodec.diagnosticDescription(for: error))
+        }
+    }
+
+    private func rewriteMigration(
+        originalData: Data,
+        decoded: SettingsTOMLDecodeResult,
+        export: SettingsExport,
+        migration: SettingsMigrationReport,
+        targetURL: URL
+    ) throws -> SettingsConfigNotice {
+        var backupURL: URL?
+        do {
+            let rewrite = try prepareMigrationRewrite(
+                originalData: originalData,
+                decoded: decoded,
+                export: export,
+                migration: migration
+            )
+            backupURL = rewrite.backupURL
+            try persist(rewrite.data, at: targetURL, export: export)
+            reportMigration(migration, backupURL: rewrite.backupURL)
+            return .migrated(report: migration, backupURL: rewrite.backupURL)
+        } catch {
+            let reason = SettingsTOMLCodec.diagnosticDescription(for: error)
+            writeBlockNotice = .migrationWriteBlocked(
+                report: migration,
+                backupURL: backupURL,
+                reason: reason
+            )
+            report("Failed to preserve and upgrade \(fileURL.path); writes are blocked: \(reason)")
+            throw error
+        }
+    }
+
+    private func preserveAndPersist(
+        _ export: SettingsExport,
+        over existing: ExistingSettings,
+        at targetURL: URL
+    ) throws -> SettingsConfigNotice? {
+        do {
+            let data = try SettingsTOMLCodec.encode(export, preservingUnknownKeysFrom: existing.data)
+            try persist(data, at: targetURL, export: export)
+            return nil
+        } catch let error as SettingsTOMLCodecError {
+            switch error {
+            case .cannotSafelyPreservePreviousData:
+                guard case let .invalid(data, reason) = existing else {
+                    return try blockUnsafePreservation(error)
+                }
+                return try recoverInvalidDuringSave(data, reason: reason, export: export, targetURL: targetURL)
+            case .cannotSafelyPreserveArrayElement:
+                return try blockUnsafePreservation(error)
+            case .invalidSchemaVersion,
+                 .unsupportedSchemaVersion,
+                 .migrationInvariant:
+                throw error
+            }
+        }
+    }
+
+    private func blockUnsafePreservation(_ error: SettingsTOMLCodecError) throws -> SettingsConfigNotice? {
+        let reason = error.localizedDescription
+        writeBlockNotice = .persistenceWriteBlocked(reason: reason)
+        report("Refusing to overwrite \(fileURL.path); writes are blocked: \(reason)")
+        throw error
+    }
+
+    private func recoverInvalidDuringSave(
+        _ invalidData: Data,
+        reason: String,
+        export: SettingsExport,
+        targetURL: URL
+    ) throws -> SettingsConfigNotice {
+        do {
+            let backupURL = try recoverInvalidSettings(invalidData, at: targetURL, replacingWith: export)
+            report("Recovered invalid settings from \(fileURL.path) to \(backupURL.path): \(reason)")
+            return .recoveredInvalid(backupURL: backupURL, reason: reason)
+        } catch {
+            let recoveryReason = SettingsTOMLCodec.diagnosticDescription(for: error)
+            let combinedReason = "\(reason) Recovery failed: \(recoveryReason)"
+            writeBlockNotice = .persistenceWriteBlocked(reason: combinedReason)
+            report("Failed to recover invalid settings at \(fileURL.path): \(combinedReason)")
+            throw error
+        }
     }
 
     func scheduleSave(_ export: @autoclosure () -> SettingsExport) {
@@ -172,21 +347,175 @@ final class SettingsFilePersistence {
     }
 
     func reloadIfChanged() -> SettingsExport? {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            report("Ignoring external reload because \(fileURL.path) no longer exists.")
-            return nil
-        }
+        reloadOutcomeIfChanged()?.export
+    }
 
+    func reloadOutcomeIfChanged() -> SettingsFileLoadOutcome? {
         do {
             let targetURL = try Self.settingsTarget(for: fileURL)
-            let snapshot = try readSnapshot(at: targetURL)
-            lastObservedFingerprint = snapshot.fingerprint
-            lastPersistedExport = snapshot.export
-            return snapshot.export
+            guard FileManager.default.fileExists(atPath: targetURL.path) else {
+                report("Ignoring external reload because \(fileURL.path) no longer exists.")
+                return nil
+            }
+            let contents = try readContents(at: targetURL)
+            return decodeContents(
+                contents,
+                at: targetURL,
+                fallback: lastPersistedExport ?? SettingsExport.defaults(),
+                isInitialLoad: false
+            )
         } catch {
-            report("Ignoring invalid external settings edit at \(fileURL.path): \(error.localizedDescription)")
+            let reason = SettingsTOMLCodec.diagnosticDescription(for: error)
+            report("Ignoring invalid external settings edit at \(fileURL.path): \(reason)")
             return nil
         }
+    }
+
+    private func decodeContents(
+        _ contents: FileContents,
+        at targetURL: URL,
+        fallback: SettingsExport,
+        isInitialLoad: Bool
+    ) -> SettingsFileLoadOutcome {
+        do {
+            let result = try SettingsTOMLCodec.decodeForLoad(contents.data)
+            return applyDecodedContents(result, contents: contents, targetURL: targetURL)
+        } catch {
+            return applyRejectedContents(error, contents: contents, fallback: fallback, isInitialLoad: isInitialLoad)
+        }
+    }
+
+    private func applyDecodedContents(
+        _ result: SettingsTOMLDecodeResult,
+        contents: FileContents,
+        targetURL: URL
+    ) -> SettingsFileLoadOutcome {
+        guard let migration = result.migration else {
+            writeBlockNotice = nil
+            lastObservedFingerprint = contents.fingerprint
+            lastRejectedFingerprint = nil
+            lastPersistedExport = result.export
+            refreshSettingsFileWatcher(for: contents.fingerprint)
+            return SettingsFileLoadOutcome(export: result.export, notice: nil)
+        }
+        return rewriteMigratedContents(
+            result,
+            migration: migration,
+            contents: contents,
+            targetURL: targetURL
+        )
+    }
+
+    private func rewriteMigratedContents(
+        _ result: SettingsTOMLDecodeResult,
+        migration: SettingsMigrationReport,
+        contents: FileContents,
+        targetURL: URL
+    ) -> SettingsFileLoadOutcome {
+        var backupURL: URL?
+        do {
+            let rewrite = try prepareMigrationRewrite(
+                originalData: contents.data,
+                decoded: result,
+                export: result.export,
+                migration: migration
+            )
+            backupURL = rewrite.backupURL
+            try persist(rewrite.data, at: targetURL, export: result.export)
+            reportMigration(migration, backupURL: rewrite.backupURL)
+            return SettingsFileLoadOutcome(
+                export: result.export,
+                notice: .migrated(
+                    report: migration,
+                    backupURL: rewrite.backupURL
+                )
+            )
+        } catch {
+            let reason = SettingsTOMLCodec.diagnosticDescription(for: error)
+            let notice = SettingsConfigNotice.migrationWriteBlocked(
+                report: migration,
+                backupURL: backupURL,
+                reason: reason
+            )
+            writeBlockNotice = notice
+            lastObservedFingerprint = contents.fingerprint
+            lastPersistedExport = result.export
+            refreshSettingsFileWatcher(for: contents.fingerprint)
+            report(
+                "Applied migrated settings from \(fileURL.path) in memory, but left the file untouched and blocked writes: \(reason)"
+            )
+            for message in migration.messages {
+                reportNotice("Settings migration: \(message)")
+            }
+            return SettingsFileLoadOutcome(
+                export: result.export,
+                notice: notice
+            )
+        }
+    }
+
+    private func applyRejectedContents(
+        _ error: Error,
+        contents: FileContents,
+        fallback: SettingsExport,
+        isInitialLoad: Bool
+    ) -> SettingsFileLoadOutcome {
+        if let codecError = error as? SettingsTOMLCodecError,
+           case let .unsupportedSchemaVersion(found, supported) = codecError
+        {
+            return applyUnsupportedVersion(
+                found: found,
+                supported: supported,
+                contents: contents,
+                fallback: fallback,
+                isInitialLoad: isInitialLoad
+            )
+        }
+        let reason = SettingsTOMLCodec.diagnosticDescription(for: error)
+        writeBlockNotice = nil
+        lastRejectedFingerprint = contents.fingerprint
+        report("Ignoring invalid settings at \(fileURL.path): \(reason)")
+        return SettingsFileLoadOutcome(export: nil, notice: .invalidRejected(reason: reason))
+    }
+
+    private func applyUnsupportedVersion(
+        found: Int,
+        supported: Int,
+        contents: FileContents,
+        fallback: SettingsExport,
+        isInitialLoad: Bool
+    ) -> SettingsFileLoadOutcome {
+        let notice = SettingsConfigNotice.unsupportedVersion(found: found, supported: supported)
+        let reason = notice.blockingReason ?? "Unsupported settings schema."
+        writeBlockNotice = notice
+        lastObservedFingerprint = contents.fingerprint
+        lastRejectedFingerprint = nil
+        if lastPersistedExport == nil {
+            lastPersistedExport = fallback
+        }
+        refreshSettingsFileWatcher(for: contents.fingerprint)
+        report("Refusing unsupported settings at \(fileURL.path): \(reason) Writes are blocked.")
+        return SettingsFileLoadOutcome(export: isInitialLoad ? fallback : nil, notice: notice)
+    }
+
+    private func prepareMigrationRewrite(
+        originalData: Data,
+        decoded: SettingsTOMLDecodeResult,
+        export: SettingsExport,
+        migration: SettingsMigrationReport
+    ) throws -> MigrationRewrite {
+        guard let migratedData = decoded.migratedData else {
+            throw SettingsTOMLCodecError.migrationInvariant(
+                "Settings migration to schema version \(migration.toVersion) did not produce TOML data."
+            )
+        }
+        let data = try SettingsTOMLCodec.encode(export, preservingUnknownKeysFrom: migratedData)
+        let backupURL = try secureBackup(
+            originalData,
+            fileNames: Self.migrationBackupFileNames(for: migration.toVersion),
+            exhaustedError: .migrationBackupSlotsExhausted(targetVersion: migration.toVersion)
+        )
+        return MigrationRewrite(data: data, backupURL: backupURL)
     }
 
     private func startWatchers() {
@@ -233,7 +562,7 @@ final class SettingsFilePersistence {
         handlePossibleSettingsFileChange()
     }
 
-    private func handlePossibleSettingsFileChange() {
+    func handlePossibleSettingsFileChange() {
         let observedFingerprint = currentFingerprint()
         refreshSettingsFileWatcher(for: observedFingerprint)
 
@@ -243,8 +572,12 @@ final class SettingsFilePersistence {
         }
 
         guard observedFingerprint != lastObservedFingerprint else { return }
-        guard let export = reloadIfChanged() else { return }
-        onExternalChange?(export)
+        guard observedFingerprint != lastRejectedFingerprint else { return }
+        guard let outcome = reloadOutcomeIfChanged() else { return }
+        if outcome.export != nil {
+            pendingExport = nil
+        }
+        onExternalChange?(outcome)
     }
 
     private func refreshSettingsFileWatcher(for observedFingerprint: FileFingerprint? = nil) {
@@ -299,23 +632,21 @@ final class SettingsFilePersistence {
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
     }
 
-    private func readSnapshot(at targetURL: URL) throws -> FileSnapshot {
+    private func readContents(at targetURL: URL) throws -> FileContents {
         let handle = try FileHandle(forReadingFrom: targetURL)
         defer {
             try? handle.close()
         }
 
-        guard let data = try handle.readToEnd() else {
-            throw CocoaError(.fileReadUnknown)
-        }
+        let data = try handle.readToEnd() ?? Data()
 
         var statBuffer = stat()
         guard Darwin.fstat(handle.fileDescriptor, &statBuffer) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
 
-        return FileSnapshot(
-            export: try SettingsTOMLCodec.decode(data),
+        return FileContents(
+            data: data,
             fingerprint: Self.fingerprint(from: statBuffer)
         )
     }
@@ -364,7 +695,12 @@ final class SettingsFilePersistence {
             return url
         }
 
-        let resolvedURL = try canonicalURL(for: url)
+        let resolvedURL: URL
+        do {
+            resolvedURL = try canonicalURL(for: url)
+        } catch let error as POSIXError where error.code == .ENOENT {
+            throw SettingsFilePersistenceError.danglingSettingsSymlink(url.path)
+        }
         var targetStatus = stat()
         let targetResult = resolvedURL.withUnsafeFileSystemRepresentation { path -> CInt in
             guard let path else { return -1 }
@@ -373,6 +709,9 @@ final class SettingsFilePersistence {
 
         guard targetResult == 0 else {
             let code = errno
+            if code == ENOENT {
+                throw SettingsFilePersistenceError.danglingSettingsSymlink(url.path)
+            }
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
         guard targetStatus.st_mode & S_IFMT == S_IFREG else { throw POSIXError(.EFTYPE) }
@@ -396,16 +735,139 @@ final class SettingsFilePersistence {
         }
     }
 
-    private func recoverCorruptFile(at targetURL: URL, with defaults: SettingsExport) {
-        let corruptURL = directoryURL.appendingPathComponent(Self.corruptFileName, isDirectory: false)
-
-        do {
-            let corruptData = try Data(contentsOf: targetURL)
-            try corruptData.write(to: corruptURL, options: .atomic)
-            try saveImmediately(defaults, to: targetURL)
-        } catch {
-            report("Failed to recover corrupt settings file: \(error.localizedDescription)")
+    private func existingData(at targetURL: URL) throws -> Data? {
+        var fileStatus = stat()
+        let result = targetURL.withUnsafeFileSystemRepresentation { path -> CInt in
+            guard let path else { return -1 }
+            return Darwin.lstat(path, &fileStatus)
         }
+
+        guard result == 0 else {
+            let code = errno
+            guard code == ENOENT else {
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+            return nil
+        }
+
+        guard fileStatus.st_mode & S_IFMT == S_IFREG else { throw POSIXError(.EFTYPE) }
+        return try readContents(at: targetURL).data
+    }
+
+    @discardableResult
+    private func recoverInvalidSettings(
+        _ invalidData: Data,
+        at targetURL: URL,
+        replacingWith export: SettingsExport
+    ) throws -> URL {
+        let backupURL = try secureBackup(
+            invalidData,
+            fileNames: Self.corruptFileNames,
+            exhaustedError: .corruptBackupSlotsExhausted
+        )
+        let replacement = try SettingsTOMLCodec.encode(export)
+        try persist(replacement, at: targetURL, export: export)
+        return backupURL
+    }
+
+    private func secureBackup(
+        _ data: Data,
+        fileNames: [String],
+        exhaustedError: SettingsFilePersistenceError
+    ) throws -> URL {
+        var firstAbsentURL: URL?
+        for fileName in fileNames {
+            let slotURL = directoryURL.appendingPathComponent(fileName, isDirectory: false)
+            switch Self.backupSlotState(at: slotURL, matching: data) {
+            case .matching:
+                return slotURL
+            case .absent:
+                if firstAbsentURL == nil {
+                    firstAbsentURL = slotURL
+                }
+            case .occupied:
+                break
+            }
+        }
+
+        guard let firstAbsentURL else {
+            throw exhaustedError
+        }
+        try Self.writeExclusive(data, to: firstAbsentURL)
+        return firstAbsentURL
+    }
+
+    private static func backupSlotState(at url: URL, matching expectedData: Data) -> BackupSlotState {
+        let fileDescriptor = url.withUnsafeFileSystemRepresentation { path -> CInt in
+            guard let path else { return -1 }
+            return Darwin.open(path, O_RDONLY | O_NOFOLLOW)
+        }
+
+        guard fileDescriptor >= 0 else {
+            return errno == ENOENT ? .absent : .occupied
+        }
+
+        let handle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: true)
+        defer {
+            try? handle.close()
+        }
+
+        var fileStatus = stat()
+        guard Darwin.fstat(fileDescriptor, &fileStatus) == 0,
+              fileStatus.st_mode & S_IFMT == S_IFREG
+        else {
+            return .occupied
+        }
+        do {
+            return (try handle.readToEnd() ?? Data()) == expectedData ? .matching : .occupied
+        } catch {
+            return .occupied
+        }
+    }
+
+    private static func writeExclusive(_ data: Data, to url: URL) throws {
+        let fileDescriptor = url.withUnsafeFileSystemRepresentation { path -> CInt in
+            guard let path else { return -1 }
+            return Darwin.open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        }
+        guard fileDescriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        let handle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw error
+        }
+    }
+
+    private func persist(_ data: Data, at targetURL: URL, export: SettingsExport) throws {
+        try data.write(to: targetURL, options: .atomic)
+        writeBlockNotice = nil
+        let fingerprint = currentFingerprint()
+        lastWrittenFingerprint = fingerprint
+        lastObservedFingerprint = fingerprint
+        lastRejectedFingerprint = nil
+        lastPersistedExport = export
+        refreshSettingsFileWatcher(for: fingerprint)
+    }
+
+    private func reportMigration(_ migration: SettingsMigrationReport, backupURL: URL) {
+        reportNotice(
+            "Migrated \(fileURL.path) from schema version \(migration.fromVersion) "
+                + "to \(migration.toVersion); exact backup: \(backupURL.path)"
+        )
+        for message in migration.messages {
+            reportNotice("Settings migration: \(message)")
+        }
+    }
+
+    private func reportNotice(_ message: String) {
+        Log.config.notice(message)
     }
 
     private func report(_ message: String) {

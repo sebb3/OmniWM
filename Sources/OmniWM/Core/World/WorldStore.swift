@@ -56,7 +56,8 @@ final class WorldStore {
     private(set) var invariantViolationCounts: [String: Int] = [:]
     private(set) var focus = FocusSessionSnapshot()
     private(set) var viewports: [WorkspaceDescriptor.ID: ViewportState] = [:]
-    private(set) var scratchpadToken: WindowToken?
+    private(set) var scratchpadMembers: [ScratchpadIndex: [WindowToken]] = [:]
+    private(set) var revealedScratchpad: ScratchpadIndex?
     private(set) var hiddenAppPIDs: Set<pid_t> = []
     private var appVisibilityGenerationByPID: [pid_t: UInt64] = [:]
     private(set) var monitorSessions: [Monitor.ID: MonitorSession] = [:]
@@ -103,6 +104,11 @@ final class WorldStore {
         }
         seq &+= 1
 
+        let windowExistedBeforeMutation = if case .windowAdmitted = event {
+            event.token.flatMap { model.entry(for: $0) } != nil
+        } else {
+            false
+        }
         preMutate()
         applyWindowMutation(event, phase: .beforePlan, monitors: monitors)
         let existingEntry = event.token.flatMap { model.entry(for: $0) }
@@ -116,12 +122,15 @@ final class WorldStore {
             event: normalizedEvent,
             existingEntry: existingEntry,
             currentSnapshot: reducerSnapshot,
-            monitors: monitors
+            monitors: monitors,
+            windowExistedBeforeMutation: windowExistedBeforeMutation
         )
         let resolvedPlan = resolvePlan(plan, normalizedEvent.token, reducerSnapshot)
         applyWindowMutation(event, phase: .afterPlan, monitors: monitors)
 
-        let committedSnapshot = snapshot()
+        let committedSnapshot = resolvedPlan.mutatesRuntimeState || event.mutatesSnapshotAfterPlan
+            ? snapshot()
+            : reducerSnapshot
         let invariantViolations = commitDepth == 1
             ? InvariantChecks.validate(snapshot: committedSnapshot)
             : []
@@ -218,7 +227,8 @@ final class WorldStore {
             axRef,
             ruleEffects,
             admissionHints,
-            interactionPolicy,
+            lifetimeAuthority,
+            _,
             metadata,
             _
         ):
@@ -234,7 +244,7 @@ final class WorldStore {
                 mode: mode,
                 ruleEffects: ruleEffects,
                 admissionHints: resolvedAdmissionHints,
-                interactionPolicy: interactionPolicy,
+                lifetimeAuthority: lifetimeAuthority,
                 managedReplacementMetadata: metadata
             )
             reconcileNiriMembership(
@@ -243,6 +253,12 @@ final class WorldStore {
                 monitors: monitors
             )
             refreshProjectionExclusions(in: [workspaceId])
+
+        case let .topLevelInventoryObserved(tokens, _):
+            guard phase == .beforePlan else { return }
+            for token in tokens where model.entry(for: token)?.lifetimeAuthority == .directLifecycle {
+                model.setLifetimeAuthority(.axTopLevelInventory, for: token)
+            }
 
         case let .windowRekeyed(from, to, workspaceId, _, _, newAXRef, metadata, _):
             guard phase == .beforePlan else { return }
@@ -263,6 +279,7 @@ final class WorldStore {
             )
             _ = niriEngine?.rekeyWindow(from: from, to: to, in: workspaceId)
             _ = dwindleEngine?.rekeyWindow(from: from, to: to, in: workspaceId)
+            rekeyScratchpadMember(from: from, to: to)
             refreshProjectionExclusions(in: [workspaceId])
 
         case let .windowRemoved(token, _, _):
@@ -318,6 +335,16 @@ final class WorldStore {
                 model.setRestoreIntent(restoreIntent, for: token)
             }
 
+        case let .dwindlePlacementsResolved(placements, _):
+            guard phase == .beforePlan else { return }
+            for (token, placement) in placements {
+                guard let entry = model.entry(for: token), entry.mode == .tiling else { continue }
+                var restoreIntent = StateReducer.restoreIntent(for: entry, monitors: monitors)
+                restoreIntent.dwindlePlacement = placement
+                guard entry.restoreIntent != restoreIntent else { continue }
+                model.setRestoreIntent(restoreIntent, for: token)
+            }
+
         case let .hiddenApplicationsChanged(pids, affectedWorkspaceIds, _):
             guard phase == .beforePlan else { return }
             for pid in hiddenAppPIDs.symmetricDifference(pids) {
@@ -347,9 +374,13 @@ final class WorldStore {
             guard phase == .beforePlan else { return }
             model.setManagedReplacementMetadata(metadata, for: token)
 
-        case let .scratchpadChanged(token, _):
+        case let .scratchpadMembershipChanged(token, index, _):
             guard phase == .beforePlan else { return }
-            scratchpadToken = token
+            applyScratchpadMembership(token, to: index)
+
+        case let .scratchpadRevealChanged(index, _):
+            guard phase == .beforePlan else { return }
+            revealedScratchpad = index.flatMap { scratchpadMembers[$0] == nil ? nil : $0 }
 
         case let .visibleWorkspacesChanged(sessions, _):
             guard phase == .beforePlan else { return }
@@ -369,9 +400,8 @@ final class WorldStore {
              .managedFocusCancelled,
              .managedFocusConfirmed,
              .managedFocusRequested,
+             .nativeFocusOwnerChanged,
              .nativeFullscreenPlaceholderSelected,
-             .nonManagedFocusChanged,
-             .nonManagedFocusTargetChanged,
              .selectionChanged,
              .suppressedFocusChanged,
              .systemModalFocusChanged,
@@ -389,6 +419,28 @@ final class WorldStore {
 
     private func assertInCommit(_ operation: StaticString) {
         assert(commitDepth > 0, "\(operation) must run inside WorldStore.commit")
+    }
+
+    private func applyScratchpadMembership(_ token: WindowToken, to index: ScratchpadIndex?) {
+        for (slot, members) in scratchpadMembers where members.contains(token) {
+            guard slot != index else { return }
+            let remaining = members.filter { $0 != token }
+            scratchpadMembers[slot] = remaining.isEmpty ? nil : remaining
+        }
+        if let index {
+            scratchpadMembers[index, default: []].append(token)
+        }
+        if let revealed = revealedScratchpad, scratchpadMembers[revealed] == nil {
+            revealedScratchpad = nil
+        }
+    }
+
+    private func rekeyScratchpadMember(from oldToken: WindowToken, to newToken: WindowToken) {
+        guard oldToken != newToken else { return }
+        for (slot, members) in scratchpadMembers {
+            guard let position = members.firstIndex(of: oldToken) else { continue }
+            scratchpadMembers[slot]?[position] = newToken
+        }
     }
 
     private func refreshProjectionExclusions(
@@ -417,6 +469,59 @@ final class WorldStore {
             return false
         }
         return niriEngine?.workspaceIds(containing: token).isEmpty ?? true
+    }
+}
+
+private extension WMEvent {
+    var mutatesSnapshotAfterPlan: Bool {
+        switch self {
+        case .windowRemoved:
+            true
+        case .activeSpaceChanged,
+             .appVisibilityInvalidated,
+             .floatingGeometryUpdated,
+             .floatingStateChanged,
+             .focusFallbackRemembered,
+             .focusForgotten,
+             .focusLeaseChanged,
+             .focusRemembered,
+             .hiddenApplicationsChanged,
+             .hiddenStateChanged,
+             .interactionMonitorChanged,
+             .layoutOperationPerformed,
+             .managedFocusCancelled,
+             .managedFocusConfirmed,
+             .managedFocusRequested,
+             .managedReplacementMetadataChanged,
+             .manualLayoutOverrideChanged,
+             .nativeFocusOwnerChanged,
+             .nativeFullscreenPlaceholderSelected,
+             .nativeFullscreenTransition,
+             .niriPlacementsResolved,
+             .dwindlePlacementsResolved,
+             .scratchpadMembershipChanged,
+             .scratchpadRevealChanged,
+             .selectionChanged,
+             .spaceTopologyChanged,
+             .suppressedFocusChanged,
+             .systemModalFocusChanged,
+             .systemSleep,
+             .systemWake,
+             .topLevelInventoryObserved,
+             .topologyChanged,
+             .userCommand,
+             .viewportChanged,
+             .viewportCommitted,
+             .viewportForgotten,
+             .visibleWorkspacesChanged,
+             .windowAdmissionHintsChanged,
+             .windowAdmitted,
+             .windowModeChanged,
+             .windowRekeyed,
+             .workspaceAssigned,
+             .workspaceFocusCleared:
+            false
+        }
     }
 }
 
@@ -513,16 +618,16 @@ extension WorldStore {
         model.admissionHints(for: token)
     }
 
-    func setInteractionPolicy(_ policy: WindowInteractionPolicy, for token: WindowToken) {
-        model.setInteractionPolicy(policy, for: token)
-    }
-
     func hiddenState(for token: WindowToken) -> HiddenState? {
         model.hiddenState(for: token)
     }
 
     func isAppHidden(pid: pid_t) -> Bool {
         hiddenAppPIDs.contains(pid)
+    }
+
+    func scratchpadIndex(for token: WindowToken) -> ScratchpadIndex? {
+        scratchpadMembers.first { $0.value.contains(token) }?.key
     }
 
     func appVisibilityGeneration(for pid: pid_t) -> UInt64 {

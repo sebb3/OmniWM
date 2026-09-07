@@ -9,6 +9,12 @@ import OmniWMIPC
 @MainActor @Observable
 final class SettingsStore {
     private nonisolated static let defaultExport = SettingsExport.defaults()
+    private nonisolated static let scrollSensitivityRange = 0.1 ... 100.0
+
+    private nonisolated static func normalizedScrollSensitivity(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultExport.scrollSensitivity }
+        return min(max(value, scrollSensitivityRange.lowerBound), scrollSensitivityRange.upperBound)
+    }
 
     private struct NormalizedWorkspaceBarIconOverride {
         let foldedBundleID: String
@@ -24,6 +30,9 @@ final class SettingsStore {
 
     var onIPCEnabledChanged: (@MainActor (Bool) -> Void)?
     var onExternalSettingsReloaded: (@MainActor () -> Void)?
+    var onConfigNoticeChanged: (@MainActor () -> Void)?
+    var onTrackpadGestureAvailabilityChanged: (@MainActor (Bool) -> Void)?
+    private(set) var configNotice: SettingsConfigNotice?
 
     var hotkeysEnabled = SettingsStore.defaultExport.hotkeysEnabled {
         didSet { scheduleSave() }
@@ -33,9 +42,11 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var focusLockModifier = FocusLockModifier(
-        rawValue: SettingsStore.defaultExport.focusLockModifier
-    ) ?? .off {
+    var raiseOnMouseFocus = SettingsStore.defaultExport.raiseOnMouseFocus {
+        didSet { scheduleSave() }
+    }
+
+    var focusLockModifier = SettingsStore.defaultExport.focusLockModifier {
         didSet { scheduleSave() }
     }
 
@@ -87,21 +98,26 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var monitorRoutingMode = MonitorRoutingMode(rawValue: SettingsStore.defaultExport.monitorRoutingMode) ?? .macOS {
+    var monitorRoutingMode = SettingsStore.defaultExport.monitorRoutingMode {
         didSet { scheduleSave() }
     }
 
-    var monitorRoutingSettings = SettingsStore.defaultExport.monitorRoutingSettings {
+    var monitorArrangements = SettingsStore.defaultExport.monitorArrangements {
         didSet { scheduleSave() }
     }
 
     func applyMonitorSetup(
         routingSettings: [MonitorRoutingSettings],
-        mouseWarpEnabled: Bool
+        monitors: [Monitor],
+        mouseWarpEnabled: Bool,
+        workspaceConfigurations: [WorkspaceConfiguration]
     ) {
-        monitorRoutingSettings = routingSettings
+        storeRoutingLayout(routingSettings, for: monitors)
         monitorRoutingMode = .custom
         self.mouseWarpEnabled = mouseWarpEnabled
+        if self.workspaceConfigurations != workspaceConfigurations {
+            self.workspaceConfigurations = workspaceConfigurations
+        }
     }
 
     var gapSize = SettingsStore.defaultExport.gapSize {
@@ -124,6 +140,10 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
+    var fullscreenUsesOuterGaps = SettingsStore.defaultExport.fullscreenUsesOuterGaps {
+        didSet { scheduleSave() }
+    }
+
     var niriVisibleContainerCount = SettingsStore.defaultExport.niriVisibleContainerCount {
         didSet { scheduleSave() }
     }
@@ -132,9 +152,7 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var niriCenterFocusedColumn = CenterFocusedColumn(
-        rawValue: SettingsStore.defaultExport.niriCenterFocusedColumn
-    ) ?? .never {
+    var niriCenterFocusedColumn = SettingsStore.defaultExport.niriCenterFocusedColumn {
         didSet { scheduleSave() }
     }
 
@@ -142,9 +160,7 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var niriSingleWindowFit = SingleWindowFit(
-        serialized: SettingsStore.defaultExport.niriSingleWindowFit
-    ) {
+    var niriSingleWindowFit = SettingsStore.defaultExport.niriSingleWindowFit {
         didSet { scheduleSave() }
     }
 
@@ -152,9 +168,7 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var defaultLayoutType = LayoutType(
-        rawValue: SettingsStore.defaultExport.defaultLayoutType
-    ) ?? .niri {
+    var defaultLayoutType = SettingsStore.defaultExport.defaultLayoutType {
         didSet { scheduleSave() }
     }
 
@@ -166,20 +180,49 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var borderColorRed = SettingsStore.defaultExport.borderColorRed {
+    var borderColor = SettingsColor(
+        red: SettingsStore.defaultExport.borderColorRed,
+        green: SettingsStore.defaultExport.borderColorGreen,
+        blue: SettingsStore.defaultExport.borderColorBlue,
+        alpha: SettingsStore.defaultExport.borderColorAlpha
+    ) {
         didSet { scheduleSave() }
     }
 
-    var borderColorGreen = SettingsStore.defaultExport.borderColorGreen {
-        didSet { scheduleSave() }
+    var borderColorRed: Double {
+        get { borderColor.red }
+        set {
+            var color = borderColor
+            color.red = newValue
+            borderColor = color
+        }
     }
 
-    var borderColorBlue = SettingsStore.defaultExport.borderColorBlue {
-        didSet { scheduleSave() }
+    var borderColorGreen: Double {
+        get { borderColor.green }
+        set {
+            var color = borderColor
+            color.green = newValue
+            borderColor = color
+        }
     }
 
-    var borderColorAlpha = SettingsStore.defaultExport.borderColorAlpha {
-        didSet { scheduleSave() }
+    var borderColorBlue: Double {
+        get { borderColor.blue }
+        set {
+            var color = borderColor
+            color.blue = newValue
+            borderColor = color
+        }
+    }
+
+    var borderColorAlpha: Double {
+        get { borderColor.alpha }
+        set {
+            var color = borderColor
+            color.alpha = newValue
+            borderColor = color
+        }
     }
 
     var overviewZoom = SettingsStore.defaultExport.overviewZoom {
@@ -237,21 +280,15 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var workspaceBarWindowLevel = WorkspaceBarWindowLevel(
-        rawValue: SettingsStore.defaultExport.workspaceBarWindowLevel
-    ) ?? .popup {
+    var workspaceBarWindowLevel = SettingsStore.defaultExport.workspaceBarWindowLevel {
         didSet { scheduleSave() }
     }
 
-    var workspaceBarPosition = WorkspaceBarPosition(
-        rawValue: SettingsStore.defaultExport.workspaceBarPosition
-    ) ?? .overlappingMenuBar {
+    var workspaceBarPosition = SettingsStore.defaultExport.workspaceBarPosition {
         didSet { scheduleSave() }
     }
 
-    var workspaceBarNotchMode = WorkspaceBarNotchMode(
-        rawValue: SettingsStore.defaultExport.workspaceBarNotchMode
-    ) ?? .moveBelowMenuBar {
+    var workspaceBarNotchMode = SettingsStore.defaultExport.workspaceBarNotchMode {
         didSet { scheduleSave() }
     }
 
@@ -283,17 +320,25 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
+    private(set) var scratchpadLabels = SettingsStore.normalizedScratchpadLabels(
+        SettingsStore.defaultExport.scratchpadLabels
+    ) {
+        didSet { scheduleSave() }
+    }
+
     var workspaceBarReserveLayoutSpace = SettingsStore.defaultExport.workspaceBarReserveLayoutSpace {
         didSet { scheduleSave() }
     }
 
-    var workspaceBarRevealModifier = WorkspaceBarRevealModifier(
-        rawValue: SettingsStore.defaultExport.workspaceBarRevealModifier
-    ) ?? .off {
+    var workspaceBarRevealModifier = SettingsStore.defaultExport.workspaceBarRevealModifier {
         didSet { scheduleSave() }
     }
 
     var workspaceBarRevealHoldMilliseconds = SettingsStore.defaultExport.workspaceBarRevealHoldMilliseconds {
+        didSet { scheduleSave() }
+    }
+
+    var workspaceBarHideInNativeFullscreen = SettingsStore.defaultExport.workspaceBarHideInNativeFullscreen {
         didSet { scheduleSave() }
     }
 
@@ -364,9 +409,7 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var dwindleSingleWindowFit = SingleWindowFit(
-        serialized: SettingsStore.defaultExport.dwindleSingleWindowFit
-    ) {
+    var dwindleSingleWindowFit = SettingsStore.defaultExport.dwindleSingleWindowFit {
         didSet { scheduleSave() }
     }
 
@@ -403,34 +446,41 @@ final class SettingsStore {
     }
 
     var scrollGestureEnabled = SettingsStore.defaultExport.scrollGestureEnabled {
-        didSet { scheduleSave() }
+        didSet {
+            guard oldValue != scrollGestureEnabled else { return }
+            if !isApplyingExport,
+               (oldValue || workspaceSwipeEnabled) != (scrollGestureEnabled || workspaceSwipeEnabled)
+            {
+                onTrackpadGestureAvailabilityChanged?(scrollGestureEnabled || workspaceSwipeEnabled)
+            }
+            scheduleSave()
+        }
     }
 
     var scrollSensitivity = SettingsStore.defaultExport.scrollSensitivity {
+        didSet {
+            let normalized = SettingsStore.normalizedScrollSensitivity(scrollSensitivity)
+            guard normalized == scrollSensitivity else {
+                scrollSensitivity = normalized
+                return
+            }
+            scheduleSave()
+        }
+    }
+
+    var scrollModifierKey = SettingsStore.defaultExport.scrollModifierKey {
         didSet { scheduleSave() }
     }
 
-    var scrollModifierKey = ScrollModifierKey(
-        rawValue: SettingsStore.defaultExport.scrollModifierKey
-    ) ?? .optionShift {
+    var mouseMoveModifierKey = SettingsStore.defaultExport.mouseMoveModifierKey {
         didSet { scheduleSave() }
     }
 
-    var mouseMoveModifierKey = MouseMoveModifierKey(
-        rawValue: SettingsStore.defaultExport.mouseMoveModifierKey
-    ) ?? .option {
+    var mouseResizeModifierKey = SettingsStore.defaultExport.mouseResizeModifierKey {
         didSet { scheduleSave() }
     }
 
-    var mouseResizeModifierKey = MouseResizeModifierKey(
-        rawValue: SettingsStore.defaultExport.mouseResizeModifierKey
-    ) ?? .option {
-        didSet { scheduleSave() }
-    }
-
-    var gestureFingerCount = GestureFingerCount(
-        rawValue: SettingsStore.defaultExport.gestureFingerCount
-    ) ?? .three {
+    var gestureFingerCount = SettingsStore.defaultExport.gestureFingerCount {
         didSet { scheduleSave() }
     }
 
@@ -438,25 +488,27 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var trackpadScrollStyle = TrackpadScrollStyle(
-        rawValue: SettingsStore.defaultExport.trackpadScrollStyle
-    ) ?? .snap {
+    var trackpadScrollStyle = SettingsStore.defaultExport.trackpadScrollStyle {
         didSet { scheduleSave() }
     }
 
     var workspaceSwipeEnabled = SettingsStore.defaultExport.workspaceSwipeEnabled {
+        didSet {
+            guard oldValue != workspaceSwipeEnabled else { return }
+            if !isApplyingExport,
+               (scrollGestureEnabled || oldValue) != (scrollGestureEnabled || workspaceSwipeEnabled)
+            {
+                onTrackpadGestureAvailabilityChanged?(scrollGestureEnabled || workspaceSwipeEnabled)
+            }
+            scheduleSave()
+        }
+    }
+
+    var workspaceSwipeFingerCount = SettingsStore.defaultExport.workspaceSwipeFingerCount {
         didSet { scheduleSave() }
     }
 
-    var workspaceSwipeFingerCount = GestureFingerCount(
-        rawValue: SettingsStore.defaultExport.workspaceSwipeFingerCount
-    ) ?? .three {
-        didSet { scheduleSave() }
-    }
-
-    var workspaceSwipeAxis = WorkspaceSwipeAxis(
-        rawValue: SettingsStore.defaultExport.workspaceSwipeAxis
-    ) ?? .vertical {
+    var workspaceSwipeAxis = SettingsStore.defaultExport.workspaceSwipeAxis {
         didSet { scheduleSave() }
     }
 
@@ -520,9 +572,7 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var quakeTerminalPosition = QuakeTerminalPosition(
-        rawValue: SettingsStore.defaultExport.quakeTerminalPosition
-    ) ?? .center {
+    var quakeTerminalPosition = SettingsStore.defaultExport.quakeTerminalPosition {
         didSet { scheduleSave() }
     }
 
@@ -560,9 +610,7 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var quakeTerminalBackgroundEffect = QuakeTerminalBackgroundEffect(
-        rawValue: SettingsStore.defaultExport.quakeTerminalBackgroundEffect
-    ) ?? .standardBlur {
+    var quakeTerminalBackgroundEffect = SettingsStore.defaultExport.quakeTerminalBackgroundEffect {
         didSet { scheduleSave() }
     }
 
@@ -580,9 +628,7 @@ final class SettingsStore {
         }
     }
 
-    var quakeTerminalMonitorMode = QuakeTerminalMonitorMode(
-        rawValue: SettingsStore.defaultExport.quakeTerminalMonitorMode ?? ""
-    ) ?? .focusedWindow {
+    var quakeTerminalMonitorMode = SettingsStore.defaultExport.quakeTerminalMonitorMode ?? .focusedWindow {
         didSet { scheduleSave() }
     }
 
@@ -616,9 +662,7 @@ final class SettingsStore {
         quakeTerminalCustomFrame = nil
     }
 
-    var appearanceMode = AppearanceMode(
-        rawValue: SettingsStore.defaultExport.appearanceMode
-    ) ?? .dark {
+    var appearanceMode = SettingsStore.defaultExport.appearanceMode {
         didSet { scheduleSave() }
     }
 
@@ -662,9 +706,14 @@ final class SettingsStore {
         isApplyingRuntimeState = false
         syncQuakeTerminalCustomFrameToRuntimeState()
 
-        applyExport(persistence.load())
-        persistence.setExternalChangeHandler { [weak self] export in
-            self?.handleExternalReload(export)
+        let outcome = persistence.loadOutcome()
+        transitionConfigNotice(to: outcome.notice)
+        applyExport(outcome.export ?? SettingsExport.defaults())
+        persistence.setExternalChangeHandler { [weak self] outcome in
+            self?.handleExternalReload(outcome)
+        }
+        persistence.setSaveNoticeHandler { [weak self] notice in
+            self?.transitionConfigNotice(to: notice)
         }
     }
 
@@ -672,9 +721,15 @@ final class SettingsStore {
         persistence.fileURL
     }
 
+    var settingsWritesBlocked: Bool {
+        persistence.settingsWritesBlocked
+    }
+
     func ensureSettingsFileAvailable() throws {
         guard !FileManager.default.fileExists(atPath: settingsFileURL.path) else { return }
-        try persistence.saveImmediately(toExport())
+        if let notice = try persistence.saveImmediately(toExport()) {
+            transitionConfigNotice(to: notice)
+        }
     }
 
     func flushNow() {
@@ -690,7 +745,8 @@ final class SettingsStore {
         SettingsExport(
             hotkeysEnabled: hotkeysEnabled,
             focusFollowsMouse: focusFollowsMouse,
-            focusLockModifier: focusLockModifier.rawValue,
+            raiseOnMouseFocus: raiseOnMouseFocus,
+            focusLockModifier: focusLockModifier,
             moveMouseToFocusedWindow: moveMouseToFocusedWindow,
             focusFollowsWindowToMonitor: focusFollowsWindowToMonitor,
             focusCrossesMonitorAtEdge: focusCrossesMonitorAtEdge,
@@ -698,22 +754,23 @@ final class SettingsStore {
             mouseWarpMargin: mouseWarpMargin,
             mouseWarpEnabled: mouseWarpEnabled,
             cursorContainmentEnabled: cursorContainmentEnabled,
-            monitorRoutingMode: monitorRoutingMode.rawValue,
-            monitorRoutingSettings: monitorRoutingSettings,
+            monitorRoutingMode: monitorRoutingMode,
+            monitorArrangements: monitorArrangements,
             gapSize: gapSize,
             outerGapLeft: outerGapLeft,
             outerGapRight: outerGapRight,
             outerGapTop: outerGapTop,
             outerGapBottom: outerGapBottom,
+            fullscreenUsesOuterGaps: fullscreenUsesOuterGaps,
             niriVisibleContainerCount: niriVisibleContainerCount,
             niriInfiniteLoop: niriInfiniteLoop,
-            niriCenterFocusedColumn: niriCenterFocusedColumn.rawValue,
+            niriCenterFocusedColumn: niriCenterFocusedColumn,
             niriAlwaysCenterSingleColumn: niriAlwaysCenterSingleColumn,
-            niriSingleWindowFit: niriSingleWindowFit.serialized,
+            niriSingleWindowFit: niriSingleWindowFit,
             niriContainerPrimarySpanPresets: niriContainerPrimarySpanPresets,
             niriDefaultContainerPrimarySpan: niriDefaultContainerPrimarySpan,
             workspaceConfigurations: workspaceConfigurations,
-            defaultLayoutType: defaultLayoutType.rawValue,
+            defaultLayoutType: defaultLayoutType,
             bordersEnabled: bordersEnabled,
             borderWidth: borderWidth,
             borderColorRed: borderColorRed,
@@ -731,9 +788,9 @@ final class SettingsStore {
             workspaceBarEnabled: workspaceBarEnabled,
             workspaceBarShowLabels: workspaceBarShowLabels,
             workspaceBarShowFloatingWindows: workspaceBarShowFloatingWindows,
-            workspaceBarWindowLevel: workspaceBarWindowLevel.rawValue,
-            workspaceBarPosition: workspaceBarPosition.rawValue,
-            workspaceBarNotchMode: workspaceBarNotchMode.rawValue,
+            workspaceBarWindowLevel: workspaceBarWindowLevel,
+            workspaceBarPosition: workspaceBarPosition,
+            workspaceBarNotchMode: workspaceBarNotchMode,
             workspaceBarNotchActiveZoneWidth: workspaceBarNotchActiveZoneWidth,
             workspaceBarSystemStatsButton: workspaceBarSystemStatsButton,
             workspaceBarDeduplicateAppIcons: workspaceBarDeduplicateAppIcons,
@@ -742,9 +799,11 @@ final class SettingsStore {
                 workspaceBarExcludedBundleIDs
             ),
             workspaceBarIconOverrides: workspaceBarIconOverrides,
+            scratchpadLabels: scratchpadLabels,
             workspaceBarReserveLayoutSpace: workspaceBarReserveLayoutSpace,
-            workspaceBarRevealModifier: workspaceBarRevealModifier.rawValue,
+            workspaceBarRevealModifier: workspaceBarRevealModifier,
             workspaceBarRevealHoldMilliseconds: workspaceBarRevealHoldMilliseconds,
+            workspaceBarHideInNativeFullscreen: workspaceBarHideInNativeFullscreen,
             workspaceBarHeight: workspaceBarHeight,
             workspaceBarBackgroundOpacity: workspaceBarBackgroundOpacity,
             workspaceBarXOffset: workspaceBarXOffset,
@@ -758,7 +817,7 @@ final class SettingsStore {
             dwindleSmartSplit: dwindleSmartSplit,
             dwindleDefaultSplitRatio: dwindleDefaultSplitRatio,
             dwindleSplitWidthMultiplier: dwindleSplitWidthMultiplier,
-            dwindleSingleWindowFit: dwindleSingleWindowFit.serialized,
+            dwindleSingleWindowFit: dwindleSingleWindowFit,
             dwindleUseGlobalGaps: dwindleUseGlobalGaps,
             dwindleMoveToRootStable: dwindleMoveToRootStable,
             monitorDwindleSettings: monitorDwindleSettings,
@@ -768,15 +827,15 @@ final class SettingsStore {
             ipcEnabled: ipcEnabled,
             scrollGestureEnabled: scrollGestureEnabled,
             scrollSensitivity: scrollSensitivity,
-            scrollModifierKey: scrollModifierKey.rawValue,
-            mouseMoveModifierKey: mouseMoveModifierKey.rawValue,
-            mouseResizeModifierKey: mouseResizeModifierKey.rawValue,
-            gestureFingerCount: gestureFingerCount.rawValue,
+            scrollModifierKey: scrollModifierKey,
+            mouseMoveModifierKey: mouseMoveModifierKey,
+            mouseResizeModifierKey: mouseResizeModifierKey,
+            gestureFingerCount: gestureFingerCount,
             gestureInvertDirection: gestureInvertDirection,
-            trackpadScrollStyle: trackpadScrollStyle.rawValue,
+            trackpadScrollStyle: trackpadScrollStyle,
             workspaceSwipeEnabled: workspaceSwipeEnabled,
-            workspaceSwipeFingerCount: workspaceSwipeFingerCount.rawValue,
-            workspaceSwipeAxis: workspaceSwipeAxis.rawValue,
+            workspaceSwipeFingerCount: workspaceSwipeFingerCount,
+            workspaceSwipeAxis: workspaceSwipeAxis,
             statusBarShowWorkspaceName: statusBarShowWorkspaceName,
             statusBarShowAppNames: statusBarShowAppNames,
             statusBarUseWorkspaceId: statusBarUseWorkspaceId,
@@ -789,27 +848,35 @@ final class SettingsStore {
             clipboardMaxItemBytes: clipboardMaxItemBytes,
             clipboardMaxTotalBytes: clipboardMaxTotalBytes,
             quakeTerminalEnabled: quakeTerminalEnabled,
-            quakeTerminalPosition: quakeTerminalPosition.rawValue,
+            quakeTerminalPosition: quakeTerminalPosition,
             quakeTerminalWidthPercent: quakeTerminalWidthPercent,
             quakeTerminalHeightPercent: quakeTerminalHeightPercent,
             quakeTerminalAnimationDuration: quakeTerminalAnimationDuration,
             quakeTerminalAutoHide: quakeTerminalAutoHide,
             quakeTerminalOpacity: quakeTerminalOpacity,
-            quakeTerminalBackgroundEffect: quakeTerminalBackgroundEffect.rawValue,
+            quakeTerminalBackgroundEffect: quakeTerminalBackgroundEffect,
             quakeTerminalBackgroundBlurRadius: quakeTerminalBackgroundBlurRadius,
-            quakeTerminalMonitorMode: quakeTerminalMonitorMode.rawValue,
-            appearanceMode: appearanceMode.rawValue
+            quakeTerminalMonitorMode: quakeTerminalMonitorMode,
+            appearanceMode: appearanceMode
         )
     }
 
     func applyExport(_ export: SettingsExport) {
         let baseline = SettingsStore.defaultExport
+        let trackpadGesturesWereAvailable = scrollGestureEnabled || workspaceSwipeEnabled
         isApplyingExport = true
-        defer { isApplyingExport = false }
+        defer {
+            isApplyingExport = false
+            let trackpadGesturesAreAvailable = scrollGestureEnabled || workspaceSwipeEnabled
+            if trackpadGesturesWereAvailable != trackpadGesturesAreAvailable {
+                onTrackpadGestureAvailabilityChanged?(trackpadGesturesAreAvailable)
+            }
+        }
 
         hotkeysEnabled = export.hotkeysEnabled
         focusFollowsMouse = export.focusFollowsMouse
-        focusLockModifier = FocusLockModifier(rawValue: export.focusLockModifier) ?? .off
+        raiseOnMouseFocus = export.raiseOnMouseFocus
+        focusLockModifier = export.focusLockModifier
         moveMouseToFocusedWindow = export.moveMouseToFocusedWindow
         focusFollowsWindowToMonitor = export.focusFollowsWindowToMonitor
         focusCrossesMonitorAtEdge = export.focusCrossesMonitorAtEdge
@@ -817,19 +884,20 @@ final class SettingsStore {
         mouseWarpMargin = export.mouseWarpMargin
         mouseWarpEnabled = export.mouseWarpEnabled
         cursorContainmentEnabled = export.cursorContainmentEnabled
-        monitorRoutingMode = MonitorRoutingMode(rawValue: export.monitorRoutingMode) ?? .macOS
-        monitorRoutingSettings = export.monitorRoutingSettings
+        monitorRoutingMode = export.monitorRoutingMode
+        monitorArrangements = export.monitorArrangements
         gapSize = export.gapSize
         outerGapLeft = export.outerGapLeft
         outerGapRight = export.outerGapRight
         outerGapTop = export.outerGapTop
         outerGapBottom = export.outerGapBottom
+        fullscreenUsesOuterGaps = export.fullscreenUsesOuterGaps
 
         niriVisibleContainerCount = export.niriVisibleContainerCount
         niriInfiniteLoop = export.niriInfiniteLoop
-        niriCenterFocusedColumn = CenterFocusedColumn(rawValue: export.niriCenterFocusedColumn) ?? .never
+        niriCenterFocusedColumn = export.niriCenterFocusedColumn
         niriAlwaysCenterSingleColumn = export.niriAlwaysCenterSingleColumn
-        niriSingleWindowFit = SingleWindowFit(serialized: export.niriSingleWindowFit)
+        niriSingleWindowFit = export.niriSingleWindowFit
         niriContainerPrimarySpanPresets = SettingsStore.validatedContainerPrimarySpanPresets(
             export.niriContainerPrimarySpanPresets ?? baseline.niriContainerPrimarySpanPresets ?? SettingsStore
                 .defaultContainerPrimarySpanPresets
@@ -838,14 +906,16 @@ final class SettingsStore {
             .validatedDefaultContainerPrimarySpan(export.niriDefaultContainerPrimarySpan)
 
         workspaceConfigurations = SettingsStore.normalizedWorkspaceConfigurations(export.workspaceConfigurations)
-        defaultLayoutType = LayoutType(rawValue: export.defaultLayoutType) ?? .niri
+        defaultLayoutType = export.defaultLayoutType
 
         bordersEnabled = export.bordersEnabled
         borderWidth = SettingsStore.validatedBorderWidth(export.borderWidth)
-        borderColorRed = SettingsStore.validatedColorComponent(export.borderColorRed)
-        borderColorGreen = SettingsStore.validatedColorComponent(export.borderColorGreen)
-        borderColorBlue = SettingsStore.validatedColorComponent(export.borderColorBlue)
-        borderColorAlpha = SettingsStore.validatedColorComponent(export.borderColorAlpha)
+        borderColor = SettingsColor(
+            red: SettingsStore.validatedColorComponent(export.borderColorRed),
+            green: SettingsStore.validatedColorComponent(export.borderColorGreen),
+            blue: SettingsStore.validatedColorComponent(export.borderColorBlue),
+            alpha: SettingsStore.validatedColorComponent(export.borderColorAlpha)
+        )
 
         overviewZoom = SettingsStore.validatedOverviewZoom(export.overviewZoom)
         overviewBackdropColor = SettingsStore.validatedOverviewColor(
@@ -873,9 +943,9 @@ final class SettingsStore {
         workspaceBarEnabled = export.workspaceBarEnabled
         workspaceBarShowLabels = export.workspaceBarShowLabels
         workspaceBarShowFloatingWindows = export.workspaceBarShowFloatingWindows
-        workspaceBarWindowLevel = WorkspaceBarWindowLevel(rawValue: export.workspaceBarWindowLevel) ?? .popup
-        workspaceBarPosition = WorkspaceBarPosition(rawValue: export.workspaceBarPosition) ?? .overlappingMenuBar
-        workspaceBarNotchMode = WorkspaceBarNotchMode(rawValue: export.workspaceBarNotchMode) ?? .moveBelowMenuBar
+        workspaceBarWindowLevel = export.workspaceBarWindowLevel
+        workspaceBarPosition = export.workspaceBarPosition
+        workspaceBarNotchMode = export.workspaceBarNotchMode
         workspaceBarNotchActiveZoneWidth = min(max(export.workspaceBarNotchActiveZoneWidth, 100), 400)
         workspaceBarSystemStatsButton = export.workspaceBarSystemStatsButton
         workspaceBarDeduplicateAppIcons = export.workspaceBarDeduplicateAppIcons
@@ -886,11 +956,13 @@ final class SettingsStore {
         workspaceBarIconOverrides = SettingsStore.normalizedWorkspaceBarIconOverrides(
             export.workspaceBarIconOverrides
         )
+        scratchpadLabels = SettingsStore.normalizedScratchpadLabels(export.scratchpadLabels)
         workspaceBarReserveLayoutSpace = export.workspaceBarReserveLayoutSpace
-        workspaceBarRevealModifier = WorkspaceBarRevealModifier(rawValue: export.workspaceBarRevealModifier) ?? .off
+        workspaceBarRevealModifier = export.workspaceBarRevealModifier
         workspaceBarRevealHoldMilliseconds = SettingsStore.validatedWorkspaceBarRevealHoldMilliseconds(
             export.workspaceBarRevealHoldMilliseconds
         )
+        workspaceBarHideInNativeFullscreen = export.workspaceBarHideInNativeFullscreen
         workspaceBarHeight = export.workspaceBarHeight
         workspaceBarBackgroundOpacity = export.workspaceBarBackgroundOpacity
         workspaceBarXOffset = export.workspaceBarXOffset
@@ -906,7 +978,7 @@ final class SettingsStore {
         dwindleSmartSplit = export.dwindleSmartSplit
         dwindleDefaultSplitRatio = export.dwindleDefaultSplitRatio
         dwindleSplitWidthMultiplier = export.dwindleSplitWidthMultiplier
-        dwindleSingleWindowFit = SingleWindowFit(serialized: export.dwindleSingleWindowFit)
+        dwindleSingleWindowFit = export.dwindleSingleWindowFit
         dwindleUseGlobalGaps = export.dwindleUseGlobalGaps
         dwindleMoveToRootStable = export.dwindleMoveToRootStable
         monitorDwindleSettings = export.monitorDwindleSettings
@@ -917,15 +989,15 @@ final class SettingsStore {
         ipcEnabled = export.ipcEnabled
         scrollGestureEnabled = export.scrollGestureEnabled
         scrollSensitivity = export.scrollSensitivity
-        scrollModifierKey = ScrollModifierKey(rawValue: export.scrollModifierKey) ?? .optionShift
-        mouseMoveModifierKey = MouseMoveModifierKey(rawValue: export.mouseMoveModifierKey) ?? .option
-        mouseResizeModifierKey = MouseResizeModifierKey(rawValue: export.mouseResizeModifierKey) ?? .option
-        gestureFingerCount = GestureFingerCount(rawValue: export.gestureFingerCount) ?? .three
+        scrollModifierKey = export.scrollModifierKey
+        mouseMoveModifierKey = export.mouseMoveModifierKey
+        mouseResizeModifierKey = export.mouseResizeModifierKey
+        gestureFingerCount = export.gestureFingerCount
         gestureInvertDirection = export.gestureInvertDirection
-        trackpadScrollStyle = TrackpadScrollStyle(rawValue: export.trackpadScrollStyle) ?? .snap
+        trackpadScrollStyle = export.trackpadScrollStyle
         workspaceSwipeEnabled = export.workspaceSwipeEnabled
-        workspaceSwipeFingerCount = GestureFingerCount(rawValue: export.workspaceSwipeFingerCount) ?? .three
-        workspaceSwipeAxis = WorkspaceSwipeAxis(rawValue: export.workspaceSwipeAxis) ?? .vertical
+        workspaceSwipeFingerCount = export.workspaceSwipeFingerCount
+        workspaceSwipeAxis = export.workspaceSwipeAxis
         statusBarShowWorkspaceName = export.statusBarShowWorkspaceName
         statusBarShowAppNames = export.statusBarShowAppNames
         statusBarUseWorkspaceId = export.statusBarUseWorkspaceId
@@ -941,7 +1013,7 @@ final class SettingsStore {
         clipboardMaxTotalBytes = export.clipboardMaxTotalBytes
 
         quakeTerminalEnabled = export.quakeTerminalEnabled
-        quakeTerminalPosition = QuakeTerminalPosition(rawValue: export.quakeTerminalPosition) ?? .center
+        quakeTerminalPosition = export.quakeTerminalPosition
         quakeTerminalWidthPercent = QuakeTerminalGeometryPolicy
             .normalizedDimensionPercent(export.quakeTerminalWidthPercent)
         quakeTerminalHeightPercent = QuakeTerminalGeometryPolicy
@@ -949,19 +1021,16 @@ final class SettingsStore {
         quakeTerminalAnimationDuration = export.quakeTerminalAnimationDuration
         quakeTerminalAutoHide = export.quakeTerminalAutoHide
         quakeTerminalOpacity = export.quakeTerminalOpacity ?? baseline.quakeTerminalOpacity ?? 1.0
-        quakeTerminalBackgroundEffect = QuakeTerminalBackgroundEffect(
-            rawValue: export.quakeTerminalBackgroundEffect
-        ) ?? .standardBlur
+        quakeTerminalBackgroundEffect = export.quakeTerminalBackgroundEffect
         quakeTerminalBackgroundBlurRadius = QuakeTerminalAppearancePolicy.normalizedBackgroundBlurRadius(
             export.quakeTerminalBackgroundBlurRadius
                 ?? baseline.quakeTerminalBackgroundBlurRadius
                 ?? QuakeTerminalAppearancePolicy.disabledBackgroundBlurRadius
         )
-        quakeTerminalMonitorMode = QuakeTerminalMonitorMode(
-            rawValue: export.quakeTerminalMonitorMode ?? baseline.quakeTerminalMonitorMode ?? ""
-        ) ?? .focusedWindow
+        quakeTerminalMonitorMode = export.quakeTerminalMonitorMode ?? baseline
+            .quakeTerminalMonitorMode ?? .focusedWindow
 
-        appearanceMode = AppearanceMode(rawValue: export.appearanceMode) ?? .dark
+        appearanceMode = export.appearanceMode
     }
 
     private func syncQuakeTerminalCustomFrameToRuntimeState() {
@@ -975,9 +1044,17 @@ final class SettingsStore {
         }
     }
 
-    private func handleExternalReload(_ export: SettingsExport) {
+    private func handleExternalReload(_ outcome: SettingsFileLoadOutcome) {
+        transitionConfigNotice(to: outcome.notice)
+        guard let export = outcome.export else { return }
         applyExport(export)
         onExternalSettingsReloaded?()
+    }
+
+    private func transitionConfigNotice(to notice: SettingsConfigNotice?) {
+        guard notice != configNotice else { return }
+        configNotice = notice
+        onConfigNoticeChanged?()
     }
 
     private func scheduleSave() {
@@ -989,28 +1066,6 @@ final class SettingsStore {
         hyperKeyModifiers = SettingsStore.defaultExport.hyperKeyModifiers
         hotkeyBindings = HotkeyBindingRegistry.defaults()
         systemHyperTrigger = SettingsStore.defaultExport.systemHyperTrigger
-    }
-
-    func hotkeyBindings(applyingPreset mappings: [(id: String, trigger: HotkeyTrigger)]) -> [HotkeyBinding] {
-        var proposed = hotkeyBindings
-        for mapping in mappings {
-            for index in proposed.indices where proposed[index].id != mapping.id &&
-                proposed[index].binding.conflicts(with: mapping.trigger)
-            {
-                proposed[index] = HotkeyBinding(
-                    id: proposed[index].id,
-                    command: proposed[index].command,
-                    trigger: .unassigned
-                )
-            }
-            guard let index = proposed.firstIndex(where: { $0.id == mapping.id }) else { continue }
-            proposed[index] = HotkeyBinding(
-                id: proposed[index].id,
-                command: proposed[index].command,
-                trigger: mapping.trigger
-            )
-        }
-        return proposed
     }
 
     func updateBinding(for commandId: String, newBinding: KeyBinding) {
@@ -1035,10 +1090,6 @@ final class SettingsStore {
               let index = hotkeyBindings.firstIndex(where: { $0.id == commandId })
         else { return }
         hotkeyBindings[index] = defaultBinding
-    }
-
-    func findConflicts(for binding: KeyBinding, excluding commandId: String) -> [HotkeyBinding] {
-        findConflicts(for: binding.isUnassigned ? .unassigned : .chord(binding), excluding: commandId)
     }
 
     func findConflicts(for trigger: HotkeyTrigger, excluding commandId: String) -> [HotkeyBinding] {
@@ -1185,10 +1236,6 @@ final class SettingsStore {
         return true
     }
 
-    func appRule(for bundleId: String) -> AppRule? {
-        appRules.first { $0.bundleId == bundleId }
-    }
-
     func orientationSettings(for monitor: Monitor) -> MonitorOrientationSettings? {
         MonitorSettingsStore.get(for: monitor, in: monitorOrientationSettings)
     }
@@ -1210,16 +1257,8 @@ final class SettingsStore {
         MonitorSettingsStore.remove(for: monitor, from: &monitorOrientationSettings)
     }
 
-    func routingSettings(for monitor: Monitor) -> MonitorRoutingSettings? {
-        MonitorSettingsStore.get(for: monitor, in: monitorRoutingSettings)
-    }
-
-    func updateRoutingSettings(_ settings: MonitorRoutingSettings, for monitor: Monitor) {
-        MonitorSettingsStore.update(settings, for: monitor, in: &monitorRoutingSettings)
-    }
-
-    func removeRoutingSettings(for monitor: Monitor) {
-        MonitorSettingsStore.remove(for: monitor, from: &monitorRoutingSettings)
+    func storeRoutingLayout(_ layout: [MonitorRoutingSettings], for monitors: [Monitor]) {
+        MonitorRouting.store(layout, for: monitors, in: &monitorArrangements)
     }
 
     func niriSettings(for monitor: Monitor) -> MonitorNiriSettings? {
@@ -1278,7 +1317,7 @@ final class SettingsStore {
             splitWidthMultiplier: CGFloat(override?.splitWidthMultiplier ?? dwindleSplitWidthMultiplier),
             singleWindowFit: override?.singleWindowFit ?? dwindleSingleWindowFit,
             useGlobalGaps: useGlobalGaps,
-            innerGap: useGlobalGaps ? sharedInnerGap : CGFloat(override?.innerGap ?? gapSize)
+            innerGap: useGlobalGaps ? sharedInnerGap : resolvedInnerGap(override?.innerGap)
         )
     }
 
@@ -1305,7 +1344,8 @@ final class SettingsStore {
             outerGapLeft: CGFloat(override?.outerGapLeft ?? outerGapLeft),
             outerGapRight: CGFloat(override?.outerGapRight ?? outerGapRight),
             outerGapTop: CGFloat(override?.outerGapTop ?? outerGapTop),
-            outerGapBottom: CGFloat(override?.outerGapBottom ?? outerGapBottom)
+            outerGapBottom: CGFloat(override?.outerGapBottom ?? outerGapBottom),
+            fullscreenUsesOuterGaps: override?.fullscreenUsesOuterGaps ?? fullscreenUsesOuterGaps
         )
     }
 
@@ -1383,6 +1423,23 @@ final class SettingsStore {
             let order = lhs.caseInsensitiveCompare(rhs)
             return order == .orderedSame ? lhs < rhs : order == .orderedAscending
         }
+    }
+
+    static func normalizedScratchpadLabels(_ labels: [String: String]) -> [String: String] {
+        labels.reduce(into: [:]) { normalized, entry in
+            guard let index = Int(entry.key.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  IPCScratchpadSlots.range.contains(index)
+            else {
+                return
+            }
+            let label = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !label.isEmpty else { return }
+            normalized[String(index)] = label
+        }
+    }
+
+    func scratchpadLabel(for index: Int) -> String? {
+        scratchpadLabels[String(index)]
     }
 
     static func normalizedWorkspaceBarIconOverrides(_ overrides: [String: String]) -> [String: String] {

@@ -504,10 +504,7 @@ final class AXFullRescanBoundaryTests: XCTestCase {
             } == true)
             XCTAssertNil(windows[orphanWindow.windowId])
             XCTAssertNil(subscriptions[orphanWindow.windowId])
-            XCTAssertEqual(
-                Set(pending.value.map(\.notification)),
-                Set(AppAXWindowNotification.allCases)
-            )
+            XCTAssertEqual(pending.value.map(\.notification), [.miniaturized])
             XCTAssertTrue(pending.value.allSatisfy {
                 CFEqual($0.element, orphanWindow.element)
             })
@@ -744,15 +741,15 @@ final class AXFullRescanBoundaryTests: XCTestCase {
             request,
             pid: pid,
             generations: generations,
-            writeFrame: { window, frame, _, _ in
+            writeFrame: { window, frame, _, components, _ in
                 writtenElements.append(window.element)
                 return AXFrameWriteResult(
-                    targetFrame: frame,
                     observedFrame: frame,
                     writeOrder: .sizeThenPosition,
                     sizeError: .success,
                     positionError: .success,
-                    failureReason: nil
+                    failureReason: nil,
+                    components: components
                 )
             },
             refreshWindow: { _, _ in
@@ -797,12 +794,13 @@ final class AXFullRescanBoundaryTests: XCTestCase {
             request,
             pid: pid,
             generations: generations,
-            writeFrame: { window, frame, hint, _ in
+            writeFrame: { window, frame, hint, components, _ in
                 writtenElements.append(window.element)
                 return .skipped(
                     targetFrame: frame,
                     currentFrameHint: hint,
-                    failureReason: .staleElement
+                    failureReason: .staleElement,
+                    components: components
                 )
             },
             refreshWindow: { _, _ in replacementWindow }
@@ -813,6 +811,48 @@ final class AXFullRescanBoundaryTests: XCTestCase {
         XCTAssertTrue(writtenElements.first.map { CFEqual($0, expectedWindow.element) } == true)
         XCTAssertFalse(writtenElements.contains { CFEqual($0, replacementWindow.element) })
         XCTAssertFalse(generations.isCurrent(generation, for: windowId))
+    }
+
+    func testFrameWriteRequestForwardsExplicitComponents() {
+        let pid: pid_t = 71_035
+        let windowId = 71_036
+        let window = AXWindowRef(
+            element: AXUIElementCreateApplication(pid),
+            windowId: windowId
+        )
+        let generations = LockedWindowGenerationMap()
+        let request = AppAXFrameWriteRequest(
+            requestId: 3,
+            pid: pid,
+            windowId: windowId,
+            expectedWindow: window,
+            frame: CGRect(x: 20, y: 30, width: 640, height: 480),
+            currentFrameHint: nil,
+            components: .position,
+            generation: generations.nextGeneration(for: windowId),
+            verify: false
+        )
+        var receivedComponents: AXFrameComponents = []
+
+        let result = applyFrameWriteRequest(
+            request,
+            pid: pid,
+            generations: generations,
+            writeFrame: { _, frame, _, components, _ in
+                receivedComponents = components
+                return AXFrameWriteResult(
+                    observedFrame: nil,
+                    writeOrder: .sizeThenPosition,
+                    sizeError: .success,
+                    positionError: .success,
+                    failureReason: nil,
+                    components: components
+                )
+            }
+        )
+
+        XCTAssertEqual(receivedComponents, .position)
+        XCTAssertEqual(result.writeResult.components, .position)
     }
 
     func testRapidBindingSupersessionReturnsSupersededWithoutPublishing() throws {
@@ -931,7 +971,8 @@ final class AXFullRescanBoundaryTests: XCTestCase {
                 expectedWindow: retired,
                 windows: windows,
                 subscribedWindows: subscriptions,
-                pendingNotificationRemovals: pending
+                pendingNotificationRemovals: pending,
+                observerKey: nil
             )
 
             XCTAssertFalse(outcome.removedCachedWindow)
@@ -970,7 +1011,8 @@ final class AXFullRescanBoundaryTests: XCTestCase {
                 expectedWindow: subscribed,
                 windows: windows,
                 subscribedWindows: subscriptions,
-                pendingNotificationRemovals: pending
+                pendingNotificationRemovals: pending,
+                observerKey: nil
             )
 
             XCTAssertFalse(outcome.removedCachedWindow)
@@ -1167,7 +1209,7 @@ final class AXFullRescanBoundaryTests: XCTestCase {
         XCTAssertNil(controller.workspaceManager.cachedConstraints(for: token))
     }
 
-    func testCapturedParentedTransientWidgetEvidenceNeverUsesLiveWindowServerProvider() {
+    func testCapturedParentedEvidenceNeverUsesLiveWindowServerProvider() {
         let controller = WindowAdmissionTestSupport.controller()
         let token = WindowToken(pid: 86_312, windowId: 7_916)
         let evidence = AXWindowDecisionEvidence(
@@ -1315,7 +1357,7 @@ final class AXFullRescanBoundaryTests: XCTestCase {
             XCTAssertEqual(evaluation.decision.disposition, .unmanaged)
             XCTAssertEqual(
                 evaluation.decision.source,
-                .builtInRule(WindowRuleEngine.helpTagSurfaceRuleName)
+                .builtInRule(WindowRuleEngine.externalSurfaceRuleName)
             )
             XCTAssertNil(evaluation.decision.deferredReason)
         }
@@ -1686,418 +1728,6 @@ final class AXFullRescanBoundaryTests: XCTestCase {
         XCTAssertEqual(controller.workspaceManager.hiddenState(for: token), hiddenState)
     }
 
-    func testFullRescanPreservesFocusedTrackedSheetWithMatchingWindowServerIdentity() throws {
-        for (index, mode) in [TrackedWindowMode.tiling, .floating].enumerated() {
-            let controller = WindowAdmissionTestSupport.controller()
-            let workspaceId = try XCTUnwrap(
-                controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
-            )
-            let pid = pid_t(72_100 + index)
-            let windowId = 72_110 + index
-            let parentWindowId = UInt32(72_120 + index)
-            let token = trackSheet(
-                controller: controller,
-                workspaceId: workspaceId,
-                pid: pid,
-                windowId: windowId,
-                parentWindowId: parentWindowId,
-                mode: mode
-            )
-            XCTAssertTrue(
-                controller.workspaceManager.confirmManagedFocus(
-                    token,
-                    in: workspaceId,
-                    activateWorkspaceOnMonitor: false
-                )
-            )
-            controller.workspaceManager.setSystemModalFocus(token)
-            var queriedWindowIds: [UInt32] = []
-            let matchingWindowInfo = WindowServerInfo(
-                id: UInt32(windowId),
-                pid: pid,
-                level: 0,
-                frame: CGRect(x: 200, y: 160, width: 600, height: 350),
-                parentId: parentWindowId
-            )
-            controller.axEventHandler.windowInfoProvider = { queriedWindowId in
-                queriedWindowIds.append(queriedWindowId)
-                return matchingWindowInfo
-            }
-            let capturedWindowServerInfo = index == 0 ? [windowId: matchingWindowInfo] : [:]
-
-            for _ in 0 ..< 2 {
-                var seenKeys: Set<WindowToken> = []
-                controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-                    windowServerInfoByWindowId: capturedWindowServerInfo,
-                    seenKeys: &seenKeys
-                )
-
-                XCTAssertEqual(seenKeys, [token])
-                XCTAssertTrue(
-                    controller.layoutRefreshController.confirmedMissingEntries(
-                        keys: seenKeys,
-                        requiredConsecutiveMisses: 2
-                    ).isEmpty
-                )
-            }
-
-            XCTAssertEqual(controller.workspaceManager.entry(for: token)?.mode, mode)
-            XCTAssertEqual(controller.workspaceManager.systemModalFocusToken, token)
-            XCTAssertEqual(
-                queriedWindowIds,
-                index == 0 ? [] : [UInt32(windowId), UInt32(windowId)]
-            )
-
-            controller.axEventHandler.windowInfoProvider = { _ in nil }
-            controller.axEventHandler.handleCGSEvent(
-                .destroyed(windowId: UInt32(windowId), spaceId: 0)
-            )
-
-            XCTAssertNil(controller.workspaceManager.entry(for: token))
-            XCTAssertNil(controller.workspaceManager.systemModalFocusToken)
-        }
-    }
-
-    func testFullRescanPreservesFocusedSheetWhenParentEvidenceMaturesWithoutFallbackFocus() throws {
-        var focusedTokens: [WindowToken] = []
-        let controller = WindowAdmissionTestSupport.controller(
-            windowFocusOperations: WindowFocusOperations(
-                activateApp: { _ in },
-                focusSpecificWindow: { pid, windowId, _ in
-                    focusedTokens.append(WindowToken(pid: pid, windowId: Int(windowId)))
-                },
-                raiseWindow: { _ in }
-            )
-        )
-        let workspaceId = try XCTUnwrap(
-            controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
-        )
-        let fallbackToken = controller.workspaceManager.addWindow(
-            AXWindowRef(
-                element: AXUIElementCreateApplication(72_130),
-                windowId: 72_131
-            ),
-            pid: 72_130,
-            windowId: 72_131,
-            to: workspaceId
-        )
-        XCTAssertTrue(
-            controller.workspaceManager.confirmManagedFocus(
-                fallbackToken,
-                in: workspaceId,
-                activateWorkspaceOnMonitor: false
-            )
-        )
-        let pid: pid_t = 72_132
-        let windowId = 72_133
-        let parentWindowId: UInt32 = 72_134
-        let token = trackSheet(
-            controller: controller,
-            workspaceId: workspaceId,
-            pid: pid,
-            windowId: windowId,
-            parentWindowId: parentWindowId,
-            mode: .floating
-        )
-        var metadata = try XCTUnwrap(
-            controller.workspaceManager.entry(for: token)?.managedReplacementMetadata
-        )
-        metadata.parentWindowId = nil
-        _ = controller.workspaceManager.setManagedReplacementMetadata(metadata, for: token)
-        XCTAssertTrue(
-            controller.workspaceManager.confirmManagedFocus(
-                token,
-                in: workspaceId,
-                activateWorkspaceOnMonitor: false
-            )
-        )
-        controller.workspaceManager.setSystemModalFocus(token)
-        let maturedWindowInfo = WindowServerInfo(
-            id: UInt32(windowId),
-            pid: pid,
-            level: 0,
-            frame: CGRect(x: 200, y: 160, width: 600, height: 350),
-            parentId: parentWindowId
-        )
-
-        for _ in 0 ..< 2 {
-            var seenKeys: Set<WindowToken> = [fallbackToken]
-            controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-                windowServerInfoByWindowId: [windowId: maturedWindowInfo],
-                seenKeys: &seenKeys
-            )
-            XCTAssertEqual(seenKeys, [fallbackToken, token])
-
-            let missingEntries = controller.layoutRefreshController.confirmedMissingEntries(
-                keys: seenKeys,
-                requiredConsecutiveMisses: 2
-            )
-            XCTAssertTrue(missingEntries.isEmpty)
-            for entry in missingEntries {
-                controller.axEventHandler.retireManagedWindowFromAuthoritativeRescan(entry)
-            }
-            controller.ensureFocusedTokenValid(in: workspaceId)
-        }
-
-        XCTAssertNotNil(controller.workspaceManager.entry(for: token))
-        XCTAssertEqual(controller.workspaceManager.focusedToken, token)
-        XCTAssertEqual(controller.workspaceManager.systemModalFocusToken, token)
-        XCTAssertTrue(focusedTokens.isEmpty)
-        XCTAssertNil(controller.intentLedger.activeManagedRequest)
-        XCTAssertNil(controller.workspaceManager.pendingFocusedToken)
-    }
-
-    func testFullRescanFocusedSheetPreservationRejectsAmbiguousOrStaleEvidence() throws {
-        let controller = WindowAdmissionTestSupport.controller()
-        let workspaceId = try XCTUnwrap(
-            controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
-        )
-        let pid: pid_t = 72_130
-        let windowId = 72_131
-        let parentWindowId: UInt32 = 72_132
-        let token = trackSheet(
-            controller: controller,
-            workspaceId: workspaceId,
-            pid: pid,
-            windowId: windowId,
-            parentWindowId: parentWindowId,
-            mode: .floating
-        )
-        XCTAssertTrue(
-            controller.workspaceManager.confirmManagedFocus(
-                token,
-                in: workspaceId,
-                activateWorkspaceOnMonitor: false
-            )
-        )
-        var queriedWindowIds: [UInt32] = []
-        var resolvedWindowInfo: WindowServerInfo? = WindowServerInfo(
-            id: UInt32(windowId),
-            pid: pid,
-            level: 0,
-            frame: CGRect(x: 200, y: 160, width: 600, height: 350),
-            parentId: parentWindowId
-        )
-        controller.axEventHandler.windowInfoProvider = { queriedWindowId in
-            queriedWindowIds.append(queriedWindowId)
-            return resolvedWindowInfo
-        }
-
-        var seenKeys: Set<WindowToken> = [token]
-        controller.workspaceManager.setSystemModalFocus(token)
-        controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: [:],
-            seenKeys: &seenKeys
-        )
-        XCTAssertTrue(queriedWindowIds.isEmpty)
-
-        seenKeys.removeAll()
-        let otherToken = controller.workspaceManager.addWindow(
-            AXWindowRef(
-                element: AXUIElementCreateApplication(pid + 1),
-                windowId: windowId + 1
-            ),
-            pid: pid + 1,
-            windowId: windowId + 1,
-            to: workspaceId
-        )
-        XCTAssertTrue(
-            controller.workspaceManager.confirmManagedFocus(
-                otherToken,
-                in: workspaceId,
-                activateWorkspaceOnMonitor: false
-            )
-        )
-        controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: [:],
-            seenKeys: &seenKeys
-        )
-        XCTAssertTrue(seenKeys.isEmpty)
-        XCTAssertTrue(queriedWindowIds.isEmpty)
-
-        XCTAssertTrue(
-            controller.workspaceManager.confirmManagedFocus(
-                token,
-                in: workspaceId,
-                activateWorkspaceOnMonitor: false
-            )
-        )
-        controller.workspaceManager.setSystemModalFocus(nil)
-        controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: [:],
-            seenKeys: &seenKeys
-        )
-        XCTAssertTrue(seenKeys.isEmpty)
-        XCTAssertTrue(queriedWindowIds.isEmpty)
-
-        controller.workspaceManager.setSystemModalFocus(token)
-        var metadata = try XCTUnwrap(
-            controller.workspaceManager.entry(for: token)?.managedReplacementMetadata
-        )
-        metadata.role = kAXWindowRole as String
-        _ = controller.workspaceManager.setManagedReplacementMetadata(metadata, for: token)
-        controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: [:],
-            seenKeys: &seenKeys
-        )
-        XCTAssertTrue(seenKeys.isEmpty)
-        XCTAssertTrue(queriedWindowIds.isEmpty)
-
-        metadata.role = kAXSheetRole as String
-        metadata.parentWindowId = nil
-        _ = controller.workspaceManager.setManagedReplacementMetadata(metadata, for: token)
-        let parentlessCapturedWindowInfo = WindowServerInfo(
-            id: UInt32(windowId),
-            pid: pid,
-            level: 0,
-            frame: .zero,
-            parentId: 0
-        )
-        controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: [windowId: parentlessCapturedWindowInfo],
-            seenKeys: &seenKeys
-        )
-        XCTAssertTrue(seenKeys.isEmpty)
-        XCTAssertTrue(queriedWindowIds.isEmpty)
-
-        metadata.parentWindowId = parentWindowId
-        _ = controller.workspaceManager.setManagedReplacementMetadata(metadata, for: token)
-        let mismatchedCapturedWindowInfo = WindowServerInfo(
-            id: UInt32(windowId),
-            pid: pid,
-            level: 0,
-            frame: .zero,
-            parentId: parentWindowId + 1
-        )
-        controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: [windowId: mismatchedCapturedWindowInfo],
-            seenKeys: &seenKeys
-        )
-        XCTAssertTrue(seenKeys.isEmpty)
-        XCTAssertTrue(queriedWindowIds.isEmpty)
-
-        let mismatchedWindowInfos: [WindowServerInfo?] = [
-            nil,
-            WindowServerInfo(
-                id: UInt32(windowId + 1),
-                pid: pid,
-                level: 0,
-                frame: .zero,
-                parentId: parentWindowId
-            ),
-            WindowServerInfo(
-                id: UInt32(windowId),
-                pid: pid + 1,
-                level: 0,
-                frame: .zero,
-                parentId: parentWindowId
-            ),
-            WindowServerInfo(
-                id: UInt32(windowId),
-                pid: pid,
-                level: 0,
-                frame: .zero,
-                parentId: parentWindowId + 1
-            )
-        ]
-        for mismatchedWindowInfo in mismatchedWindowInfos {
-            resolvedWindowInfo = mismatchedWindowInfo
-            seenKeys.removeAll()
-            controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-                windowServerInfoByWindowId: [:],
-                seenKeys: &seenKeys
-            )
-            XCTAssertTrue(seenKeys.isEmpty)
-        }
-        XCTAssertEqual(queriedWindowIds, Array(repeating: UInt32(windowId), count: 4))
-    }
-
-    func testFullRescanFocusedSheetUsesTwoMissCleanupWithoutWindowServerEvidence() throws {
-        let controller = WindowAdmissionTestSupport.controller()
-        let workspaceId = try XCTUnwrap(
-            controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
-        )
-        let pid: pid_t = 72_140
-        let windowId = 72_141
-        let token = trackSheet(
-            controller: controller,
-            workspaceId: workspaceId,
-            pid: pid,
-            windowId: windowId,
-            parentWindowId: 72_142,
-            mode: .floating
-        )
-        XCTAssertTrue(
-            controller.workspaceManager.confirmManagedFocus(
-                token,
-                in: workspaceId,
-                activateWorkspaceOnMonitor: false
-            )
-        )
-        controller.workspaceManager.setSystemModalFocus(token)
-        controller.axEventHandler.windowInfoProvider = { _ in nil }
-
-        var seenKeys: Set<WindowToken> = []
-        controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: [:],
-            seenKeys: &seenKeys
-        )
-        XCTAssertTrue(
-            controller.layoutRefreshController.confirmedMissingEntries(
-                keys: seenKeys,
-                requiredConsecutiveMisses: 2
-            ).isEmpty
-        )
-
-        controller.layoutRefreshController.preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: [:],
-            seenKeys: &seenKeys
-        )
-        let missingEntry = try XCTUnwrap(
-            controller.layoutRefreshController.confirmedMissingEntries(
-                keys: seenKeys,
-                requiredConsecutiveMisses: 2
-            ).first
-        )
-        XCTAssertEqual(missingEntry.token, token)
-
-        controller.axEventHandler.retireManagedWindowFromAuthoritativeRescan(missingEntry)
-
-        XCTAssertNil(controller.workspaceManager.entry(for: token))
-        XCTAssertNil(controller.workspaceManager.systemModalFocusToken)
-    }
-
-    private func trackSheet(
-        controller: WMController,
-        workspaceId: WorkspaceDescriptor.ID,
-        pid: pid_t,
-        windowId: Int,
-        parentWindowId: UInt32,
-        mode: TrackedWindowMode
-    ) -> WindowToken {
-        controller.workspaceManager.addWindow(
-            AXWindowRef(
-                element: AXUIElementCreateApplication(pid),
-                windowId: windowId
-            ),
-            pid: pid,
-            windowId: windowId,
-            to: workspaceId,
-            mode: mode,
-            managedReplacementMetadata: ManagedReplacementMetadata(
-                bundleId: "com.apple.systempreferences",
-                workspaceId: workspaceId,
-                mode: mode,
-                role: kAXSheetRole as String,
-                subrole: nil,
-                title: "Displays",
-                windowLevel: 0,
-                parentWindowId: parentWindowId,
-                frame: CGRect(x: 200, y: 160, width: 600, height: 350)
-            )
-        )
-    }
-
     func testBoundedAsyncMapCapsConcurrencyAndPreservesInputOrder() async throws {
         let probe = AXBoundaryConcurrencyProbe()
         let inputs = Array(0 ..< 12)
@@ -2111,6 +1741,147 @@ final class AXFullRescanBoundaryTests: XCTestCase {
 
         XCTAssertEqual(output, inputs)
         XCTAssertEqual(probe.maximum, 4)
+    }
+
+    func testGlobalFullRescanBatchesTrackedOffCensusEvidenceBeforeEnumeration() async {
+        let manager = AXManager()
+        defer { manager.cleanup() }
+        let firstTrackedWindowId = Int(UInt32.max - 100)
+        let secondTrackedWindowId = Int(UInt32.max - 101)
+        let firstPID: pid_t = 2_147_483_500
+        let secondPID: pid_t = 2_147_483_499
+        var batches: [Set<UInt32>] = []
+        manager.fullRescanWindowInfoProvider = { windowIds in
+            batches.append(windowIds)
+            withUnsafeCurrentTask { task in
+                task?.cancel()
+            }
+            return [
+                UInt32(firstTrackedWindowId): WindowServerInfo(
+                    id: UInt32(firstTrackedWindowId),
+                    pid: firstPID,
+                    level: 101,
+                    frame: CGRect(x: 20, y: 30, width: 480, height: 302)
+                ),
+                UInt32(secondTrackedWindowId): WindowServerInfo(
+                    id: UInt32(secondTrackedWindowId),
+                    pid: secondPID,
+                    level: 8,
+                    frame: CGRect(x: 40, y: 50, width: 520, height: 320)
+                )
+            ]
+        }
+
+        let scan = Task { @MainActor in
+            try await manager.fullRescanEnumerationSnapshot(
+                scope: .all,
+                preservingPIDsByWindowId: [
+                    firstTrackedWindowId: firstPID,
+                    secondTrackedWindowId: secondPID
+                ]
+            )
+        }
+
+        do {
+            _ = try await scan.value
+            XCTFail("Expected cancellation after exact evidence capture")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(
+            batches,
+            [[UInt32(firstTrackedWindowId), UInt32(secondTrackedWindowId)]]
+        )
+    }
+
+    func testExactFullRescanWindowServerEvidenceRejectsPIDReuseAndQueryFailure() async throws {
+        let manager = AXManager()
+        defer { manager.cleanup() }
+        let exactWindowId = 72_310
+        let missingWindowId = 72_311
+        let mismatchedWindowId = 72_312
+        let exactPID: pid_t = 72_313
+        let mismatchedPID: pid_t = 72_314
+        var queryCount = 0
+        manager.fullRescanWindowInfoProvider = { windowIds in
+            queryCount += 1
+            XCTAssertEqual(
+                windowIds,
+                [UInt32(exactWindowId), UInt32(missingWindowId), UInt32(mismatchedWindowId)]
+            )
+            return [
+                UInt32(exactWindowId): WindowServerInfo(
+                    id: UInt32(exactWindowId),
+                    pid: exactPID,
+                    level: 101,
+                    frame: CGRect(x: 20, y: 30, width: 480, height: 302)
+                ),
+                UInt32(mismatchedWindowId): WindowServerInfo(
+                    id: UInt32(mismatchedWindowId),
+                    pid: mismatchedPID,
+                    level: 101,
+                    frame: CGRect(x: 40, y: 50, width: 520, height: 320)
+                )
+            ]
+        }
+
+        let partialResult = try await manager.queryFullRescanWindowServerEvidence(
+            windowIds: [exactWindowId, missingWindowId, mismatchedWindowId],
+            excludingWindowIds: [],
+            expectedPIDsByWindowId: [
+                exactWindowId: exactPID,
+                missingWindowId: exactPID,
+                mismatchedWindowId: exactPID
+            ]
+        )
+        let partial = try XCTUnwrap(partialResult)
+
+        XCTAssertEqual(Set(partial.keys), [exactWindowId])
+        manager.fullRescanWindowInfoProvider = { _ in
+            queryCount += 1
+            return nil
+        }
+        let failedResult = try await manager.queryFullRescanWindowServerEvidence(
+            windowIds: [exactWindowId],
+            excludingWindowIds: [],
+            expectedPIDsByWindowId: [exactWindowId: exactPID]
+        )
+        XCTAssertNil(failedResult)
+        XCTAssertEqual(queryCount, 2)
+    }
+
+    func testTargetedFullRescanTreatsDistinctWindowServerOwnerAsDependency() async throws {
+        let manager = AXManager()
+        defer { manager.cleanup() }
+        let logicalPID: pid_t = 2_147_483_498
+        let ownerPID: pid_t = 2_147_483_497
+        let windowId = 72_320
+        var batches: [Set<UInt32>] = []
+        manager.fullRescanWindowInfoProvider = { windowIds in
+            batches.append(windowIds)
+            return [
+                UInt32(windowId): WindowServerInfo(
+                    id: UInt32(windowId),
+                    pid: ownerPID,
+                    level: 0,
+                    frame: CGRect(x: 20, y: 30, width: 480, height: 302)
+                )
+            ]
+        }
+
+        let snapshot = try await manager.fullRescanEnumerationSnapshot(
+            scope: .targeted(appPIDs: [logicalPID], nativeSpaceIds: []),
+            preservingPIDsByWindowId: [windowId: logicalPID],
+            identityDependencyPIDsByWindowId: [:]
+        )
+
+        XCTAssertEqual(batches, [[UInt32(windowId)]])
+        XCTAssertEqual(snapshot.failedPIDs, [logicalPID, ownerPID])
+        XCTAssertEqual(snapshot.exactWindowIds, [windowId])
+        XCTAssertEqual(snapshot.windowServerInfoByWindowId[windowId]?.pid, ownerPID)
+        XCTAssertTrue(snapshot.authoritativeTargetPIDs.isEmpty)
     }
 
     func testBoundedAsyncMapStopsEnqueueingAfterCancellation() async {
@@ -2523,6 +2294,116 @@ final class AXFullRescanBoundaryTests: XCTestCase {
             windowServerOwnerPID: nil,
             enumerationRoute: route
         )
+    }
+
+    func testDeferredWindowInfoReadAllowsMainThreadProgress() async throws {
+        let started = expectation(description: "background query entered")
+        let gate = DispatchSemaphore(value: 0)
+        let read = Task {
+            try await SkyLight.performWindowInfoQuery {
+                XCTAssertFalse(Thread.isMainThread)
+                started.fulfill()
+                XCTAssertEqual(gate.wait(timeout: .now() + 2), .success)
+                return [77: WindowServerInfo(id: 77, pid: 1234, level: 8, frame: .zero)]
+            }
+        }
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertTrue(Thread.isMainThread)
+        gate.signal()
+        let result = try await read.value
+        XCTAssertEqual(result?[77]?.level, 8)
+    }
+
+    func testDeferredWindowInfoReadDiscardsCancelledInFlightResult() async {
+        let started = expectation(description: "background query blocked")
+        let gate = DispatchSemaphore(value: 0)
+        let read = Task {
+            try await SkyLight.performWindowInfoQuery {
+                started.fulfill()
+                _ = gate.wait(timeout: .now() + 2)
+                return [77: WindowServerInfo(id: 77, pid: 1234, level: 8, frame: .zero)]
+            }
+        }
+        await fulfillment(of: [started], timeout: 1)
+        read.cancel()
+        gate.signal()
+        do {
+            _ = try await read.value
+            XCTFail("Cancelled read must not publish evidence")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testDeferredFullRescanRejectsEvidenceReturnedAfterCancellation() async {
+        let manager = AXManager()
+        defer { manager.cleanup() }
+        let entered = expectation(description: "rescan query entered")
+        let gate = AXBoundaryAsyncGate()
+        manager.fullRescanWindowInfoProvider = { ids in
+            entered.fulfill()
+            await gate.wait()
+            return Dictionary(uniqueKeysWithValues: ids.map {
+                ($0, WindowServerInfo(id: $0, pid: 1234, level: 8, frame: .zero))
+            })
+        }
+        let scan = Task {
+            try await manager.fullRescanEnumerationSnapshot(
+                scope: .targeted(appPIDs: [1234], nativeSpaceIds: []),
+                preservingPIDsByWindowId: [77: 1234]
+            )
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        scan.cancel()
+        await gate.releaseAll()
+        do {
+            _ = try await scan.value
+            XCTFail("Cancelled scan must not merge returned evidence")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testDeferredFullRescanCannotApplyAfterWindowChangesWorkspace() async throws {
+        let controller = WindowAdmissionTestSupport.controller()
+        let source = try XCTUnwrap(controller.workspaceManager.workspaceId(for: "1", createIfMissing: true))
+        let destination = try XCTUnwrap(controller.workspaceManager.workspaceId(for: "2", createIfMissing: true))
+        let pid: pid_t = 2_147_483_497
+        let windowId = 72_399
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateApplication(pid), windowId: windowId),
+            pid: pid, windowId: windowId, to: source, mode: .tiling
+        )
+        let refresh = controller.layoutRefreshController
+        defer { refresh.resetState() }
+        let entered = expectation(description: "inventory read awaiting result")
+        let gate = AXBoundaryAsyncGate()
+        controller.axManager.fullRescanWindowInfoProvider = { ids in
+            entered.fulfill()
+            await gate.wait()
+            return Dictionary(uniqueKeysWithValues: ids.map {
+                ($0, WindowServerInfo(id: $0, pid: pid, level: 0, frame: .zero))
+            })
+        }
+        refresh.beginPerformanceCapture()
+        refresh.layoutState.pendingRefresh = .init(
+            kind: .fullRescan, reason: .appLaunched,
+            rescanScope: .targeted(appPIDs: [pid], nativeSpaceIds: [])
+        )
+        refresh.startNextRefreshIfNeeded()
+        await fulfillment(of: [entered], timeout: 1)
+        let active = try XCTUnwrap(refresh.layoutState.activeRefreshTask)
+        refresh.layoutState.inventoryStabilityHoldFullRescans = true
+        controller.workspaceManager.setWorkspace(for: token, to: destination)
+        await gate.releaseAll()
+        await active.value
+        XCTAssertEqual(refresh.performanceSnapshot()?.refreshesIncomplete, 1)
+        XCTAssertEqual(refresh.performanceSnapshot()?.refreshesCompleted, 0)
+        XCTAssertEqual(controller.workspaceManager.workspace(for: token), destination)
+        XCTAssertNotNil(controller.workspaceManager.entry(for: token))
+        XCTAssertFalse(refresh.layoutState.didExecuteEffectPlan)
     }
 }
 

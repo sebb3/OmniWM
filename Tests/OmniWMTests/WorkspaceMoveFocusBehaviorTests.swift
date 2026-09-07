@@ -67,7 +67,8 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
                 try assertCompletion(
                     fixture,
                     activeWorkspaceId: followsFocus ? destinationWorkspaceId : sourceWorkspaceId,
-                    expectedFocusToken: followsFocus ? moved.id : nil
+                    expectedFocusToken: followsFocus ? moved.id : nil,
+                    preservedSelectionToken: followsFocus ? nil : moved.id
                 )
             }
         }
@@ -158,7 +159,8 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
                 try assertCompletion(
                     fixture,
                     activeWorkspaceId: followsFocus ? destinationWorkspaceId : sourceWorkspaceId,
-                    expectedFocusToken: followsFocus ? moved.id : nil
+                    expectedFocusToken: followsFocus ? moved.id : nil,
+                    preservedSelectionToken: followsFocus ? nil : moved.id
                 )
             }
         }
@@ -330,7 +332,7 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
         }
     }
 
-    func testInvalidatedWorkspaceMoveDoesNotOverrideNewerNonManagedFocus() throws {
+    func testInvalidatedWorkspaceMoveDoesNotOverrideNewerExternalFocus() throws {
         for followsFocus in [false, true] {
             let fixture = try makeFixture(layouts: [.niri, .niri], followsFocus: followsFocus)
             let sourceWorkspaceId = fixture.workspaceIds[0]
@@ -352,12 +354,12 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
                 fixture.controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceIndex: 1)
 
                 let action = try pendingPostLayoutAction(fixture)
-                XCTAssertTrue(fixture.controller.workspaceManager.enterNonManagedFocus())
+                XCTAssertTrue(fixture.controller.workspaceManager.recordExternalFocus())
                 XCTAssertFalse(action.isCurrent(using: fixture.controller.workspaceManager))
                 action.runIfCurrent(using: fixture.controller.workspaceManager)
 
                 XCTAssertTrue(fixture.focusRecorder.focusedTokens.isEmpty)
-                XCTAssertTrue(fixture.controller.workspaceManager.isNonManagedFocusActive)
+                XCTAssertTrue(fixture.controller.workspaceManager.nativeFocusOwner.isExternal)
                 XCTAssertNil(fixture.controller.intentLedger.activeManagedRequest)
             }
         }
@@ -456,7 +458,7 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
                 ) {
                     XCTAssertFalse(fixture.controller.settings.moveCrossesMonitorAtEdge)
                     XCTAssertEqual(
-                        fixture.controller.commandHandler.handleHotkeyCommand(.moveWindowToMonitor(.right)),
+                        fixture.controller.commandHandler.performCommand(.moveWindowToMonitor(.right)),
                         .executed
                     )
 
@@ -509,9 +511,9 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
         let manager = controller.workspaceManager
 
         let noFocusWorldSeq = manager.worldSeq
-        XCTAssertNil(manager.focusedToken)
+        XCTAssertNil(manager.selectedManagedToken)
         XCTAssertEqual(
-            controller.commandHandler.handleHotkeyCommand(.moveWindowToMonitor(.right)),
+            controller.commandHandler.performCommand(.moveWindowToMonitor(.right)),
             .executed
         )
         XCTAssertEqual(manager.worldSeq, noFocusWorldSeq)
@@ -535,7 +537,7 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
         let noAdjacentWorldSeq = manager.worldSeq
 
         XCTAssertEqual(
-            controller.commandHandler.handleHotkeyCommand(.moveWindowToMonitor(.left)),
+            controller.commandHandler.performCommand(.moveWindowToMonitor(.left)),
             .executed
         )
         XCTAssertEqual(manager.workspace(for: window.id), fixture.sourceWorkspaceId)
@@ -910,7 +912,8 @@ extension WorkspaceMoveFocusBehaviorTests {
     private func assertCompletion(
         _ fixture: Fixture,
         activeWorkspaceId: WorkspaceDescriptor.ID,
-        expectedFocusToken: WindowToken?
+        expectedFocusToken: WindowToken?,
+        preservedSelectionToken: WindowToken? = nil
     ) throws {
         let controller = fixture.controller
         let manager = controller.workspaceManager
@@ -933,8 +936,8 @@ extension WorkspaceMoveFocusBehaviorTests {
         } else {
             XCTAssertTrue(fixture.focusRecorder.focusedTokens.isEmpty)
             XCTAssertNil(manager.pendingFocusedToken)
-            XCTAssertNil(manager.focusedToken)
-            XCTAssertTrue(manager.isNonManagedFocusActive)
+            XCTAssertEqual(manager.selectedManagedToken, preservedSelectionToken)
+            XCTAssertEqual(manager.nativeFocusOwner, .none)
             XCTAssertNil(manager.renderableFocusToken)
             XCTAssertNil(controller.intentLedger.activeManagedRequest)
         }

@@ -95,6 +95,115 @@ final class CLIRendererOutputTests: XCTestCase {
         XCTAssertEqual(try IPCWire.decodeResponse(from: output.data), response)
     }
 
+    func testNDJSONResponseAndEventAreCompactSingleLines() throws {
+        let response = IPCResponse.success(
+            id: "sub",
+            kind: .subscribe,
+            status: .subscribed,
+            result: IPCResult(subscribed: IPCSubscribeResult(channels: [.focus]))
+        )
+        let responseOutput = try CLIRenderer.responseOutput(response, format: .ndjson)
+        XCTAssertEqual(responseOutput.data, try IPCWire.encodeResponseLine(response, prettyPrinted: false))
+        XCTAssertEqual(responseOutput.data.filter { $0 == 0x0A }.count, 1)
+
+        let event = IPCEventEnvelope.success(
+            id: "evt",
+            channel: .displayChanged,
+            result: IPCResult(displays: IPCDisplaysQueryResult(displays: []))
+        )
+        let eventOutput = try CLIRenderer.eventOutput(event, format: .ndjson)
+        XCTAssertEqual(eventOutput.data, try IPCWire.encodeEventLine(event, prettyPrinted: false))
+        XCTAssertEqual(eventOutput.data.filter { $0 == 0x0A }.count, 1)
+    }
+
+    func testJSONOutputStaysPrettyPrinted() throws {
+        let response = IPCResponse.success(
+            id: "sub",
+            kind: .subscribe,
+            status: .subscribed,
+            result: IPCResult(subscribed: IPCSubscribeResult(channels: [.focus]))
+        )
+        XCTAssertEqual(
+            try CLIRenderer.responseOutput(response, format: .json).data,
+            try IPCWire.encodeResponseLine(response, prettyPrinted: true)
+        )
+        let event = IPCEventEnvelope.success(
+            id: "evt",
+            channel: .displayChanged,
+            result: IPCResult(displays: IPCDisplaysQueryResult(displays: []))
+        )
+        XCTAssertEqual(
+            try CLIRenderer.eventOutput(event, format: .json).data,
+            try IPCWire.encodeEventLine(event, prettyPrinted: true)
+        )
+    }
+
+    func testWindowIdColumnIsAppendedOnlyWhenPresent() throws {
+        let response = IPCResponse.success(
+            id: "1",
+            kind: .query,
+            result: IPCResult(windows: IPCWindowsQueryResult(windows: [IPCWindowQuerySnapshot(
+                id: "ow_a",
+                windowId: 42
+            )]))
+        )
+        let text = try XCTUnwrap(String(
+            data: try CLIRenderer.responseOutput(response, format: .tsv).data,
+            encoding: .utf8
+        ))
+        let lines = text.split(separator: "\n")
+        let headers = try XCTUnwrap(lines.first).split(separator: "\t", omittingEmptySubsequences: false)
+        let column = try XCTUnwrap(headers.firstIndex(of: "WINDOW ID"))
+        XCTAssertEqual(lines[1].split(separator: "\t", omittingEmptySubsequences: false)[column], "42")
+
+        let omitted = IPCResponse.success(
+            id: "2",
+            kind: .query,
+            result: IPCResult(windows: IPCWindowsQueryResult(windows: [IPCWindowQuerySnapshot(id: "ow_a")]))
+        )
+        let omittedText = try XCTUnwrap(String(
+            data: try CLIRenderer.responseOutput(omitted, format: .tsv).data,
+            encoding: .utf8
+        ))
+        XCTAssertFalse(omittedText.contains("WINDOW ID"))
+    }
+
+    func testDisplayFullscreenGapsColumnUsesTrueFalseAndIsOmittedWhenUnrequested() throws {
+        let response = IPCResponse.success(
+            id: "1",
+            kind: .query,
+            result: IPCResult(
+                displays: IPCDisplaysQueryResult(
+                    displays: [
+                        IPCDisplayQuerySnapshot(id: "left", fullscreenUsesOuterGaps: true),
+                        IPCDisplayQuerySnapshot(id: "right", fullscreenUsesOuterGaps: false)
+                    ]
+                )
+            )
+        )
+        let output = try CLIRenderer.responseOutput(response, format: .tsv)
+        let text = try XCTUnwrap(String(data: output.data, encoding: .utf8))
+        let lines = text.split(separator: "\n")
+        let headers = try XCTUnwrap(lines.first).split(separator: "\t", omittingEmptySubsequences: false)
+        let column = try XCTUnwrap(headers.firstIndex(of: "FULLSCREEN GAPS"))
+
+        XCTAssertEqual(lines[1].split(separator: "\t", omittingEmptySubsequences: false)[column], "true")
+        XCTAssertEqual(lines[2].split(separator: "\t", omittingEmptySubsequences: false)[column], "false")
+
+        let omittedResponse = IPCResponse.success(
+            id: "2",
+            kind: .query,
+            result: IPCResult(
+                displays: IPCDisplaysQueryResult(
+                    displays: [IPCDisplayQuerySnapshot(id: "left")]
+                )
+            )
+        )
+        let omittedOutput = try CLIRenderer.responseOutput(omittedResponse, format: .tsv)
+        let omittedText = try XCTUnwrap(String(data: omittedOutput.data, encoding: .utf8))
+        XCTAssertFalse(omittedText.contains("FULLSCREEN GAPS"))
+    }
+
     func testTablePreservesAndAlignsUnicodeTitles() throws {
         let titles = [
             "abcdefgh",

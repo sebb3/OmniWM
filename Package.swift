@@ -1,4 +1,4 @@
-// swift-tools-version: 6.4
+// swift-tools-version: 6.3
 import Foundation
 import PackageDescription
 
@@ -68,7 +68,7 @@ let package = Package(
                 .linkedLibrary("c++"),
                 .unsafeFlags(["-L\(ghosttyMacOSLibraryDirectory)"]),
                 .unsafeFlags(["-F/System/Library/PrivateFrameworks", "-framework", "SkyLight"]),
-                .unsafeFlags(["-weak_framework", "FoundationModels"])
+                .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "FoundationModels"])
             ]
         ),
         .executableTarget(

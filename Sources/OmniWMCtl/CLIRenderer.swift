@@ -48,26 +48,6 @@ struct CLILocalFailureEnvelope: Codable, Equatable, Sendable {
 }
 
 enum CLIRenderer {
-    static func responseOutput(_ response: IPCResponse, prefersJSON: Bool) throws -> CLIRenderedOutput {
-        try responseOutput(response, format: prefersJSON ? .json : .text)
-    }
-
-    static func eventOutput(_ event: IPCEventEnvelope, prefersJSON: Bool) throws -> CLIRenderedOutput {
-        try eventOutput(event, format: prefersJSON ? .json : .text)
-    }
-
-    static func parseErrorOutput(_ error: CLIParseError, prefersJSON: Bool) throws -> CLIRenderedOutput {
-        try parseErrorOutput(error, format: prefersJSON ? .json : .text)
-    }
-
-    static func transportErrorOutput(_ error: Error, prefersJSON: Bool) throws -> CLIRenderedOutput {
-        try transportErrorOutput(error, format: prefersJSON ? .json : .text)
-    }
-
-    static func internalErrorOutput(_ error: Error, prefersJSON: Bool) throws -> CLIRenderedOutput {
-        try internalErrorOutput(error, format: prefersJSON ? .json : .text)
-    }
-
     static func exitCode(for response: IPCResponse) -> CLIExitCode {
         guard !response.ok else { return .success }
 
@@ -81,8 +61,11 @@ enum CLIRenderer {
              .unauthorized,
              .staleWindowId,
              .notFound,
+             .noChange,
+             .windowActionFailed,
              .workspaceAssignmentConflict,
              .workspaceStateConflict,
+             .captureStateConflict,
              .invalidArguments,
              .invalidRequest,
              .none:
@@ -93,7 +76,7 @@ enum CLIRenderer {
     static func responseOutput(_ response: IPCResponse, format: CLIOutputFormat) throws -> CLIRenderedOutput {
         if format.prefersJSON {
             return CLIRenderedOutput(
-                data: try IPCWire.encodeResponseLine(response, prettyPrinted: true),
+                data: try IPCWire.encodeResponseLine(response, prettyPrinted: format.prettyPrintsJSON),
                 destination: .standardOutput
             )
         }
@@ -106,7 +89,7 @@ enum CLIRenderer {
 
     static func eventOutput(_ event: IPCEventEnvelope, format: CLIOutputFormat) throws -> CLIRenderedOutput {
         CLIRenderedOutput(
-            data: try IPCWire.encodeEventLine(event, prettyPrinted: format.prefersJSON),
+            data: try IPCWire.encodeEventLine(event, prettyPrinted: format.prettyPrintsJSON),
             destination: .standardOutput
         )
     }
@@ -154,7 +137,7 @@ enum CLIRenderer {
         if format.prefersJSON {
             let envelope = CLILocalFailureEnvelope(code: code, message: message, exitCode: exitCode)
             return CLIRenderedOutput(
-                data: try encodeLocalEnvelope(envelope),
+                data: try encodeLocalEnvelope(envelope, prettyPrinted: format.prettyPrintsJSON),
                 destination: .standardOutput
             )
         }
@@ -164,7 +147,13 @@ enum CLIRenderer {
     }
 
     private static func formattedResponseText(_ response: IPCResponse, format: CLIOutputFormat) -> String {
-        guard response.ok else { return humanReadableStatus(for: response) }
+        guard response.ok else {
+            let status = humanReadableStatus(for: response)
+            guard let result = response.result,
+                  case let .capture(capture) = result.payload
+            else { return status }
+            return "\(status)\n\(formattedCapture(capture, format: format))"
+        }
         guard let result = response.result else { return humanReadableStatus(for: response) }
 
         switch result.payload {
@@ -200,8 +189,12 @@ enum CLIRenderer {
             return formattedSubscriptions(payload, format: format)
         case let .capabilities(payload):
             return formattedCapabilities(payload, format: format)
+        case let .capture(payload):
+            return formattedCapture(payload, format: format)
         case let .subscribed(payload):
             return "subscribed: \(payload.channels.map(\.rawValue).joined(separator: ", "))"
+        case let .metrics(payload):
+            return formattedMetrics(payload, format: format)
         }
     }
 
@@ -225,10 +218,16 @@ enum CLIRenderer {
     }
 
     private static func humanReadableVersion(_ version: IPCVersionResult) -> String {
+        let detail = [
+            "protocol \(version.protocolVersion)",
+            version.gitHash.map { "build \($0)" },
+            version.buildConfiguration,
+            version.executableSHA256.map { "sha256 \($0.prefix(12))" }
+        ].compactMap(\.self).joined(separator: ", ")
         if let appVersion = version.appVersion {
-            return "\(appVersion) (protocol \(version.protocolVersion))"
+            return "\(appVersion) (\(detail))"
         }
-        return "protocol \(version.protocolVersion)"
+        return detail
     }
 
     private static func formattedActiveWorkspace(
@@ -280,7 +279,7 @@ enum CLIRenderer {
     }
 
     private static func formattedWindows(_ payload: IPCWindowsQueryResult, format: CLIOutputFormat) -> String {
-        let rows = payload.windows.map { window in
+        var rows = payload.windows.map { window in
             [
                 window.id ?? "-",
                 pidDescription(window.pid),
@@ -291,15 +290,18 @@ enum CLIRenderer {
                 window.mode?.rawValue ?? "-",
                 boolDescription(window.isFocused),
                 boolDescription(window.isVisible),
-                boolDescription(window.isScratchpad)
+                window.scratchpadIndex.map(String.init) ?? boolDescription(window.isScratchpad)
             ]
         }
-
-        return formatRows(
-            headers: ["ID", "PID", "APP", "TITLE", "WORKSPACE", "DISPLAY", "MODE", "FOCUSED", "VISIBLE", "SCRATCHPAD"],
-            rows: rows,
-            format: format
+        var headers = ["ID", "PID", "APP", "TITLE", "WORKSPACE", "DISPLAY", "MODE", "FOCUSED", "VISIBLE", "SCRATCHPAD"]
+        appendColumn(
+            "WINDOW ID",
+            values: payload.windows.map { $0.windowId.map(String.init) },
+            headers: &headers,
+            rows: &rows
         )
+
+        return formatRows(headers: headers, rows: rows, format: format)
     }
 
     private static func formattedWorkspaces(_ payload: IPCWorkspacesQueryResult, format: CLIOutputFormat) -> String {
@@ -352,8 +354,23 @@ enum CLIRenderer {
             headers: &headers,
             rows: &rows
         )
+        appendDisplayBooleanColumn(
+            "FULLSCREEN GAPS",
+            values: payload.displays.map(\.fullscreenUsesOuterGaps),
+            headers: &headers,
+            rows: &rows
+        )
 
         return formatRows(headers: headers, rows: rows, format: format)
+    }
+
+    private static func appendDisplayBooleanColumn(
+        _ header: String,
+        values: [Bool?],
+        headers: inout [String],
+        rows: inout [[String]]
+    ) {
+        appendColumn(header, values: values.map { $0.map { String($0) } }, headers: &headers, rows: &rows)
     }
 
     private static func appendDisplayColumn(
@@ -362,10 +379,19 @@ enum CLIRenderer {
         headers: inout [String],
         rows: inout [[String]]
     ) {
+        appendColumn(header, values: values.map { $0.map(gapValueDescription) }, headers: &headers, rows: &rows)
+    }
+
+    private static func appendColumn(
+        _ header: String,
+        values: [String?],
+        headers: inout [String],
+        rows: inout [[String]]
+    ) {
         guard values.contains(where: { $0 != nil }) else { return }
         headers.append(header)
         for index in rows.indices {
-            rows[index].append(values[index].map { gapValueDescription($0) } ?? "-")
+            rows[index].append(values[index] ?? "-")
         }
     }
 
@@ -504,7 +530,8 @@ enum CLIRenderer {
         _ payload: IPCCapabilitiesQueryResult,
         format: CLIOutputFormat
     ) -> String {
-        let rows = [
+        // Explicit type: the 6.3 type checker times out inferring this literal.
+        let rows: [[String]] = [
             ["protocol-version", String(payload.protocolVersion)],
             ["app-version", payload.appVersion ?? "-"],
             ["authorization-required", payload.authorizationRequired ? "true" : "false"],
@@ -512,12 +539,95 @@ enum CLIRenderer {
             ["queries", String(payload.queries.count)],
             ["commands", String(payload.commands.count)],
             ["rule-actions", String(payload.ruleActions.count)],
+            ["capture-actions", String(payload.captureActions.count)],
             ["workspace-actions", String(payload.workspaceActions.count)],
             ["window-actions", String(payload.windowActions.count)],
             ["subscriptions", String(payload.subscriptions.count)]
         ]
 
         return formatRows(headers: ["CAPABILITY", "VALUE"], rows: rows, format: format)
+    }
+
+    private static func formattedCapture(_ payload: IPCCaptureResult, format: CLIOutputFormat) -> String {
+        let artifact = payload.lastArtifact
+        return formatRows(
+            headers: ["FIELD", "VALUE"],
+            rows: [
+                ["phase", payload.phase.rawValue],
+                ["profile", payload.profile?.rawValue ?? "-"],
+                ["started-at", payload.startedAt ?? "-"],
+                ["last-artifact-profile", artifact?.profile.rawValue ?? "-"],
+                ["last-artifact-path", artifact?.path ?? "-"],
+                ["last-artifact-started-at", artifact?.startedAt ?? "-"],
+                ["last-artifact-ended-at", artifact?.endedAt ?? "-"],
+                ["failure-reason", payload.failureReason ?? "-"]
+            ],
+            format: format
+        )
+    }
+
+    private static func formattedMetrics(_ payload: IPCMetricsQueryResult, format: CLIOutputFormat) -> String {
+        let rows = payload.axWrites.byApp.map { bucket in
+            [
+                bucket.app ?? String(bucket.pid),
+                String(bucket.context),
+                bucket.lane,
+                String(bucket.count),
+                String(bucket.failureCount),
+                String(format: "%.1f", bucket.meanMicroseconds / 1_000),
+                String(format: "%.1f", bucket.maxMicroseconds / 1_000)
+            ]
+        }
+        let table = formatRows(
+            headers: ["APP", "CONTEXT", "LANE", "WRITES", "FAILED", "MEAN MS", "MAX MS"],
+            rows: rows,
+            format: format
+        )
+        guard format == .text || format == .table else { return table }
+
+        var lines: [String] = []
+        lines.append(
+            "ax frame writes since launch: \(payload.axWrites.count) attempts"
+                + " mean \(String(format: "%.2f", payload.axWrites.meanMicroseconds / 1_000)) ms"
+                + " max \(String(format: "%.2f", payload.axWrites.maxMicroseconds / 1_000)) ms"
+                + " failed \(payload.axWrites.failureCount)"
+        )
+        let ticks = payload.displayTicks
+        lines.append(
+            "display ticks: \(ticks.tickCount)"
+                + " timing anomalies \(ticks.timingAnomalyCount)"
+                + " (\(String(format: "%.1f", ticks.timingAnomalyPercent))%)"
+                + " long-gap \(ticks.longTimestampGapCount)"
+                + " work-over-period \(ticks.workExceededNominalPeriodCount)"
+                + " completion-past-target \(ticks.completionPastTargetCount)"
+        )
+        lines.append(
+            "  work mean \(String(format: "%.2f", ticks.meanWorkMicroseconds / 1_000)) ms"
+                + " max \(String(format: "%.2f", ticks.maxWorkMicroseconds / 1_000)) ms;"
+                + " max interval \(String(format: "%.2f", ticks.maxIntervalMicroseconds / 1_000)) ms;"
+                + " min slack at entry \(String(format: "%.2f", ticks.minEntrySlackMicroseconds / 1_000)) ms"
+                + " at completion \(String(format: "%.2f", ticks.minCompletionSlackMicroseconds / 1_000)) ms"
+                + " (negative = past the frame's target timestamp)"
+        )
+        lines.append(
+            "layout builds: \(payload.layoutBuilds.totalBuilds)"
+                + " cycles \(payload.layoutBuilds.completedRelayoutCycles)"
+        )
+        if let process = payload.process {
+            lines.append(
+                "energy: \(process.energyNanojoules / 1_000_000) mJ"
+                    + " cpu \(String(format: "%.1f", Double(process.userTimeNanoseconds + process.systemTimeNanoseconds) / 1_000_000_000)) s"
+                    + " wakeups \(process.packageIdleWakeups)"
+                    + " footprint \(process.physicalFootprintBytes / 1_048_576) MB"
+            )
+        }
+        lines.append("trace capture active: \(payload.traceCaptureActive)")
+        if !rows.isEmpty {
+            lines.append("")
+            lines.append("live app contexts (rows retire with the app's AX context):")
+            lines.append(table)
+        }
+        return lines.joined(separator: "\n")
     }
 
     private static func formatAppSummary(_ apps: [IPCManagedAppSummary], format: CLIOutputFormat) -> String {
@@ -529,7 +639,8 @@ enum CLIRenderer {
 
     private static func formatRows(headers: [String], rows: [[String]], format: CLIOutputFormat) -> String {
         switch format {
-        case .json:
+        case .json,
+             .ndjson:
             return ""
         case .tsv:
             let sanitizedRows = ([headers] + rows).map { $0.map(sanitizedCell) }
@@ -615,8 +726,8 @@ enum CLIRenderer {
         "\(Int(size.width))x\(Int(size.height))"
     }
 
-    private static func encodeLocalEnvelope(_ envelope: CLILocalFailureEnvelope) throws -> Data {
-        var data = try IPCWire.makeEncoder(prettyPrinted: true).encode(envelope)
+    private static func encodeLocalEnvelope(_ envelope: CLILocalFailureEnvelope, prettyPrinted: Bool) throws -> Data {
+        var data = try IPCWire.makeEncoder(prettyPrinted: prettyPrinted).encode(envelope)
         data.append(0x0A)
         return data
     }

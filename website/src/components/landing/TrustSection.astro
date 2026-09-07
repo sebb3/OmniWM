@@ -1,0 +1,80 @@
+---
+const pillars = [
+  {
+    title: 'Mac-native control',
+    detail: 'Accessibility, AppKit, and selected Apple private APIs work together as one purpose-built system.',
+  },
+  {
+    title: 'Refresh-rate-aware',
+    detail: 'Animations pace themselves to your display — 60, 120, or 144 Hz.',
+  },
+  {
+    title: 'SIP stays on',
+    detail: 'Official OmniWM releases do not require disabling System Integrity Protection.',
+  },
+  {
+    title: 'Signed & notarized',
+    detail: 'Current official releases are Developer ID signed and Apple-notarized.',
+  },
+  {
+    title: 'Free and open source',
+    detail: 'No subscriptions, paywalls, trials, or usage caps. Licensed GPL-2.0-only.',
+  },
+];
+---
+
+<section class="section trust">
+  <div class="container">
+    <div class="section-head">
+      <h2>Performance &amp; trust</h2>
+      <p>Built for people who came from Linux tiling and refuse to compromise.</p>
+    </div>
+    <div class="pillars">
+      {
+        pillars.map((pillar) => (
+          <div class="pillar">
+            <h3>{pillar.title}</h3>
+            <p>{pillar.detail}</p>
+          </div>
+        ))
+      }
+    </div>
+    <p class="compat-link"><a href="/help/known-limitations/">Compatibility, requirements, and known limitations →</a></p>
+  </div>
+</section>
+
+<style>
+  .pillars {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 14px;
+  }
+
+  .pillar {
+    padding: 20px;
+    border-radius: 12px;
+    border: 1px solid var(--page-frame-border);
+    background: var(--page-surface);
+  }
+
+  .pillar h3 {
+    margin: 0 0 8px;
+    font-size: 15.5px;
+  }
+
+  .pillar p {
+    margin: 0;
+    color: var(--page-muted);
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+
+  .compat-link {
+    margin: 24px 0 0;
+    text-align: center;
+  }
+
+  .compat-link a {
+    font-weight: 600;
+  }
+</style>

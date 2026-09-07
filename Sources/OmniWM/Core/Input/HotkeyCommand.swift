@@ -37,6 +37,8 @@ enum HotkeyCommand: Codable, Equatable, Hashable {
     case moveColumnToWorkspaceUp
     case moveColumnToWorkspaceDown
     case switchWorkspace(Int)
+    case switchWorkspaceSlot(Int)
+    case moveToWorkspaceSlot(Int)
     case switchWorkspaceNext
     case switchWorkspacePrevious
     case focusMonitorPrevious
@@ -98,16 +100,15 @@ enum HotkeyCommand: Codable, Equatable, Hashable {
     case preselectClear
 
     case workspaceBackAndForth
-    case focusWorkspaceAnywhere(Int)
-    case moveWindowToWorkspaceOnMonitor(workspaceIndex: Int, monitorDirection: Direction)
 
     case openCommandPalette
 
     case raiseAllFloatingWindows
     case rescueOffscreenWindows
     case toggleFocusedWindowFloating
-    case assignFocusedWindowToScratchpad
-    case toggleScratchpadWindow
+    case closeFocusedWindow
+    case assignFocusedWindowToScratchpad(Int)
+    case toggleScratchpad(Int)
 
     case openMenuAnywhere
 

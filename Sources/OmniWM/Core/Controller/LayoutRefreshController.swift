@@ -8,13 +8,6 @@ import QuartzCore
 @MainActor final class LayoutRefreshController: NSObject {
     typealias PostLayoutAction = @MainActor () -> Void
 
-    enum RefreshRoute: Equatable {
-        case relayout
-        case immediateRelayout
-        case visibilityRefresh
-        case windowRemoval
-    }
-
     enum ScheduledRefreshKind: Int {
         case relayout
         case immediateRelayout
@@ -144,6 +137,18 @@ import QuartzCore
         case failure
     }
 
+    struct ScratchpadRevealOutcome {
+        let revealedHandles: [WindowHandle]
+    }
+
+    private struct ScratchpadRevealGroup {
+        let index: ScratchpadIndex
+        var pendingTransactionIds: Set<UInt64> = []
+        var revealedHandles: [WindowHandle] = []
+        var sealed = false
+        let onComplete: (ScratchpadRevealOutcome) -> Void
+    }
+
     private struct PendingRevealTransaction {
         let id: UInt64
         var token: WindowToken
@@ -156,16 +161,25 @@ import QuartzCore
         let hiddenState: HiddenState
         var postSuccessActions: [RefreshPostLayoutAction]
         var delayedVerificationScheduled: Bool = false
+        var revealGroupId: UInt64?
     }
 
     var layoutState = LayoutRefreshState()
     private var layoutBuildMetrics = LayoutBuildMetrics()
+    var displayTickMetrics = DisplayTickMetrics()
+    var performanceCounters: PerformanceCounters?
+    var displayLinkActivationForTests: ((CGDirectDisplayID) -> Bool)?
+    var displayLinkCreationAllowedForTests: ((CGDirectDisplayID) -> Bool)?
+    var activeDisplayLinkCountForTests: (() -> Int)?
+    var fullRescanEnumerationSnapshotForTests: AXManager.FullRescanEnumerationSnapshot?
     private var activeFrameContext: RefreshFrameContext?
     private var nextPendingRevealTransactionId: UInt64 = 1
+    private var nextScratchpadRevealGroupId: UInt64 = 1
     private var pendingRevealTransactionsByWindowId: [Int: PendingRevealTransaction] = [:]
     private var pendingRevealVerificationTasksByWindowId: [Int: Task<Void, Never>] = [:]
-    private var closingAnimationIdsByObjectId: [ObjectIdentifier: UUID] = [:]
-    private var lastSubmittedClosingFramesByAnimationId: [UUID: CGRect] = [:]
+    private var scratchpadRevealGroups: [UInt64: ScratchpadRevealGroup] = [:]
+    var closingAnimationIdsByObjectId: [ObjectIdentifier: UUID] = [:]
+    var lastSubmittedClosingFramesByAnimationId: [UUID: CGRect] = [:]
     var nativeFullscreenRestoredFrameApplyTokens: Set<WindowToken> = []
 
     var fastFrameProvider: (WindowToken, AXWindowRef) -> CGRect? = { _, axRef in
@@ -192,306 +206,6 @@ import QuartzCore
     init(controller: WMController) {
         self.controller = controller
         super.init()
-    }
-
-    func setup() {
-        detectRefreshRates()
-        layoutState.screenChangeObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.handleScreenParametersChanged()
-            }
-        }
-    }
-
-    private func getOrCreateDisplayLink(for displayId: CGDirectDisplayID) -> CADisplayLink? {
-        if let existing = layoutState.displayLinksByDisplay[displayId] {
-            return existing
-        }
-
-        guard let screen = NSScreen.screens.first(where: { $0.displayId == displayId }) else {
-            return nil
-        }
-        let link = screen.displayLink(target: self, selector: #selector(displayLinkFired(_:)))
-        layoutState.displayLinksByDisplay[displayId] = link
-        return link
-    }
-
-    private func handleScreenParametersChanged() {
-        detectRefreshRates()
-        controller?.syncMonitorsToNiriEngine()
-        controller?.surfaceReconciler.noteWorldChanged()
-    }
-
-    func cleanupForMonitorDisconnect(displayId: CGDirectDisplayID, migrateAnimations: Bool) {
-        if let link = layoutState.displayLinksByDisplay.removeValue(forKey: displayId) {
-            link.invalidate()
-        }
-
-        if let animations = layoutState.closingAnimationsByDisplay.removeValue(forKey: displayId) {
-            for animation in animations.values {
-                forgetClosingAnimation(animation)
-            }
-        }
-
-        if migrateAnimations {
-            if let wsId = niriHandler.scrollAnimationByDisplay.removeValue(forKey: displayId) {
-                startScrollAnimation(for: wsId)
-            }
-        } else if let workspaceId = niriHandler.scrollAnimationByDisplay.removeValue(forKey: displayId) {
-            controller?.workspaceManager.animationDriver.removeMotions(for: [workspaceId])
-        }
-        dwindleHandler.dwindleAnimationByDisplay.removeValue(forKey: displayId)
-    }
-
-    private func detectRefreshRates() {
-        layoutState.refreshRateByDisplay.removeAll()
-        for screen in NSScreen.screens {
-            guard let displayId = screen.displayId else { continue }
-            layoutState.refreshRateByDisplay[displayId] = Monitor.refreshRate(for: displayId)
-        }
-    }
-
-    @objc private func displayLinkFired(_ displayLink: CADisplayLink) {
-        guard let displayId = layoutState.displayLinksByDisplay.first(where: { $0.value === displayLink })?.key
-        else { return }
-
-        let traceActive = AnimationTickTrace.shared.isActive
-        let t0 = traceActive ? CACurrentMediaTime() : 0
-        var t1: CFTimeInterval = 0
-        var t2: CFTimeInterval = 0
-        var t3: CFTimeInterval = 0
-
-        SkyLight.shared.withTransactionScope {
-            niriHandler.tickScrollAnimation(targetTime: displayLink.targetTimestamp, displayId: displayId)
-            t1 = traceActive ? CACurrentMediaTime() : 0
-            dwindleHandler.tickDwindleAnimation(targetTime: displayLink.targetTimestamp, displayId: displayId)
-            t2 = traceActive ? CACurrentMediaTime() : 0
-            tickClosingAnimations(targetTime: displayLink.targetTimestamp, displayId: displayId)
-            t3 = traceActive ? CACurrentMediaTime() : 0
-            controller?.surfaceReconciler.reconcileAnimationTick()
-        }
-
-        auditParkVisibility(displayId: displayId)
-
-        guard traceActive else { return }
-        let t4 = CACurrentMediaTime()
-        let previousTimestamp = layoutState.lastDisplayLinkTimestampByDisplay[displayId]
-        layoutState.lastDisplayLinkTimestampByDisplay[displayId] = displayLink.timestamp
-
-        let expectedMs = displayLink.duration * 1000
-        let intervalMs = previousTimestamp.map { (displayLink.timestamp - $0) * 1000 } ?? 0
-        let totalMs = (t4 - t0) * 1000
-        let dropped = (previousTimestamp != nil && intervalMs > 1.5 * expectedMs)
-            || (expectedMs > 0 && totalMs > expectedMs)
-
-        AnimationTickTrace.shared.record(
-            AnimationTickTrace.Record(
-                mediaTime: t4,
-                displayId: displayId,
-                intervalMs: intervalMs,
-                expectedMs: expectedMs,
-                scrollMs: (t1 - t0) * 1000,
-                dwindleMs: (t2 - t1) * 1000,
-                closingMs: (t3 - t2) * 1000,
-                reconcileMs: (t4 - t3) * 1000,
-                totalMs: totalMs,
-                dropped: dropped
-            )
-        )
-    }
-
-    func startScrollAnimation(for workspaceId: WorkspaceDescriptor.ID, forGesture: Bool = false) {
-        guard forGesture || controller?.motionPolicy.animationsEnabled != false else { return }
-        guard let controller else { return }
-        let targetDisplayId: CGDirectDisplayID
-        if let monitor = controller.workspaceManager.monitor(for: workspaceId) {
-            targetDisplayId = monitor.displayId
-        } else if let mainDisplayId = NSScreen.main?.displayId {
-            targetDisplayId = mainDisplayId
-        } else {
-            return
-        }
-
-        guard let displayLink = getOrCreateDisplayLink(for: targetDisplayId) else { return }
-        guard niriHandler.registerScrollAnimation(workspaceId, on: targetDisplayId) else {
-            return
-        }
-        displayLink.add(to: .main, forMode: .common)
-    }
-
-    func stopScrollAnimation(for displayId: CGDirectDisplayID) {
-        niriHandler.scrollAnimationByDisplay.removeValue(forKey: displayId)
-        stopDisplayLinkIfIdle(for: displayId)
-    }
-
-    func stopAllScrollAnimations() {
-        let displayIds = Array(niriHandler.scrollAnimationByDisplay.keys)
-        niriHandler.scrollAnimationByDisplay.removeAll()
-        for displayId in displayIds {
-            stopDisplayLinkIfIdle(for: displayId)
-        }
-    }
-
-    func startDwindleAnimation(for workspaceId: WorkspaceDescriptor.ID, monitor: Monitor) {
-        guard controller?.motionPolicy.animationsEnabled != false else { return }
-        let targetDisplayId = monitor.displayId
-
-        guard dwindleHandler.registerDwindleAnimation(workspaceId, monitor: monitor, on: targetDisplayId)
-        else { return }
-
-        if let displayLink = getOrCreateDisplayLink(for: targetDisplayId) {
-            displayLink.add(to: .main, forMode: .common)
-        }
-    }
-
-    func startWindowCloseAnimation(entry: WindowState, monitor: Monitor) {
-        guard controller?.motionPolicy.animationsEnabled != false else { return }
-        guard entry.interactionPolicy.mayWriteFrame else { return }
-        guard let controller else { return }
-        guard !controller.workspaceManager.isAppHidden(entry.token) else { return }
-        guard let frame = fastFrame(for: entry.token, axRef: entry.axRef) else { return }
-
-        let displacement = CGPoint(x: 0, y: -12)
-
-        let now = CACurrentMediaTime()
-        let refreshRate = layoutState.refreshRateByDisplay[monitor.displayId] ?? 60.0
-        let animation = SpringAnimation(
-            from: 0,
-            to: 1,
-            startTime: now,
-            config: .balanced.with(epsilon: 0.01, velocityEpsilon: 0.1),
-            displayRefreshRate: refreshRate
-        )
-
-        var animations = layoutState.closingAnimationsByDisplay[monitor.displayId] ?? [:]
-        guard animations[entry.windowId] == nil else { return }
-        animations[entry.windowId] = LayoutRefreshState.ClosingAnimation(
-            pid: entry.pid,
-            windowId: entry.windowId,
-            axRef: entry.axRef,
-            fromFrame: frame,
-            displacement: displacement,
-            animation: animation
-        )
-        _ = closingAnimationId(for: animation)
-        layoutState.closingAnimationsByDisplay[monitor.displayId] = animations
-
-        if let displayLink = getOrCreateDisplayLink(for: monitor.displayId) {
-            displayLink.add(to: .main, forMode: .common)
-        }
-    }
-
-    func cancelFrameAnimations(forPID pid: pid_t) {
-        let displayIds = Array(layoutState.closingAnimationsByDisplay.keys)
-        for displayId in displayIds {
-            guard var animations = layoutState.closingAnimationsByDisplay.removeValue(forKey: displayId)
-            else { continue }
-            let removedWindowIds = animations.compactMap { windowId, animation in
-                animation.pid == pid ? windowId : nil
-            }
-            for windowId in removedWindowIds {
-                if let animation = animations.removeValue(forKey: windowId) {
-                    forgetClosingAnimation(animation)
-                }
-            }
-            if animations.isEmpty {
-                layoutState.closingAnimationsByDisplay.removeValue(forKey: displayId)
-                stopDisplayLinkIfIdle(for: displayId)
-            } else {
-                layoutState.closingAnimationsByDisplay[displayId] = animations
-            }
-        }
-    }
-
-    func stopDwindleAnimation(for displayId: CGDirectDisplayID) {
-        dwindleHandler.dwindleAnimationByDisplay.removeValue(forKey: displayId)
-        stopDisplayLinkIfIdle(for: displayId)
-    }
-
-    func stopAllDwindleAnimations() {
-        let displayIds = Array(dwindleHandler.dwindleAnimationByDisplay.keys)
-        dwindleHandler.dwindleAnimationByDisplay.removeAll()
-        for displayId in displayIds {
-            stopDisplayLinkIfIdle(for: displayId)
-        }
-    }
-
-    func hasDwindleAnimationRunning(in workspaceId: WorkspaceDescriptor.ID) -> Bool {
-        dwindleHandler.hasDwindleAnimationRunning(in: workspaceId)
-    }
-
-    private func stopDisplayLinkIfIdle(for displayId: CGDirectDisplayID) {
-        if niriHandler.scrollAnimationByDisplay[displayId] == nil,
-           dwindleHandler.dwindleAnimationByDisplay[displayId] == nil,
-           layoutState.closingAnimationsByDisplay[displayId].map({ $0.isEmpty }) ?? true
-        {
-            // Idle display links must not remain cached after teardown.
-            if let link = layoutState.displayLinksByDisplay.removeValue(forKey: displayId) {
-                link.invalidate()
-            }
-            layoutState.lastDisplayLinkTimestampByDisplay.removeValue(forKey: displayId)
-            scheduleTrailingParkAudits(displayId: displayId)
-        }
-    }
-
-    private func scheduleTrailingParkAudits(displayId: CGDirectDisplayID) {
-        guard ParkVisibilityAudit.shared.isActive else { return }
-        layoutState.trailingAuditTask?.cancel()
-        layoutState.trailingAuditTask = Task { @MainActor [weak self] in
-            for _ in 0 ..< 30 {
-                try? await Task.sleep(for: .milliseconds(100))
-                guard !Task.isCancelled, let self else { return }
-                self.auditParkVisibility(displayId: displayId)
-            }
-        }
-    }
-
-    func applyLayoutForWorkspaces(_ workspaceIds: Set<WorkspaceDescriptor.ID>) {
-        guard let controller else { return }
-
-        for monitor in controller.workspaceManager.monitors {
-            guard let workspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id) else { continue }
-            let wsId = workspace.id
-            guard workspaceIds.contains(wsId) else { continue }
-
-            let layoutType = controller.settings.layoutType(for: workspace.name)
-
-            switch layoutType {
-            case .niri,
-                 .defaultLayout:
-                guard let engine = controller.niriEngine else { continue }
-                let state = controller.workspaceManager.niriViewportState(for: wsId)
-
-                niriHandler.applyFramesOnDemand(
-                    wsId: wsId,
-                    state: state,
-                    engine: engine,
-                    monitor: monitor,
-                    animationTime: nil
-                )
-
-            case .dwindle:
-                dwindleHandler.applyFramesOnDemand(workspaceId: wsId, monitor: monitor)
-            }
-        }
-
-        let preferredSides = preferredHideSides(for: controller.workspaceManager.monitors)
-        for ws in controller.workspaceManager.workspaces where workspaceIds.contains(ws.id) {
-            guard let monitor = controller.workspaceManager.monitor(for: ws.id) else { continue }
-            let isActive = controller.workspaceManager.activeWorkspace(on: monitor.id)?.id == ws.id
-            if !isActive {
-                let preferredSide = preferredSides[monitor.id] ?? .right
-                hideWorkspace(
-                    controller.workspaceManager.entries(in: ws.id),
-                    monitor: monitor,
-                    preferredSide: preferredSide
-                )
-            }
-        }
     }
 
     private func executeLayoutPlans(
@@ -529,11 +243,21 @@ import QuartzCore
         else {
             return nil
         }
+        if let disposition = plan.dwindleAnimationTargetDisposition,
+           !dwindleHandler.canAcceptAnimationTarget(
+               disposition,
+               workspaceId: plan.workspaceId,
+               monitor: plan.monitor
+           )
+        {
+            return nil
+        }
 
         controller.withRuntimeFrameJobCancellationSuppressed {
             applySessionPatch(plan.sessionPatch)
             diffExecutor.execute(plan)
             controller.workspaceManager.setNiriRestorePlacements(plan.niriRestorePlacements)
+            controller.workspaceManager.setDwindleRestorePlacements(plan.dwindleRestorePlacements)
         }
         controller.surfaceReconciler.applyAcceptedNativeFullscreenSlots(
             plan.diff.nativeFullscreenSlots,
@@ -544,6 +268,19 @@ import QuartzCore
                 scale: plan.monitor.scale
             )
         )
+        controller.surfaceReconciler.applyAcceptedTabRailGeometry(
+            plan.diff.tabRailGeometryCommands,
+            workspaceId: plan.workspaceId,
+            displayId: plan.monitor.displayId
+        )
+        if let disposition = plan.dwindleAnimationTargetDisposition {
+            acceptDwindleAnimationTarget(
+                disposition,
+                workspaceId: plan.workspaceId,
+                displayId: plan.monitor.displayId,
+                plannedSeq: controller.workspaceManager.worldSeq
+            )
+        }
         applyAnimationDirectives(
             plan.animationDirectives,
             workspaceId: plan.workspaceId,
@@ -597,6 +334,7 @@ import QuartzCore
             let activeWorkspaceIds = currentEffectActiveWorkspaceIds ?? currentActiveWorkspaceIds()
             currentEffectActiveWorkspaceIds = activeWorkspaceIds
             controller.withRuntimeFrameJobCancellationSuppressed {
+                controller.rehomeRevealedScratchpad(activeWorkspaceIds: activeWorkspaceIds)
                 restoreWorkspaceInactiveFloatingWindows(activeWorkspaceIds: activeWorkspaceIds)
                 hideInactiveWorkspaces(activeWorkspaceIds: activeWorkspaceIds)
             }
@@ -623,6 +361,7 @@ import QuartzCore
         for postLayoutAction in forwardedPostLayoutActions(acceptedSeqs) {
             postLayoutAction.runIfCurrent(using: controller.workspaceManager)
         }
+        controller.resumeRehomedScratchpadStackingAfterFocusHandoff()
 
         if plan.effects.markInitialRefreshComplete {
             layoutState.hasCompletedInitialRefresh = true
@@ -649,6 +388,7 @@ import QuartzCore
         )
         controller.workspaceManager.setCachedConstraints(fact.constraints, for: fact.token)
         if previous != fact.constraints {
+            controller.workspaceManager.invalidateLayout(for: [workspaceId])
             requestRelayout(reason: .observedConstraintsChanged, affectedWorkspaceIds: [workspaceId])
         }
     }
@@ -748,14 +488,17 @@ import QuartzCore
         for monitor: Monitor,
         orientation: Monitor.Orientation? = nil
     ) -> LayoutMonitorSnapshot {
-        LayoutMonitorSnapshot(
+        let scale = backingScale(for: monitor)
+        let layoutFrames = controller?.layoutFrames(for: monitor, scale: scale)
+        return LayoutMonitorSnapshot(
             monitorId: monitor.id,
             displayId: monitor.displayId,
             frame: monitor.frame,
             visibleFrame: monitor.visibleFrame,
-            workingFrame: controller?.insetWorkingFrame(for: monitor) ?? monitor.visibleFrame,
-            fullscreenLayoutFrame: controller?.fullscreenLayoutFrame(for: monitor) ?? monitor.visibleFrame,
-            scale: backingScale(for: monitor),
+            workingFrame: layoutFrames?.workingFrame ?? monitor.visibleFrame,
+            borderSafeFillFrame: layoutFrames?.borderSafeFillFrame ?? monitor.visibleFrame,
+            fullscreenLayoutFrame: layoutFrames?.fullscreenLayoutFrame ?? monitor.visibleFrame,
+            scale: scale,
             orientation: orientation ?? monitor.autoOrientation
         )
     }
@@ -821,6 +564,12 @@ import QuartzCore
                       !controller.workspaceManager.hasPendingNativeFullscreenTransition(in: workspaceId),
                       focusSeqAccepted
                 else { continue }
+                if controller.workspaceManager.nativeManagedFocusToken == token,
+                   controller.workspaceManager.pendingFocusedToken == nil,
+                   controller.intentLedger.activeManagedRequest == nil
+                {
+                    continue
+                }
                 if let workspaceId = controller.workspaceManager.workspace(for: token) {
                     controller.recordNiriCreateFocusTrace(
                         .relayoutActivatedWindow(
@@ -1087,6 +836,7 @@ import QuartzCore
             enqueueRefresh(refresh)
             return
         }
+        performanceCounters?.refreshesEnqueued &+= 1
         mergePendingRefresh(refresh)
         guard layoutState.pendingDebounceTask == nil else { return }
         layoutState.pendingDebounceTask = Task { @MainActor [weak self] in
@@ -1104,7 +854,6 @@ import QuartzCore
         defer { layoutState.isIncrementalRefreshInProgress = false }
         return await executeRelayout(
             refresh: refresh,
-            route: .relayout,
             useScrollAnimationPath: false,
             recoverFocus: true,
             generation: generation
@@ -1113,7 +862,6 @@ import QuartzCore
 
     private func executeRelayout(
         refresh: ScheduledRefresh,
-        route: RefreshRoute,
         useScrollAnimationPath: Bool,
         recoverFocus: Bool,
         generation: UInt64
@@ -1176,7 +924,6 @@ import QuartzCore
         defer { layoutState.isImmediateLayoutInProgress = false }
         return await executeRelayout(
             refresh: refresh,
-            route: .immediateRelayout,
             useScrollAnimationPath: !niriHandler.scrollAnimationByDisplay.isEmpty,
             recoverFocus: false,
             generation: generation
@@ -1196,6 +943,7 @@ import QuartzCore
     }
 
     func resetState() {
+        let discardedScratchpadIndices = Set(scratchpadRevealGroups.values.map(\.index))
         layoutState.activeRefreshTask?.cancel()
         layoutState.activeRefreshTask = nil
         layoutState.pendingDebounceTask?.cancel()
@@ -1211,6 +959,8 @@ import QuartzCore
         layoutState.trailingAuditTask = nil
         layoutState.activeRefresh = nil
         layoutState.pendingRefresh = nil
+        layoutState.isRefreshSuspendedForLockScreen = false
+        layoutState.isAwaitingPostUnlockTopologySample = false
         layoutState.didExecuteEffectPlan = false
         layoutState.refreshGeneration &+= 1
         for (_, task) in pendingRevealVerificationTasksByWindowId {
@@ -1218,19 +968,16 @@ import QuartzCore
         }
         pendingRevealVerificationTasksByWindowId.removeAll()
         pendingRevealTransactionsByWindowId.removeAll()
+        scratchpadRevealGroups.removeAll()
+        for index in discardedScratchpadIndices {
+            reconcileRevealedScratchpadAfterGroupDiscard(index)
+        }
         nextPendingRevealTransactionId = 1
+        nextScratchpadRevealGroupId = 1
         dwindleHandler.resetPendingGroupReveals()
         nativeFullscreenRestoredFrameApplyTokens.removeAll()
 
-        for (_, link) in layoutState.displayLinksByDisplay {
-            link.invalidate()
-        }
-        layoutState.displayLinksByDisplay.removeAll()
-        niriHandler.scrollAnimationByDisplay.removeAll()
-        dwindleHandler.dwindleAnimationByDisplay.removeAll()
-        layoutState.closingAnimationsByDisplay.removeAll()
-        closingAnimationIdsByObjectId.removeAll(keepingCapacity: true)
-        lastSubmittedClosingFramesByAnimationId.removeAll(keepingCapacity: true)
+        resetDisplayLinkAndAnimationState()
 
         controller?.axManager.clearInactiveWorkspaceWindows()
 
@@ -1282,6 +1029,14 @@ import QuartzCore
             visualIndex: visualIndex,
             expectedToken: expectedToken
         )
+    }
+
+    func displayTickMetricsSnapshot() -> DisplayTickMetrics {
+        displayTickMetrics
+    }
+
+    func layoutBuildMetricsCounts() -> (totalBuilds: Int, completedRelayoutCycles: Int) {
+        (layoutBuildMetrics.totalBuilds, layoutBuildMetrics.completedRelayoutCycles)
     }
 
     func layoutBuildMetricsDump() -> String {
@@ -1488,22 +1243,27 @@ import QuartzCore
             }
         }
         let nativeSpaceEvidence = try resolveNativeSpaceRescanEvidence(scope: scope)
-        let enumerationSnapshot = try await controller.axManager.fullRescanEnumerationSnapshot(
-            scope: scope,
-            resolvedTargetPIDs: nativeSpaceEvidence.resolvedPIDs.union(
-                scope.nativeSpaceWindowIdsByPID.keys
-            ),
-            resolvedTargetWindowIds: nativeSpaceEvidence.windowIds.union(
-                scope.nativeSpaceWindowIds
-            ),
-            supplementalWindowServerInfoByWindowId: nativeSpaceEvidence.windowServerInfoByWindowId,
-            preservingPIDsByWindowId: preservingPIDsByWindowId,
-            identityDependencyPIDsByWindowId: controller.axEventHandler
-                .fullRescanIdentityDependencyPIDsByWindowId(entries: entriesAtStart),
-            requiresTitleForApp: {
-                controller.windowRuleEngine.requiresTitle(for: $0, appName: $1)
-            }
-        )
+        let enumerationSnapshot: AXManager.FullRescanEnumerationSnapshot
+        if let snapshot = fullRescanEnumerationSnapshotForTests {
+            enumerationSnapshot = snapshot
+        } else {
+            enumerationSnapshot = try await controller.axManager.fullRescanEnumerationSnapshot(
+                scope: scope,
+                resolvedTargetPIDs: nativeSpaceEvidence.resolvedPIDs.union(
+                    scope.nativeSpaceWindowIdsByPID.keys
+                ),
+                resolvedTargetWindowIds: nativeSpaceEvidence.windowIds.union(
+                    scope.nativeSpaceWindowIds
+                ),
+                supplementalWindowServerInfoByWindowId: nativeSpaceEvidence.windowServerInfoByWindowId,
+                preservingPIDsByWindowId: preservingPIDsByWindowId,
+                identityDependencyPIDsByWindowId: controller.axEventHandler
+                    .fullRescanIdentityDependencyPIDsByWindowId(entries: entriesAtStart),
+                requiresTitleForApp: {
+                    controller.windowRuleEngine.requiresTitle(for: $0, appName: $1)
+                }
+            )
+        }
         try Task.checkCancellation()
         guard controller.workspaceManager.isSeqEpochCurrent(rescanSeq, domains: .layoutCommit) else {
             throw CancellationError()
@@ -1511,9 +1271,10 @@ import QuartzCore
         let postLayoutActionWorkspacesCurrentAtMutation = postLayoutActions.map {
             $0.currentWorkspaces(using: controller.workspaceManager)
         }
+        var observedTopLevelInventoryTokens: Set<WindowToken> = []
+        observedTopLevelInventoryTokens.reserveCapacity(enumerationSnapshot.windows.count)
         var seenKeys: Set<WindowToken> = []
         var decisionBasedRemovals: [WindowToken] = []
-        var floatingFocusCandidate: FullRescanFloatingFocusCandidate?
         let focusedWorkspaceId = controller.activeWorkspace()?.id
         let screenFrames = NSScreen.screens.map(\.frame)
 
@@ -1522,6 +1283,7 @@ import QuartzCore
             let pid = candidate.pid
             let winId = candidate.windowId
             let token = WindowToken(pid: pid, windowId: winId)
+            observedTopLevelInventoryTokens.insert(token)
             let existingEntry: WindowState?
             switch controller.axEventHandler.resolveFullRescanIdentity(
                 axRef: ax,
@@ -1566,6 +1328,9 @@ import QuartzCore
                 admissionGeometry: candidate.enumeratedWindow.admissionGeometry
             )
             let decision = evaluation.decision
+            let deferredTrackedEntry = decision.disposition == .undecided
+                ? existingEntry
+                : nil
             let createPlacementContext = existingEntry == nil
                 ? controller.axEventHandler.pendingCreatePlacementContext(for: winId)
                 : nil
@@ -1707,14 +1472,21 @@ import QuartzCore
                     ruleEffects = restoredEntry.ruleEffects
                     admissionHints = restoredEntry.admissionHints
                 } else if appFullscreen {
+                    cancelPendingScratchpadReveal(for: existingEntry.token)
                     _ = controller.workspaceManager.markNativeFullscreenSuspended(
                         existingEntry.token,
-                        ownsNonManagedFocus: false
+                        ownsNativeFocus: false
                     )
                     let existingAssignment = controller.workspaceAssignment(pid: pid, windowId: winId)
-                    wsForWindow = existingAssignment ?? defaultWorkspace
-                    ruleEffects = decision.ruleEffects
-                    admissionHints = decision.admissionHints
+                    wsForWindow = deferredTrackedEntry?.workspaceId
+                        ?? existingAssignment
+                        ?? defaultWorkspace
+                    ruleEffects = deferredTrackedEntry?.ruleEffects ?? decision.ruleEffects
+                    admissionHints = deferredTrackedEntry?.admissionHints ?? decision.admissionHints
+                } else if let deferredTrackedEntry {
+                    wsForWindow = deferredTrackedEntry.workspaceId
+                    ruleEffects = deferredTrackedEntry.ruleEffects
+                    admissionHints = deferredTrackedEntry.admissionHints
                 } else {
                     let existingAssignment = controller.workspaceAssignment(pid: pid, windowId: winId)
                     wsForWindow = existingAssignment ?? defaultWorkspace
@@ -1758,9 +1530,7 @@ import QuartzCore
                     || evaluation.facts.degradedWindowServerChildEvidence
             )
 
-            let interactionPolicy = WindowInteractionPolicy.resolve(for: evaluation)
             let admittedToken: WindowToken
-            let reusedTrackedEntry: Bool
             if let refreshedEntry,
                !Self.shouldReadmitTrackedWindow(
                    entry: refreshedEntry,
@@ -1776,7 +1546,6 @@ import QuartzCore
                     for: refreshedEntry.token
                 )
                 admittedToken = refreshedEntry.token
-                reusedTrackedEntry = true
             } else {
                 admittedToken = controller.workspaceManager.addWindow(
                     ax,
@@ -1786,10 +1555,9 @@ import QuartzCore
                     mode: admittedMode,
                     ruleEffects: ruleEffects,
                     admissionHints: admissionHints,
-                    interactionPolicy: interactionPolicy,
+                    allowsNativeFocusAdoption: !appFullscreen,
                     managedReplacementMetadata: managedReplacementMetadata
                 )
-                reusedTrackedEntry = false
             }
             guard admittedToken == token else {
                 seenKeys.insert(admittedToken)
@@ -1807,29 +1575,8 @@ import QuartzCore
                 candidate.enumeratedWindow.decisionEvidence.sizeConstraints,
                 for: admittedToken
             )
-            if reusedTrackedEntry {
-                controller.workspaceManager.setInteractionPolicy(interactionPolicy, for: admittedToken)
-            }
             if refreshedEntry != nil {
                 _ = controller.workspaceManager.updateAdmissionHints(admissionHints, for: admittedToken)
-            }
-            let admittedEntry = controller.workspaceManager.entry(for: admittedToken)
-            if let candidate = FullRescanFloatingFocusCandidate(
-                token: admittedToken,
-                workspaceId: admittedEntry?.workspaceId ?? wsForWindow,
-                isNewAdmission: existingEntry == nil,
-                mode: admittedEntry?.mode ?? admittedMode,
-                interactionPolicy: interactionPolicy,
-                createPlacementContext: createPlacementContext,
-                isSystemModalSurface: AXWindowService.isSystemModalSurface(
-                    role: admittedEntry?.managedReplacementMetadata?.role,
-                    subrole: admittedEntry?.managedReplacementMetadata?.subrole
-                )
-            ) {
-                floatingFocusCandidate = Self.newestFullRescanFloatingFocusCandidate(
-                    floatingFocusCandidate,
-                    considering: candidate
-                )
             }
             if existingEntry == nil {
                 controller.axEventHandler.discardCreatePlacementContext(for: winId)
@@ -1841,6 +1588,7 @@ import QuartzCore
             }
 
             if shouldPreservePreFullscreenState {
+                _ = controller.reconcileScratchpadMemberAfterNativeFullscreenExit(admittedToken)
                 seenKeys.insert(admittedToken)
                 continue
             }
@@ -1865,17 +1613,7 @@ import QuartzCore
             seenKeys.insert(admittedToken)
         }
 
-        let floatingFocusResolution = controller.hasStartedServices
-            ? focusFullRescanFloatingCandidate(floatingFocusCandidate)
-            : FullRescanFloatingFocusResolution.fallback
-        let focusValidationWorkspaceId: WorkspaceDescriptor.ID? = switch floatingFocusResolution {
-        case let .focused(workspaceId):
-            workspaceId
-        case .fallback:
-            focusedWorkspaceId
-        case .systemModalBarrier:
-            nil
-        }
+        let focusValidationWorkspaceId = focusedWorkspaceId
 
         controller.axEventHandler.updateIdentityAliases(
             enumerationSnapshot.identityAliasesByWindowId
@@ -1883,8 +1621,12 @@ import QuartzCore
 
         for token in decisionBasedRemovals {
             guard let entry = controller.workspaceManager.entry(for: token) else { continue }
-            controller.axEventHandler.retireManagedWindowFromAuthoritativeRescan(entry)
+            controller.axEventHandler.retireManagedWindowAfterDecisionRejection(entry)
         }
+
+        controller.workspaceManager.promoteLifetimeAuthorityForObservedTopLevelWindows(
+            observedTopLevelInventoryTokens
+        )
 
         let shouldPreserveMissingWindows = hadNativeFullscreenLifecycleContextAtStart
             || controller.workspaceManager.hasNativeFullscreenLifecycleContext
@@ -1921,11 +1663,6 @@ import QuartzCore
             )
         }
 
-        preserveFocusedSheetDuringFullRescan(
-            windowServerInfoByWindowId: enumerationSnapshot.windowServerInfoByWindowId,
-            seenKeys: &seenKeys
-        )
-
         let eligibleKeys: Set<WindowToken>? = switch scope {
         case .all:
             nil
@@ -1943,12 +1680,12 @@ import QuartzCore
             )
         }
         if let eligibleKeys {
-            for entry in trackedEntries
-                where eligibleKeys.contains(entry.token)
-                && enumerationSnapshot.windowServerInfoByWindowId[entry.windowId] != nil
-            {
-                seenKeys.insert(entry.token)
-            }
+            preserveHiddenWindowsDuringTargetedFullRescan(
+                trackedEntries,
+                eligibleKeys: eligibleKeys,
+                windowServerInfoByWindowId: enumerationSnapshot.windowServerInfoByWindowId,
+                seenKeys: &seenKeys
+            )
         }
         let missingCandidateKeys = eligibleKeys ?? Set(trackedEntries.map(\.token))
         let admissionProtectedMissingKeys = permitsMissingRetirement
@@ -2070,7 +1807,7 @@ import QuartzCore
         {
             effects.focusValidationWorkspaceIds = [focusValidationWorkspaceId]
         }
-        effects.suppressWindowActivation = floatingFocusResolution == .systemModalBarrier
+        effects.suppressWindowActivation = false
         effects.markInitialRefreshComplete = true
         effects.drainDeferredCreatedWindows = true
         effects.subscribeManagedWindows = true
@@ -2143,14 +1880,11 @@ import QuartzCore
                         confirmedFrame: visibleFrame
                     )
                 } else {
-                    cancelPendingScratchpadReveal(for: entry.token)
-                    if controller.axManager.pendingParkWindowIds.contains(entry.windowId),
-                       let visibleFrame = observation?.visibleFrame
-                    {
-                        applyPositionPlans([
-                            WindowPositionPlan(entry: entry, frame: visibleFrame)
-                        ])
+                    if controller.axManager.pendingParkWindowIds.contains(entry.windowId) {
+                        seenKeys.insert(entry.token)
+                        continue
                     }
+                    cancelPendingScratchpadReveal(for: entry.token)
                     controller.workspaceManager.setHiddenState(nil, for: entry.token)
                     controller.axManager.unsuppressFrameWrites([(entry.pid, entry.windowId)])
                 }
@@ -2261,6 +1995,7 @@ import QuartzCore
     }
 
     func enqueueRefresh(_ refresh: ScheduledRefresh) {
+        performanceCounters?.refreshesEnqueued &+= 1
         if layoutState.inventoryStabilityHoldFullRescans,
            refresh.kind == .fullRescan
         {
@@ -2275,6 +2010,11 @@ import QuartzCore
             }
         }
         if let activeRefresh = layoutState.activeRefresh {
+            if refresh.kind == .immediateRelayout,
+               activeRefresh.kind == .relayout || activeRefresh.kind == .visibilityRefresh
+            {
+                performanceCounters?.immediateRefreshRestarts &+= 1
+            }
             handleRefresh(refresh, whileActive: activeRefresh)
             return
         }
@@ -2288,6 +2028,7 @@ import QuartzCore
             layoutState.pendingRefresh = refresh
             return
         }
+        performanceCounters?.refreshesMerged &+= 1
 
         var relayoutWorkspaceScope = mergedRelayoutWorkspaceScope(
             scheduledRelayoutWorkspaceScope(pendingRefresh),
@@ -2539,10 +2280,18 @@ import QuartzCore
 
     func startNextRefreshIfNeeded() {
         guard layoutState.activeRefreshTask == nil, let refresh = layoutState.pendingRefresh else { return }
+        if layoutState.isRefreshSuspendedForLockScreen
+            || controller?.isFrontmostAppLockScreen() == true
+            || controller?.isLockScreenActive == true
+        {
+            performanceCounters?.lockedRefreshDeferrals &+= 1
+            return
+        }
         guard !layoutState.inventoryStabilityHoldFullRescans || refresh.kind != .fullRescan else { return }
 
         layoutState.pendingRefresh = nil
         layoutState.activeRefresh = refresh
+        performanceCounters?.refreshesStarted &+= 1
         layoutState.didExecuteEffectPlan = false
         recordVisibilityRefresh(refresh, outcome: .started)
         let refreshGeneration = layoutState.refreshGeneration
@@ -2551,6 +2300,25 @@ import QuartzCore
             let didComplete = await self.execute(refresh, generation: refreshGeneration)
             self.finishRefresh(refresh, didComplete: didComplete, generation: refreshGeneration)
         }
+    }
+
+    func suspendForLockScreen() {
+        layoutState.isAwaitingPostUnlockTopologySample = false
+        guard !layoutState.isRefreshSuspendedForLockScreen else { return }
+        layoutState.isRefreshSuspendedForLockScreen = true
+        layoutState.activeRefreshTask?.cancel()
+    }
+
+    func awaitPostUnlockTopologySample() {
+        guard layoutState.isRefreshSuspendedForLockScreen else { return }
+        layoutState.isAwaitingPostUnlockTopologySample = true
+    }
+
+    func resumeAfterPostUnlockTopologySample() {
+        guard layoutState.isAwaitingPostUnlockTopologySample else { return }
+        layoutState.isAwaitingPostUnlockTopologySample = false
+        layoutState.isRefreshSuspendedForLockScreen = false
+        startNextRefreshIfNeeded()
     }
 
     private func isCurrentRefreshGeneration(_ generation: UInt64) -> Bool {
@@ -2590,7 +2358,19 @@ import QuartzCore
         let didExecuteEffectPlan = layoutState.didExecuteEffectPlan
 
         if !didComplete {
+            if var counters = performanceCounters {
+                counters.refreshesIncomplete &+= 1
+                counters.consecutiveRequeues &+= 1
+                counters.maximumConsecutiveRequeues = max(
+                    counters.maximumConsecutiveRequeues,
+                    counters.consecutiveRequeues
+                )
+                performanceCounters = counters
+            }
             preserveCancelledRefreshState(completedRefresh)
+        } else {
+            performanceCounters?.refreshesCompleted &+= 1
+            performanceCounters?.consecutiveRequeues = 0
         }
 
         layoutState.activeRefreshTask = nil
@@ -2769,7 +2549,7 @@ import QuartzCore
             }
         }
         if !inactiveWindowJobs.isEmpty {
-            controller.axManager.cancelPendingFrameJobs(inactiveWindowJobs)
+            controller.axManager.cancelPendingFrameJobs(inactiveWindowJobs, reason: "inactive-workspace-hide")
         }
 
         let preferredSides = preferredHideSides(for: controller.workspaceManager.monitors)
@@ -2782,18 +2562,6 @@ import QuartzCore
                 preferredSide: preferredSide,
                 hiddenPlacementMonitors: hiddenPlacementMonitors
             )
-        }
-    }
-
-    func unhideWorkspace(_ workspaceId: WorkspaceDescriptor.ID, monitor: Monitor) {
-        guard let controller else { return }
-        let entries = controller.workspaceManager.entries(in: workspaceId)
-        for entry in entries {
-            if isWindowOnKnownInactiveNativeSpace(entry.windowId) {
-                continue
-            }
-            controller.axManager.markWindowActive(entry.windowId)
-            unhideWindow(entry, monitor: monitor)
         }
     }
 
@@ -2822,11 +2590,6 @@ import QuartzCore
         }
     }
 
-    struct WindowPositionPlan {
-        let entry: WindowState
-        let frame: CGRect
-    }
-
     fileprivate enum HideOperationResolution {
         case movable(WindowPositionPlan, hiddenState: HiddenState)
         case alreadyHidden(WindowPositionPlan, hiddenState: HiddenState)
@@ -2840,10 +2603,12 @@ import QuartzCore
         reason: HideReason,
         hiddenPlacementMonitors: [HiddenPlacementMonitorContext]? = nil,
         animationTick: Bool = false,
-        preserveWorkspaceInactive: Bool = true
+        preserveWorkspaceInactive: Bool = true,
+        observedFrame: CGRect? = nil
     ) -> HideOperationResolution {
-        guard let controller, entry.interactionPolicy.mayPark else { return .unavailable }
-        var resolvedFrame = fastFrame(for: entry.token, axRef: entry.axRef)
+        guard let controller else { return .unavailable }
+        var resolvedFrame = observedFrame
+            ?? fastFrame(for: entry.token, axRef: entry.axRef)
             ?? controller.axManager.lastAppliedFrame(for: entry.windowId)
         if resolvedFrame == nil, !animationTick {
             resolvedFrame = try? AXWindowService.frame(entry.axRef)
@@ -2970,35 +2735,41 @@ import QuartzCore
         }
     }
 
+    @discardableResult
     func hideWindow(
         _ entry: WindowState,
         monitor: Monitor,
         side: HideSide,
         reason: HideReason,
-        hiddenPlacementMonitors: [HiddenPlacementMonitorContext]? = nil
-    ) {
-        guard let controller else { return }
+        hiddenPlacementMonitors: [HiddenPlacementMonitorContext]? = nil,
+        observedFrame: CGRect? = nil
+    ) -> Bool {
+        guard let controller else { return false }
         let frameEntry = (pid: entry.pid, windowId: entry.windowId)
         switch resolveHideOperation(
             for: entry,
             monitor: monitor,
             side: side,
             reason: reason,
-            hiddenPlacementMonitors: hiddenPlacementMonitors
+            hiddenPlacementMonitors: hiddenPlacementMonitors,
+            observedFrame: observedFrame
         ) {
         case let .movable(plan, hiddenState):
             controller.workspaceManager.setHiddenState(hiddenState, for: entry.token)
-            controller.axManager.cancelPendingFrameJobs([frameEntry])
+            controller.axManager.cancelPendingFrameJobs([frameEntry], reason: "hide")
             controller.axManager.suppressFrameWrites([frameEntry])
             applyParkPositionPlans([plan], movablePlans: [plan], animationTick: false)
+            return true
         case let .alreadyHidden(plan, hiddenState):
             controller.workspaceManager.setHiddenState(hiddenState, for: entry.token)
-            controller.axManager.cancelPendingFrameJobs([frameEntry])
+            controller.axManager.cancelPendingFrameJobs([frameEntry], reason: "hide")
             controller.axManager.suppressFrameWrites([frameEntry])
             applyParkPositionPlans([plan], movablePlans: [], animationTick: false)
+            return true
         case .unavailable:
-            controller.axManager.cancelPendingFrameJobs([frameEntry])
+            controller.axManager.cancelPendingFrameJobs([frameEntry], reason: "hide-unavailable")
             controller.axManager.suppressFrameWrites([frameEntry])
+            return false
         }
     }
 
@@ -3044,7 +2815,7 @@ import QuartzCore
         }
 
         if !hiddenJobs.isEmpty {
-            controller.axManager.cancelPendingFrameJobs(hiddenJobs)
+            controller.axManager.cancelPendingFrameJobs(hiddenJobs, reason: "hide-batch")
             controller.axManager.suppressFrameWrites(hiddenJobs)
         }
         if !parkPlans.isEmpty {
@@ -3105,7 +2876,8 @@ import QuartzCore
     func unhideWindow(
         _ entry: WindowState,
         monitor: Monitor,
-        onSuccess: PostLayoutAction? = nil
+        onSuccess: PostLayoutAction? = nil,
+        revealGroupId: UInt64? = nil
     ) -> Bool {
         guard let controller else { return false }
         guard let hiddenState = controller.workspaceManager.hiddenState(for: entry.token) else {
@@ -3125,7 +2897,8 @@ import QuartzCore
             entry,
             monitor: monitor,
             hiddenState: hiddenState,
-            onSuccess: onSuccess
+            onSuccess: onSuccess,
+            revealGroupId: revealGroupId
         )
     }
 
@@ -3133,7 +2906,8 @@ import QuartzCore
     func restoreScratchpadWindow(
         _ entry: WindowState,
         monitor: Monitor,
-        onSuccess: PostLayoutAction? = nil
+        onSuccess: PostLayoutAction? = nil,
+        revealGroupId: UInt64? = nil
     ) -> Bool {
         guard let controller,
               let hiddenState = controller.workspaceManager.hiddenState(for: entry.token),
@@ -3146,7 +2920,8 @@ import QuartzCore
             entry,
             monitor: monitor,
             hiddenState: hiddenState,
-            onSuccess: onSuccess
+            onSuccess: onSuccess,
+            revealGroupId: revealGroupId
         )
     }
 
@@ -3212,6 +2987,117 @@ import QuartzCore
         pendingRevealTransactionsByWindowId[windowId]?.id
     }
 
+    func beginScratchpadRevealGroup(
+        index: ScratchpadIndex,
+        onComplete: @escaping (ScratchpadRevealOutcome) -> Void
+    ) -> UInt64 {
+        let groupId = nextScratchpadRevealGroupId
+        nextScratchpadRevealGroupId &+= 1
+        scratchpadRevealGroups[groupId] = ScratchpadRevealGroup(index: index, onComplete: onComplete)
+        return groupId
+    }
+
+    func sealScratchpadRevealGroup(_ groupId: UInt64) {
+        guard var group = scratchpadRevealGroups[groupId] else { return }
+        group.sealed = true
+        guard group.pendingTransactionIds.isEmpty else {
+            scratchpadRevealGroups[groupId] = group
+            return
+        }
+        scratchpadRevealGroups.removeValue(forKey: groupId)
+        group.onComplete(ScratchpadRevealOutcome(revealedHandles: group.revealedHandles))
+    }
+
+    func discardScratchpadRevealGroup(_ groupId: UInt64) {
+        scratchpadRevealGroups.removeValue(forKey: groupId)
+    }
+
+    func discardScratchpadRevealGroupCompletions() {
+        scratchpadRevealGroups.removeAll()
+    }
+
+    func recordScratchpadRevealSuccess(_ token: WindowToken, groupId: UInt64) {
+        guard var group = scratchpadRevealGroups[groupId],
+              let controller,
+              let handle = controller.workspaceManager.handle(for: token)
+        else {
+            return
+        }
+        if !group.revealedHandles.contains(where: { $0 === handle }) {
+            group.revealedHandles.append(handle)
+        }
+        scratchpadRevealGroups[groupId] = group
+    }
+
+    private func registerScratchpadRevealTransaction(_ transactionId: UInt64, groupId: UInt64) {
+        guard var group = scratchpadRevealGroups[groupId] else { return }
+        group.pendingTransactionIds.insert(transactionId)
+        scratchpadRevealGroups[groupId] = group
+    }
+
+    private func detachScratchpadRevealTransaction(_ transactionId: UInt64, groupId: UInt64) {
+        guard var group = scratchpadRevealGroups[groupId] else { return }
+        group.pendingTransactionIds.remove(transactionId)
+        guard group.sealed, group.pendingTransactionIds.isEmpty else {
+            scratchpadRevealGroups[groupId] = group
+            return
+        }
+        scratchpadRevealGroups.removeValue(forKey: groupId)
+        group.onComplete(ScratchpadRevealOutcome(revealedHandles: group.revealedHandles))
+    }
+
+    private func settleScratchpadRevealTransaction(
+        _ transaction: PendingRevealTransaction,
+        succeeded: Bool
+    ) {
+        guard let groupId = transaction.revealGroupId,
+              var group = scratchpadRevealGroups[groupId]
+        else {
+            return
+        }
+        group.pendingTransactionIds.remove(transaction.id)
+        if succeeded,
+           let controller,
+           let handle = controller.workspaceManager.handle(for: transaction.token),
+           !group.revealedHandles.contains(where: { $0 === handle })
+        {
+            group.revealedHandles.append(handle)
+        }
+        guard group.sealed, group.pendingTransactionIds.isEmpty else {
+            scratchpadRevealGroups[groupId] = group
+            return
+        }
+        scratchpadRevealGroups.removeValue(forKey: groupId)
+        group.onComplete(ScratchpadRevealOutcome(revealedHandles: group.revealedHandles))
+    }
+
+    private func currentScratchpadRevealTransactionIds(
+        in groupId: UInt64,
+        using workspaceManager: WorkspaceManager
+    ) -> Set<UInt64> {
+        Set(pendingRevealTransactionsByWindowId.values.compactMap { transaction in
+            guard transaction.revealGroupId == groupId,
+                  pendingRevealTransactionIsCurrent(transaction, using: workspaceManager)
+            else {
+                return nil
+            }
+            return transaction.id
+        })
+    }
+
+    private func rebaseScratchpadRevealTransactions(
+        _ transactionIds: Set<UInt64>,
+        to plannedSeq: UInt64
+    ) {
+        guard !transactionIds.isEmpty else { return }
+        for (windowId, var transaction) in pendingRevealTransactionsByWindowId
+            where transactionIds.contains(transaction.id)
+        {
+            transaction.plannedSeq = plannedSeq
+            pendingRevealTransactionsByWindowId[windowId] = transaction
+        }
+    }
+
     func shouldUsePendingRevealTransaction(
         for entry: WindowState,
         hiddenState: HiddenState
@@ -3226,11 +3112,26 @@ import QuartzCore
         hiddenState: HiddenState,
         targetFrame: CGRect,
         monitor: Monitor,
-        onSuccess: PostLayoutAction? = nil
+        onSuccess: PostLayoutAction? = nil,
+        revealGroupId: UInt64? = nil
     ) -> UInt64? {
         guard let controller else { return nil }
         let entry = controller.workspaceManager.entry(for: entry.token) ?? entry
         if var pendingTransaction = pendingRevealTransactionsByWindowId[entry.windowId] {
+            if let revealGroupId {
+                if let previousGroupId = pendingTransaction.revealGroupId,
+                   previousGroupId != revealGroupId
+                {
+                    detachScratchpadRevealTransaction(pendingTransaction.id, groupId: previousGroupId)
+                }
+                pendingTransaction.revealGroupId = revealGroupId
+                if pendingTransaction.hiddenState.isScratchpad {
+                    pendingTransaction.postSuccessActions.removeAll(keepingCapacity: false)
+                }
+                pendingRevealTransactionsByWindowId[entry.windowId] = pendingTransaction
+                registerScratchpadRevealTransaction(pendingTransaction.id, groupId: revealGroupId)
+                return nil
+            }
             if let onSuccess = makePostLayoutAction(
                 onSuccess,
                 workspaceIds: [entry.workspaceId]
@@ -3257,8 +3158,12 @@ import QuartzCore
             postSuccessActions: makePostLayoutAction(
                 onSuccess,
                 workspaceIds: [entry.workspaceId]
-            ).map { [$0] } ?? []
+            ).map { [$0] } ?? [],
+            revealGroupId: revealGroupId
         )
+        if let revealGroupId {
+            registerScratchpadRevealTransaction(transactionId, groupId: revealGroupId)
+        }
         nextPendingRevealTransactionId &+= 1
         return transactionId
     }
@@ -3313,9 +3218,15 @@ import QuartzCore
         else {
             return
         }
+        if let revealGroupId = transaction.revealGroupId {
+            discardScratchpadRevealGroupAndReconcile(revealGroupId)
+        }
         pendingRevealTransactionsByWindowId.removeValue(forKey: token.windowId)
         pendingRevealVerificationTasksByWindowId.removeValue(forKey: token.windowId)?.cancel()
-        controller?.axManager.cancelPendingFrameJobs([(transaction.pid, transaction.windowId)])
+        controller?.axManager.cancelPendingFrameJobs(
+            [(transaction.pid, transaction.windowId)],
+            reason: "scratchpad-reveal-cancelled"
+        )
     }
 
     func completePendingRevealTransaction(
@@ -3392,11 +3303,19 @@ import QuartzCore
             pendingRevealTransactionsByWindowId[windowId] = pendingTransaction
             return
         }
+        var revealSucceeded = false
+        defer {
+            settleScratchpadRevealTransaction(
+                pendingTransaction,
+                succeeded: revealSucceeded
+            )
+        }
         pendingRevealVerificationTasksByWindowId.removeValue(forKey: windowId)?.cancel()
         guard !controller.workspaceManager.isAppHidden(pid: pendingTransaction.pid) else {
-            controller.axManager.cancelPendingFrameJobs([
-                (pendingTransaction.pid, pendingTransaction.windowId)
-            ])
+            controller.axManager.cancelPendingFrameJobs(
+                [(pendingTransaction.pid, pendingTransaction.windowId)],
+                reason: "scratchpad-reveal-app-hidden"
+            )
             return
         }
 
@@ -3411,6 +3330,12 @@ import QuartzCore
         let actionWorkspacesCurrentAtEntry = pendingTransaction.postSuccessActions.map {
             $0.currentWorkspaces(using: controller.workspaceManager)
         }
+        let currentSiblingTransactions = pendingTransaction.revealGroupId.map {
+            currentScratchpadRevealTransactionIds(
+                in: $0,
+                using: controller.workspaceManager
+            )
+        } ?? []
         let focusSeqAccepted = controller.workspaceManager.isSeqCurrent(
             pendingTransaction.plannedSeq,
             for: pendingTransaction.workspaceId,
@@ -3419,6 +3344,11 @@ import QuartzCore
         controller.withRuntimeFrameJobCancellationSuppressed {
             controller.workspaceManager.setHiddenState(nil, for: pendingTransaction.token)
         }
+        rebaseScratchpadRevealTransactions(
+            currentSiblingTransactions,
+            to: controller.workspaceManager.worldSeq
+        )
+        revealSucceeded = true
         controller.axManager.clearParkPending(for: pendingTransaction.windowId, pid: pendingTransaction.pid)
         if pendingTransaction.hiddenState.isScratchpad {
             controller.requestWorkspaceBarRefresh()
@@ -3452,6 +3382,12 @@ import QuartzCore
             pendingRevealTransactionsByWindowId[windowId] = pendingTransaction
             return
         }
+        defer {
+            settleScratchpadRevealTransaction(
+                pendingTransaction,
+                succeeded: false
+            )
+        }
         pendingRevealVerificationTasksByWindowId.removeValue(forKey: windowId)?.cancel()
         let frameEntry = [(pendingTransaction.pid, pendingTransaction.windowId)]
 
@@ -3462,6 +3398,19 @@ import QuartzCore
                 affectedWorkspaceIds: stalePendingRevealWorkspaceIds(pendingTransaction, using: controller)
             )
             return
+        }
+
+        let currentSiblingTransactions = pendingTransaction.revealGroupId.map {
+            currentScratchpadRevealTransactionIds(
+                in: $0,
+                using: controller.workspaceManager
+            )
+        } ?? []
+        defer {
+            rebaseScratchpadRevealTransactions(
+                currentSiblingTransactions,
+                to: controller.workspaceManager.worldSeq
+            )
         }
 
         if pendingTransaction.hiddenState.isScratchpad,
@@ -3512,7 +3461,7 @@ import QuartzCore
             return
         }
 
-        controller.axManager.cancelPendingFrameJobs(frameEntries)
+        controller.axManager.cancelPendingFrameJobs(frameEntries, reason: "scratchpad-reveal-stale")
         controller.axManager.suppressFrameWrites(frameEntries)
 
         let monitor = stalePendingRevealMonitor(
@@ -3567,7 +3516,12 @@ import QuartzCore
         _ transaction: PendingRevealTransaction,
         using workspaceManager: WorkspaceManager
     ) -> Bool {
-        workspaceManager.isSeqCurrent(
+        if let revealGroupId = transaction.revealGroupId,
+           scratchpadRevealGroups[revealGroupId] == nil
+        {
+            return false
+        }
+        return workspaceManager.isSeqCurrent(
             transaction.plannedSeq,
             for: transaction.workspaceId,
             domains: .layoutCommit
@@ -3633,7 +3587,8 @@ import QuartzCore
         _ entry: WindowState,
         monitor: Monitor,
         hiddenState: HiddenState,
-        onSuccess: PostLayoutAction? = nil
+        onSuccess: PostLayoutAction? = nil,
+        revealGroupId: UInt64? = nil
     ) -> Bool {
         guard let controller else { return false }
         let entry = controller.workspaceManager.entry(for: entry.token) ?? entry
@@ -3641,17 +3596,31 @@ import QuartzCore
         switch restoreWindowFromHiddenState(entry, monitor: monitor, hiddenState: hiddenState) {
         case .none:
             if hiddenState.workspaceInactive {
+                let currentTransactions = revealGroupId.map {
+                    currentScratchpadRevealTransactionIds(
+                        in: $0,
+                        using: controller.workspaceManager
+                    )
+                } ?? []
                 controller.withRuntimeFrameJobCancellationSuppressed {
                     controller.workspaceManager.setHiddenState(nil, for: entry.token)
                 }
+                rebaseScratchpadRevealTransactions(
+                    currentTransactions,
+                    to: controller.workspaceManager.worldSeq
+                )
                 if hiddenState.isScratchpad {
                     controller.requestWorkspaceBarRefresh()
                 }
                 controller.axManager.unsuppressFrameWrites(frameEntry)
-                acceptedPostLayoutAction(
-                    onSuccess,
-                    workspaceIds: [controller.workspaceManager.workspace(for: entry.token) ?? entry.workspaceId]
-                )?.runIfCurrent(using: controller.workspaceManager)
+                if let revealGroupId {
+                    recordScratchpadRevealSuccess(entry.token, groupId: revealGroupId)
+                } else {
+                    acceptedPostLayoutAction(
+                        onSuccess,
+                        workspaceIds: [controller.workspaceManager.workspace(for: entry.token) ?? entry.workspaceId]
+                    )?.runIfCurrent(using: controller.workspaceManager)
+                }
                 return true
             } else {
                 controller.axManager.suppressFrameWrites(frameEntry)
@@ -3659,23 +3628,47 @@ import QuartzCore
             }
         case let .positionPlan(plan):
             applyPositionPlans([plan])
+            let currentTransactions = revealGroupId.map {
+                currentScratchpadRevealTransactionIds(
+                    in: $0,
+                    using: controller.workspaceManager
+                )
+            } ?? []
             controller.withRuntimeFrameJobCancellationSuppressed {
                 controller.workspaceManager.setHiddenState(nil, for: entry.token)
             }
+            rebaseScratchpadRevealTransactions(
+                currentTransactions,
+                to: controller.workspaceManager.worldSeq
+            )
             if hiddenState.isScratchpad {
                 controller.requestWorkspaceBarRefresh()
             }
             controller.axManager.unsuppressFrameWrites(frameEntry)
-            acceptedPostLayoutAction(
-                onSuccess,
-                workspaceIds: [controller.workspaceManager.workspace(for: entry.token) ?? entry.workspaceId]
-            )?.runIfCurrent(using: controller.workspaceManager)
+            if let revealGroupId {
+                recordScratchpadRevealSuccess(entry.token, groupId: revealGroupId)
+            } else {
+                acceptedPostLayoutAction(
+                    onSuccess,
+                    workspaceIds: [controller.workspaceManager.workspace(for: entry.token) ?? entry.workspaceId]
+                )?.runIfCurrent(using: controller.workspaceManager)
+            }
             return true
         case let .asyncFrame(frame):
             if !shouldUsePendingRevealTransaction(for: entry, hiddenState: hiddenState) {
+                let currentTransactions = revealGroupId.map {
+                    currentScratchpadRevealTransactionIds(
+                        in: $0,
+                        using: controller.workspaceManager
+                    )
+                } ?? []
                 controller.withRuntimeFrameJobCancellationSuppressed {
                     controller.workspaceManager.setHiddenState(nil, for: entry.token)
                 }
+                rebaseScratchpadRevealTransactions(
+                    currentTransactions,
+                    to: controller.workspaceManager.worldSeq
+                )
                 if hiddenState.isScratchpad {
                     controller.requestWorkspaceBarRefresh()
                 }
@@ -3684,10 +3677,14 @@ import QuartzCore
                 controller.axManager.applyFramesParallel([
                     .init(pid: entry.pid, window: entry.axRef, frame: frame)
                 ])
-                acceptedPostLayoutAction(
-                    onSuccess,
-                    workspaceIds: [controller.workspaceManager.workspace(for: entry.token) ?? entry.workspaceId]
-                )?.runIfCurrent(using: controller.workspaceManager)
+                if let revealGroupId {
+                    recordScratchpadRevealSuccess(entry.token, groupId: revealGroupId)
+                } else {
+                    acceptedPostLayoutAction(
+                        onSuccess,
+                        workspaceIds: [controller.workspaceManager.workspace(for: entry.token) ?? entry.workspaceId]
+                    )?.runIfCurrent(using: controller.workspaceManager)
+                }
                 return true
             }
             guard let transactionId = beginPendingRevealTransaction(
@@ -3695,7 +3692,8 @@ import QuartzCore
                 hiddenState: hiddenState,
                 targetFrame: frame,
                 monitor: monitor,
-                onSuccess: onSuccess
+                onSuccess: onSuccess,
+                revealGroupId: revealGroupId
             ) else {
                 return true
             }
@@ -3805,78 +3803,25 @@ import QuartzCore
     }
 }
 
-private extension LayoutRefreshController {
-    func closingAnimationId(for animation: SpringAnimation) -> UUID {
-        let objectId = ObjectIdentifier(animation)
-        if let animationId = closingAnimationIdsByObjectId[objectId] {
-            return animationId
-        }
-        let animationId = UUID()
-        closingAnimationIdsByObjectId[objectId] = animationId
-        return animationId
+extension LayoutRefreshController {
+    private func discardScratchpadRevealGroupAndReconcile(_ groupId: UInt64) {
+        guard let group = scratchpadRevealGroups.removeValue(forKey: groupId) else { return }
+        reconcileRevealedScratchpadAfterGroupDiscard(group.index)
     }
 
-    func forgetClosingAnimation(_ animation: LayoutRefreshState.ClosingAnimation) {
-        guard let animationId = closingAnimationIdsByObjectId.removeValue(
-            forKey: ObjectIdentifier(animation.animation)
-        ) else {
-            return
-        }
-        lastSubmittedClosingFramesByAnimationId.removeValue(forKey: animationId)
-    }
-
-    func tickClosingAnimations(targetTime: CFTimeInterval, displayId: CGDirectDisplayID) {
-        guard var animations = layoutState.closingAnimationsByDisplay.removeValue(forKey: displayId),
-              !animations.isEmpty
+    private func reconcileRevealedScratchpadAfterGroupDiscard(_ index: ScratchpadIndex) {
+        guard let controller,
+              controller.workspaceManager.revealedScratchpadIndex() == index,
+              !controller.workspaceManager.scratchpadMembers(in: index).contains(where: {
+                  controller.isManagedWindowDisplayable($0)
+              })
         else {
             return
         }
-
-        var completedWindowIds: [Int] = []
-        completedWindowIds.reserveCapacity(animations.count)
-        var targets: [AXClosingFrameTarget] = []
-        targets.reserveCapacity(animations.count)
-
-        for (windowId, animation) in animations {
-            if controller?.workspaceManager.isAppHidden(pid: animation.pid) == true {
-                completedWindowIds.append(windowId)
-                continue
-            }
-            let frame = animation.currentFrame(at: targetTime)
-            let animationId = closingAnimationId(for: animation.animation)
-            targets.append(
-                AXClosingFrameTarget(
-                    animationId: animationId,
-                    pid: animation.pid,
-                    expectedWindow: animation.axRef,
-                    frame: frame,
-                    currentFrameHint: lastSubmittedClosingFramesByAnimationId[animationId]
-                        ?? animation.fromFrame
-                )
-            )
-            lastSubmittedClosingFramesByAnimationId[animationId] = frame
-            if animation.isComplete(at: targetTime) {
-                completedWindowIds.append(windowId)
-            }
-        }
-
-        controller?.axManager.applyClosingFrames(targets)
-
-        for windowId in completedWindowIds {
-            if let animation = animations.removeValue(forKey: windowId) {
-                forgetClosingAnimation(animation)
-            }
-        }
-
-        if animations.isEmpty {
-            stopDisplayLinkIfIdle(for: displayId)
-        } else {
-            layoutState.closingAnimationsByDisplay[displayId] = animations
-        }
+        controller.workspaceManager.setRevealedScratchpad(nil)
+        controller.requestWorkspaceBarRefresh()
     }
-}
 
-extension LayoutRefreshController {
     private func buildVisibilityEffectPlan(
         affectedWorkspaceIds: Set<WorkspaceDescriptor.ID>,
         recoverFocus: Bool

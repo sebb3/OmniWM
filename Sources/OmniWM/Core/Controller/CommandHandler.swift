@@ -17,11 +17,6 @@ final class CommandHandler {
     }
 
     @discardableResult
-    func handleHotkeyCommand(_ command: HotkeyCommand) -> ExternalCommandResult {
-        performCommand(command)
-    }
-
-    @discardableResult
     func handleHotkeyInvocation(_ invocation: HotkeyInvocation) -> ExternalCommandResult {
         guard let controller else { return .notFound }
         guard controller.isEnabled else { return .ignoredDisabled }
@@ -36,11 +31,6 @@ final class CommandHandler {
         case .inactive:
             return performCommand(invocation.command)
         }
-    }
-
-    @discardableResult
-    func handleCommand(_ command: HotkeyCommand) -> ExternalCommandResult {
-        performCommand(command)
     }
 
     @discardableResult
@@ -104,6 +94,10 @@ final class CommandHandler {
             controller.workspaceNavigationHandler.moveColumnToAdjacentWorkspace(direction: .down)
         case let .switchWorkspace(index):
             controller.workspaceNavigationHandler.switchWorkspace(index: index)
+        case let .switchWorkspaceSlot(slot):
+            controller.workspaceNavigationHandler.switchWorkspaceSlot(slot)
+        case let .moveToWorkspaceSlot(slot):
+            controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceSlot: slot)
         case .switchWorkspaceNext:
             controller.workspaceNavigationHandler.switchWorkspaceRelative(isNext: true)
         case .switchWorkspacePrevious:
@@ -208,13 +202,6 @@ final class CommandHandler {
             clearPreselectInDwindle()
         case .workspaceBackAndForth:
             controller.workspaceNavigationHandler.workspaceBackAndForth()
-        case let .focusWorkspaceAnywhere(index):
-            controller.workspaceNavigationHandler.focusWorkspaceAnywhere(index: index)
-        case let .moveWindowToWorkspaceOnMonitor(wsIdx, monDir):
-            controller.workspaceNavigationHandler.moveWindowToWorkspaceOnMonitor(
-                workspaceIndex: wsIdx,
-                monitorDirection: monDir
-            )
         case .openCommandPalette:
             controller.openCommandPalette()
         case .raiseAllFloatingWindows:
@@ -223,10 +210,14 @@ final class CommandHandler {
             _ = controller.rescueOffscreenWindows()
         case .toggleFocusedWindowFloating:
             return controller.toggleFocusedWindowFloating()
-        case .assignFocusedWindowToScratchpad:
-            return controller.assignFocusedWindowToScratchpad()
-        case .toggleScratchpadWindow:
-            return controller.toggleScratchpadWindow()
+        case .closeFocusedWindow:
+            return controller.closeFocusedWindow()
+        case let .assignFocusedWindowToScratchpad(index):
+            guard let index = ScratchpadIndex(index) else { return .invalidArguments }
+            return controller.assignFocusedWindowToScratchpad(index)
+        case let .toggleScratchpad(index):
+            guard let index = ScratchpadIndex(index) else { return .invalidArguments }
+            return controller.toggleScratchpad(index)
         case .openMenuAnywhere:
             controller.openMenuAnywhere()
         case .toggleWorkspaceBarVisibility:
@@ -246,8 +237,8 @@ final class CommandHandler {
         return .executed
     }
 
-    static func shouldIgnoreCommand(_: HotkeyCommand, isOverviewOpen: Bool) -> Bool {
-        isOverviewOpen
+    static func shouldIgnoreCommand(_ command: HotkeyCommand, isOverviewOpen: Bool) -> Bool {
+        isOverviewOpen && command != .toggleOverview
     }
 
     private func layoutHandler<T>(as capability: T.Type) -> T? {
@@ -420,7 +411,7 @@ final class CommandHandler {
             )
         }
 
-        if let token = controller.workspaceManager.focusedToken,
+        if let token = controller.workspaceManager.selectedManagedToken,
            let entry = controller.workspaceManager.entry(for: token),
            !controller.workspaceManager.isAppHidden(pid: entry.pid)
         {
@@ -779,7 +770,7 @@ final class CommandHandler {
             AXWindowService.isFullscreen(axRef)
         }
 
-        if let token = controller.workspaceManager.focusedToken,
+        if let token = controller.workspaceManager.selectedManagedToken,
            let entry = controller.workspaceManager.entry(for: token),
            !controller.workspaceManager.isAppHidden(pid: entry.pid)
         {

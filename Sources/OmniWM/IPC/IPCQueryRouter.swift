@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
+import AppKit
 import Foundation
 import OmniWMIPC
 
@@ -25,8 +26,14 @@ final class IPCQueryRouter {
         IPCPingResult()
     }
 
-    func versionResult() -> IPCVersionResult {
-        IPCVersionResult(protocolVersion: OmniWMIPCProtocol.version, appVersion: appVersion)
+    func versionResult(executableSHA256: String?) -> IPCVersionResult {
+        IPCVersionResult(
+            protocolVersion: OmniWMIPCProtocol.version,
+            appVersion: appVersion,
+            gitHash: OmniWMBuildInfo.gitHash,
+            buildConfiguration: OmniWMBuildInfo.configuration,
+            executableSHA256: executableSHA256
+        )
     }
 
     func workspaceBarResult() -> IPCWorkspaceBarQueryResult {
@@ -51,7 +58,7 @@ final class IPCQueryRouter {
                 showLabels: resolved.showLabels,
                 backgroundOpacity: resolved.backgroundOpacity,
                 barHeight: Double(geometry.barHeight),
-                scratchpad: projection.scratchpad.map(workspaceBarScratchpad(from:)),
+                scratchpads: projection.scratchpads.map(workspaceBarScratchpad(from:)),
                 workspaces: projection.items.map(workspaceBarWorkspace(from:))
             )
         }
@@ -63,12 +70,11 @@ final class IPCQueryRouter {
     }
 
     func activeWorkspaceResult() -> IPCActiveWorkspaceQueryResult {
-        let monitor = controller.monitorForInteraction()
-        let workspace = monitor.flatMap { controller.workspaceManager.activeWorkspace(on: $0.id) }
+        let (monitor, workspace) = controller.interactionWorkspaceProjection()
         let focusedApp: IPCAppRef?
 
         if let workspace,
-           let focusedToken = controller.workspaceManager.focusedToken,
+           let focusedToken = controller.workspaceManager.nativeManagedFocusToken,
            let entry = controller.workspaceManager.entry(for: focusedToken),
            entry.workspaceId == workspace.id
         {
@@ -85,8 +91,7 @@ final class IPCQueryRouter {
     }
 
     func focusedMonitorResult() -> IPCFocusedMonitorQueryResult {
-        let monitor = controller.monitorForInteraction()
-        let activeWorkspace = monitor.flatMap { controller.workspaceManager.activeWorkspace(on: $0.id) }
+        let (monitor, activeWorkspace) = controller.interactionWorkspaceProjection()
 
         return IPCFocusedMonitorQueryResult(
             display: monitor.map(displayRef(from:)),
@@ -109,8 +114,82 @@ final class IPCQueryRouter {
         )
     }
 
+    func metricsResult() -> IPCMetricsQueryResult {
+        Self.metricsResult(
+            axWrites: AXWriteMetrics.shared.snapshot(),
+            displayTicks: controller.layoutRefreshController.displayTickMetricsSnapshot(),
+            layoutBuilds: controller.layoutRefreshController.layoutBuildMetricsCounts(),
+            process: ProcessResourceSnapshot.capture(),
+            traceCaptureActive: FrameEffectTraceContext.isActive
+        )
+    }
+
+    nonisolated static func metricsResult(
+        axWrites snapshot: AXWriteMetricsSnapshot,
+        displayTicks ticks: DisplayTickMetrics,
+        layoutBuilds: (totalBuilds: Int, completedRelayoutCycles: Int),
+        process: ProcessResourceSnapshot?,
+        traceCaptureActive: Bool,
+        timebase: MachTimebase = .current
+    ) -> IPCMetricsQueryResult {
+        let buckets = snapshot.buckets.map { bucket in
+            IPCAXWriteMetricsBucket(
+                pid: bucket.pid,
+                context: bucket.callbackGeneration,
+                app: bucket.app,
+                bundleId: bucket.bundleId,
+                lane: bucket.lane.traceDescription,
+                count: bucket.writeCount,
+                failureCount: bucket.failureCount,
+                meanMicroseconds: Double(bucket.meanNanoseconds) / 1_000,
+                maxMicroseconds: Double(bucket.maxNanoseconds) / 1_000,
+                totalMicroseconds: Double(bucket.totalNanoseconds) / 1_000
+            )
+        }
+
+        return IPCMetricsQueryResult(
+            traceCaptureActive: traceCaptureActive,
+            axWrites: IPCAXWriteMetrics(
+                count: snapshot.totalCount,
+                failureCount: snapshot.totalFailureCount,
+                meanMicroseconds: Double(snapshot.meanNanoseconds) / 1_000,
+                maxMicroseconds: Double(snapshot.maxNanoseconds) / 1_000,
+                totalMicroseconds: Double(snapshot.totalNanoseconds) / 1_000,
+                byApp: buckets
+            ),
+            displayTicks: IPCDisplayTickMetrics(
+                tickCount: ticks.tickCount,
+                timingAnomalyCount: ticks.timingAnomalyCount,
+                longTimestampGapCount: ticks.longTimestampGapCount,
+                workExceededNominalPeriodCount: ticks.workExceededNominalPeriodCount,
+                completionPastTargetCount: ticks.completionPastTargetCount,
+                timingAnomalyPercent: ticks.timingAnomalyFraction * 100,
+                meanWorkMicroseconds: Double(ticks.meanWorkMicros),
+                maxWorkMicroseconds: Double(ticks.maxWorkMicros),
+                maxIntervalMicroseconds: Double(ticks.maxIntervalMicros),
+                minEntrySlackMicroseconds: Double(ticks.minEntrySlackMicros),
+                minCompletionSlackMicroseconds: Double(ticks.minCompletionSlackMicros)
+            ),
+            layoutBuilds: IPCLayoutBuildMetrics(
+                totalBuilds: layoutBuilds.totalBuilds,
+                completedRelayoutCycles: layoutBuilds.completedRelayoutCycles
+            ),
+            process: process.map { resource in
+                IPCProcessResourceMetrics(
+                    energyNanojoules: resource.energyNanojoules,
+                    userTimeNanoseconds: timebase.nanoseconds(fromMachTicks: resource.userTime),
+                    systemTimeNanoseconds: timebase.nanoseconds(fromMachTicks: resource.systemTime),
+                    packageIdleWakeups: resource.packageIdleWakeups,
+                    interruptWakeups: resource.interruptWakeups,
+                    residentSizeBytes: resource.residentSize,
+                    physicalFootprintBytes: resource.physicalFootprint
+                )
+            }
+        )
+    }
+
     func focusedWindowResult() -> IPCFocusedWindowQueryResult {
-        guard let focusedToken = controller.workspaceManager.focusedToken,
+        guard let focusedToken = controller.workspaceManager.nativeManagedFocusToken,
               let entry = controller.workspaceManager.entry(for: focusedToken)
         else {
             return IPCFocusedWindowQueryResult(window: nil)
@@ -135,7 +214,7 @@ final class IPCQueryRouter {
 
     func windowsResult(_ request: IPCQueryRequest) -> IPCWindowsQueryResult {
         let fieldSet = requestedFieldSet(from: request)
-        let focusedToken = controller.workspaceManager.focusedToken
+        let focusedToken = controller.workspaceManager.nativeManagedFocusToken
         let visibleWorkspaceIds = controller.workspaceManager.visibleWorkspaceIds()
         let windows = orderedWorkspaces().flatMap { workspace in
             WorkspaceEntryOrdering.orderedEntries(
@@ -165,11 +244,10 @@ final class IPCQueryRouter {
 
     func workspacesResult(_ request: IPCQueryRequest) -> IPCWorkspacesQueryResult {
         let fieldSet = requestedFieldSet(from: request)
-        let focusedWindowToken = controller.workspaceManager.focusedToken
-        let focusedWorkspaceId = controller.workspaceManager.focusedToken
+        let focusedWindowToken = controller.workspaceManager.nativeManagedFocusToken
+        let focusedWorkspaceId = controller.workspaceManager.nativeManagedFocusToken
             .flatMap { controller.workspaceManager.workspace(for: $0) }
-        let currentWorkspaceId = controller.monitorForInteraction()
-            .flatMap { controller.workspaceManager.activeWorkspace(on: $0.id)?.id }
+        let currentWorkspaceId = controller.interactionWorkspaceProjection().workspace?.id
         let visibleWorkspaceIds = controller.workspaceManager.visibleWorkspaceIds()
         let workspaces = orderedWorkspaces()
             .filter { descriptor in
@@ -245,6 +323,7 @@ final class IPCQueryRouter {
             windowIdScope: "session",
             queries: IPCAutomationManifest.queryDescriptors,
             commands: IPCAutomationManifest.commandDescriptors,
+            captureActions: IPCAutomationManifest.captureActionDescriptors,
             ruleActions: IPCAutomationManifest.ruleActionDescriptors,
             workspaceActions: IPCAutomationManifest.workspaceActionDescriptors,
             windowActions: IPCAutomationManifest.windowActionDescriptors,
@@ -267,6 +346,7 @@ final class IPCQueryRouter {
         IPCWorkspaceBarApp(
             id: windowIdentifier(item.id),
             appName: item.appName,
+            bundleId: item.bundleId,
             isFocused: item.isFocused,
             windowCount: item.windowCount,
             allWindows: item.allWindows.map { window in
@@ -281,7 +361,9 @@ final class IPCQueryRouter {
 
     private func workspaceBarScratchpad(from item: WorkspaceBarScratchpadItem) -> IPCWorkspaceBarScratchpad {
         IPCWorkspaceBarScratchpad(
-            window: workspaceBarApp(from: item.window),
+            index: item.index,
+            label: item.label,
+            windows: item.windows.map(workspaceBarApp(from:)),
             isVisible: item.isVisible
         )
     }
@@ -297,7 +379,7 @@ final class IPCQueryRouter {
         let appInfo = controller.appInfoCache.info(for: entry.pid)
         let hiddenState = controller.workspaceManager.hiddenState(for: entry.token)
         let isAppHidden = controller.workspaceManager.isAppHidden(pid: entry.pid)
-        let isScratchpad = controller.workspaceManager.isScratchpadToken(entry.token)
+        let scratchpadIndex = controller.workspaceManager.scratchpadIndex(for: entry.token)
         let isVisible = isWindowVisible(
             entry,
             visibleWorkspaceIds: visibleWorkspaceIds,
@@ -308,6 +390,7 @@ final class IPCQueryRouter {
         return IPCWindowQuerySnapshot(
             id: include("id", in: fields) ? windowIdentifier(entry.token) : nil,
             pid: include("pid", in: fields) ? entry.pid : nil,
+            windowId: include("window-id", in: fields) ? entry.windowId : nil,
             workspace: include("workspace", in: fields) ? workspaceDescriptor.map(workspaceRef(from:)) : nil,
             display: include("display", in: fields) ? monitor.map(displayRef(from:)) : nil,
             app: include("app", in: fields) ? appRef(from: appInfo) : nil,
@@ -322,7 +405,8 @@ final class IPCQueryRouter {
             isFocused: include("is-focused", in: fields) ? (entry.token == focusedToken) : nil,
             isVisible: include("is-visible", in: fields) ? isVisible : nil,
             isAppHidden: include("is-app-hidden", in: fields) ? isAppHidden : nil,
-            isScratchpad: include("is-scratchpad", in: fields) ? isScratchpad : nil,
+            isScratchpad: include("is-scratchpad", in: fields) ? scratchpadIndex != nil : nil,
+            scratchpadIndex: include("scratchpad-index", in: fields) ? scratchpadIndex?.rawValue : nil,
             hiddenReason: include("hidden-reason", in: fields) ? hiddenState.map(ipcHiddenReason(from:)) : nil
         )
     }
@@ -390,6 +474,8 @@ final class IPCQueryRouter {
             outerGapRight: include("outer-gap-right", in: fields) ? Double(gaps.outerGapRight) : nil,
             outerGapTop: include("outer-gap-top", in: fields) ? Double(gaps.outerGapTop) : nil,
             outerGapBottom: include("outer-gap-bottom", in: fields) ? Double(gaps.outerGapBottom) : nil,
+            fullscreenUsesOuterGaps: include("fullscreen-uses-outer-gaps", in: fields)
+                ? gaps.fullscreenUsesOuterGaps : nil,
             activeWorkspace: include("active-workspace", in: fields) ? activeWorkspace.map(workspaceRef(from:)) : nil
         )
     }

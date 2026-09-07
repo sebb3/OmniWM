@@ -20,6 +20,18 @@
         "bundleId": "org.mozilla.firefox",
         "attributeFetchSucceeded": true
       },
+      "windowServer": {
+        "id": 6,
+        "pid": 1000,
+        "level": 3,
+        "frameX": 0,
+        "frameY": 0,
+        "frameWidth": 480,
+        "frameHeight": 270,
+        "tags": 0,
+        "attributes": 0,
+        "parentId": 0
+      },
       "appFullscreen": false
     },
     "observedDecision": {
@@ -35,6 +47,5 @@
     "source": "builtInRule(browserPictureInPicture)",
     "heuristicReasons": [],
     "layoutDecisionKind": "explicitLayout"
-  },
-  "expectedPolicy": "full"
+  }
 }

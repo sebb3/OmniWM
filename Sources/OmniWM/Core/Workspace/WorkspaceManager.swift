@@ -7,9 +7,6 @@ import OmniWMIPC
 
 @MainActor
 final class WorkspaceManager {
-    typealias NativeFullscreenTransition = WorkspaceNativeFullscreenTransition
-    typealias NativeFullscreenRecord = WorkspaceNativeFullscreenRecord
-
     private struct MonitorResolutionContext {
         let monitors: [Monitor]
         let sortedMonitors: [Monitor]
@@ -31,7 +28,6 @@ final class WorkspaceManager {
     private var disconnectedVisibleWorkspaceCache: [MonitorRestoreKey: WorkspaceDescriptor.ID] = [:]
 
     private(set) var gaps: Double = 8
-    private(set) var outerGaps: LayoutGaps.OuterGaps = .zero
     private let world = WorldStore()
     private let restorePlanner = RestorePlanner()
     let animationDriver = AnimationDriver()
@@ -60,11 +56,13 @@ final class WorkspaceManager {
     private var _cachedMonitorIdByVisibleWorkspace: [WorkspaceDescriptor.ID: Monitor.ID]?
 
     var onGapsChanged: (() -> Void)?
-    var onSessionStateChanged: (() -> Void)?
-    var onRuntimeInvalidation: ((WorkspaceDescriptor.ID?, InvalidationDomain) -> Void)?
+    var onSessionStateChanged: ((SessionSurfaceInvalidationScope) -> Void)?
+    var onRuntimeInvalidation:
+        ((WorkspaceDescriptor.ID?, InvalidationDomain, SessionSurfaceInvalidationScope) -> Void)?
     var onWindowPresenceObserved: ((WindowHandle) -> Void)?
     var onWindowRemoved: ((WindowState) -> Void)?
     var onDeferredWorkspaceMonitorMove: ((WorkspaceMonitorMoveOutcome) -> Void)?
+    var onAnimationMotionsWillBeRemoved: ((Set<WorkspaceDescriptor.ID>) -> Void)?
 
     init(settings: SettingsStore) {
         self.settings = settings
@@ -85,31 +83,31 @@ final class WorkspaceManager {
     }
 
     func reconcileSnapshot() -> ReconcileSnapshot {
-        let windowSnapshots = world.allEntries()
-            .sorted {
-                if $0.workspaceId != $1.workspaceId {
-                    return $0.workspaceId < $1.workspaceId
-                }
-                if $0.pid != $1.pid {
-                    return $0.pid < $1.pid
-                }
-                return $0.windowId < $1.windowId
-            }
-            .map { entry in
-                ReconcileWindowSnapshot(
-                    token: entry.token,
-                    workspaceId: entry.workspaceId,
-                    mode: entry.mode,
-                    lifecyclePhase: entry.lifecyclePhase,
-                    observedState: entry.observedState,
-                    desiredState: entry.desiredState,
-                    restoreIntent: entry.restoreIntent,
-                    interactionPolicy: entry.interactionPolicy
-                )
-            }
+        var entries = world.allEntries()
+        entries.sort {
+            $0.workspaceId == $1.workspaceId
+                ? ($0.pid == $1.pid ? $0.windowId < $1.windowId : $0.pid < $1.pid)
+                : $0.workspaceId < $1.workspaceId
+        }
+
+        var workspaceIds: Set<WorkspaceDescriptor.ID> = []
+        workspaceIds.reserveCapacity(min(entries.count, workspacesById.count))
+        let windowSnapshots = entries.map { entry in
+            workspaceIds.insert(entry.workspaceId)
+            return ReconcileWindowSnapshot(
+                token: entry.token,
+                workspaceId: entry.workspaceId,
+                mode: entry.mode,
+                lifecyclePhase: entry.lifecyclePhase,
+                observedState: entry.observedState,
+                desiredState: entry.desiredState,
+                restoreIntent: entry.restoreIntent,
+                lifetimeAuthority: entry.lifetimeAuthority
+            )
+        }
 
         var layouts: [WorkspaceDescriptor.ID: LayoutTopology] = [:]
-        for workspaceId in Set(windowSnapshots.map(\.workspaceId)) {
+        for workspaceId in workspaceIds {
             let topology = world.layoutTopology(for: workspaceId)
             if topology.hasColumns || !topology.dwindleFullscreenTokens.isEmpty {
                 layouts[workspaceId] = topology
@@ -168,6 +166,9 @@ final class WorkspaceManager {
 
     @discardableResult
     func recordReconcileEvent(_ event: WMEvent) -> ReconcileTxn {
+        if case let .viewportForgotten(workspaceIds, _) = event {
+            removeAnimationMotions(for: workspaceIds)
+        }
         let previousFocus = world.focus
         let viewportWorkspaceId = viewportWorkspaceId(for: event)
         let previousViewport = viewportWorkspaceId.flatMap { world.viewports[$0] }
@@ -221,9 +222,6 @@ final class WorkspaceManager {
                     transition: eventState.offsetTransition
                 )
             }
-        }
-        if case let .viewportForgotten(workspaceIds, _) = event {
-            animationDriver.removeMotions(for: workspaceIds)
         }
         return txn
     }
@@ -284,7 +282,7 @@ final class WorkspaceManager {
             || current.lastFloatingFocusedByWorkspace != previous.lastFloatingFocusedByWorkspace
             || current.lastFocusedByWorkspace != previous.lastFocusedByWorkspace
             || current.lastTiledFocusedToken != previous.lastTiledFocusedToken
-            || current.nonManagedFocusToken != previous.nonManagedFocusToken
+            || current.nativeFocusOwner != previous.nativeFocusOwner
             || current.suppressedFocusToken != previous.suppressedFocusToken
             || current.systemModalFocusToken != previous.systemModalFocusToken
     }
@@ -302,12 +300,15 @@ final class WorkspaceManager {
             guard auxiliaryFocusStateChanged(from: previousFocus) else { return }
             let workspaceId = focusInvalidationWorkspaceId(for: world.focus)
             noteFocusInvalidation(previousWorkspaceId: workspaceId, currentWorkspaceId: workspaceId)
-        case .nonManagedFocusTargetChanged,
-             .suppressedFocusChanged,
+        case .suppressedFocusChanged,
              .systemModalFocusChanged:
             guard plan.focusSession != nil else { return }
             let workspaceId = focusInvalidationWorkspaceId(for: world.focus)
-            noteFocusInvalidation(previousWorkspaceId: workspaceId, currentWorkspaceId: workspaceId)
+            noteFocusInvalidation(
+                previousWorkspaceId: workspaceId,
+                currentWorkspaceId: workspaceId,
+                surfaceScope: .border
+            )
         case .nativeFullscreenPlaceholderSelected,
              .workspaceFocusCleared:
             guard plan.focusSession != nil else { return }
@@ -397,6 +398,7 @@ final class WorkspaceManager {
              .appVisibilityInvalidated,
              .floatingStateChanged,
              .hiddenApplicationsChanged,
+             .layoutOperationPerformed,
              .manualLayoutOverrideChanged,
              .systemSleep,
              .systemWake,
@@ -409,21 +411,22 @@ final class WorkspaceManager {
              .focusRemembered,
              .hiddenStateChanged,
              .interactionMonitorChanged,
-             .layoutOperationPerformed,
              .managedFocusCancelled,
              .managedFocusConfirmed,
              .managedFocusRequested,
              .managedReplacementMetadataChanged,
+             .nativeFocusOwnerChanged,
              .nativeFullscreenPlaceholderSelected,
              .nativeFullscreenTransition,
              .niriPlacementsResolved,
-             .nonManagedFocusChanged,
-             .nonManagedFocusTargetChanged,
-             .scratchpadChanged,
+             .dwindlePlacementsResolved,
+             .scratchpadMembershipChanged,
+             .scratchpadRevealChanged,
              .selectionChanged,
              .spaceTopologyChanged,
              .suppressedFocusChanged,
              .systemModalFocusChanged,
+             .topLevelInventoryObserved,
              .userCommand,
              .viewportChanged,
              .viewportCommitted,
@@ -644,6 +647,7 @@ final class WorkspaceManager {
             floatingFrame: hydrationPlan.floatingFrame,
             niriPlacement: hydrationPlan.niriPlacement,
             detachedNiriContainerSizingState: hydrationPlan.detachedNiriContainerSizingState,
+            dwindlePlacement: hydrationPlan.dwindlePlacement,
             consumedKey: hydrationPlan.consumedKey,
             consumedEntry: hydrationPlan.consumedEntry
         )
@@ -713,6 +717,7 @@ final class WorkspaceManager {
             var restoreIntent = StateReducer.restoreIntent(for: entry, monitors: monitors)
             restoreIntent.niriPlacement = hydration.niriPlacement
             restoreIntent.detachedNiriContainerSizingState = hydration.detachedNiriContainerSizingState
+            restoreIntent.dwindlePlacement = hydration.dwindlePlacement
             world.setRestoreIntent(restoreIntent, for: token)
         }
 
@@ -838,7 +843,8 @@ final class WorkspaceManager {
                     restoreToFloating: restoreIntent.restoreToFloating,
                     rescueEligible: restoreIntent.rescueEligible,
                     niriPlacement: restoreIntent.niriPlacement,
-                    detachedNiriContainerSizingState: restoreIntent.detachedNiriContainerSizingState
+                    detachedNiriContainerSizingState: restoreIntent.detachedNiriContainerSizingState,
+                    dwindlePlacement: restoreIntent.dwindlePlacement
                 )
             )
         }
@@ -850,15 +856,6 @@ final class WorkspaceManager {
         _monitorsById[id]
     }
 
-    func monitor(named name: String) -> Monitor? {
-        guard let matches = _monitorsByName[name], matches.count == 1 else { return nil }
-        return matches[0]
-    }
-
-    func monitors(named name: String) -> [Monitor] {
-        _monitorsByName[name] ?? []
-    }
-
     var interactionMonitorId: Monitor.ID? {
         world.focus.interactionMonitorId
     }
@@ -867,8 +864,16 @@ final class WorkspaceManager {
         world.focus.previousInteractionMonitorId
     }
 
-    var focusedToken: WindowToken? {
-        world.focus.focusedToken
+    var selectedManagedToken: WindowToken? {
+        world.focus.selectedManagedToken
+    }
+
+    var nativeFocusOwner: NativeFocusOwner {
+        world.focus.nativeFocusOwner
+    }
+
+    var nativeManagedFocusToken: WindowToken? {
+        world.focus.nativeFocusOwner.managedToken
     }
 
     var lastTiledFocusedToken: WindowToken? {
@@ -881,8 +886,8 @@ final class WorkspaceManager {
         }
     }
 
-    var focusedHandle: WindowHandle? {
-        focusedToken.flatMap { world.handle(for: $0) }
+    var selectedManagedHandle: WindowHandle? {
+        selectedManagedToken.flatMap { world.handle(for: $0) }
     }
 
     var pendingFocusedToken: WindowToken? {
@@ -901,26 +906,44 @@ final class WorkspaceManager {
         world.focus.pendingManagedFocus.monitorId
     }
 
-    var isNonManagedFocusActive: Bool {
-        world.focus.isNonManagedFocusActive
+    func scratchpadMembers(in index: ScratchpadIndex) -> [WindowToken] {
+        world.scratchpadMembers[index] ?? []
     }
 
-    func scratchpadToken() -> WindowToken? {
-        world.scratchpadToken
+    func occupiedScratchpadIndices() -> [ScratchpadIndex] {
+        world.scratchpadMembers.keys.sorted()
+    }
+
+    func scratchpadIndex(for token: WindowToken) -> ScratchpadIndex? {
+        world.scratchpadIndex(for: token)
+    }
+
+    func isScratchpadToken(_ token: WindowToken) -> Bool {
+        world.scratchpadIndex(for: token) != nil
+    }
+
+    func revealedScratchpadIndex() -> ScratchpadIndex? {
+        world.revealedScratchpad
     }
 
     @discardableResult
-    func setScratchpadToken(_ token: WindowToken?) -> Bool {
-        updateScratchpadToken(token, notify: true)
+    func setScratchpadMembership(_ token: WindowToken, to index: ScratchpadIndex?) -> Bool {
+        updateScratchpadMembership(token, to: index, notify: true)
     }
 
     @discardableResult
     func clearScratchpadIfMatches(_ token: WindowToken) -> Bool {
-        clearScratchpadToken(matching: token, notify: true)
+        updateScratchpadMembership(token, to: nil, notify: true)
     }
 
-    func isScratchpadToken(_ token: WindowToken) -> Bool {
-        world.scratchpadToken == token
+    @discardableResult
+    func setRevealedScratchpad(_ index: ScratchpadIndex?) -> Bool {
+        guard world.revealedScratchpad != index else { return false }
+        if let index, world.scratchpadMembers[index] == nil { return false }
+        recordReconcileEvent(.scratchpadRevealChanged(index: index, source: .workspaceManager))
+        notifySessionStateChanged()
+        drainPendingRuntimeMonitorOverrideClears()
+        return true
     }
 
     @discardableResult
@@ -1072,17 +1095,16 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    func exitNonManagedFocus() -> Bool {
+    func clearNativeFocusOwner() -> Bool {
         let changed = applyFocusReconcileEvent(
-            .nonManagedFocusChanged(
-                active: false,
-                preserveFocusedToken: true,
+            .nativeFocusOwnerChanged(
+                owner: .none,
                 preservePendingManagedFocus: false,
                 source: .workspaceManager
             )
         )
         if changed {
-            notifySessionStateChanged()
+            notifySessionStateChanged(surfaceScope: .border)
         }
         return changed
     }
@@ -1145,13 +1167,13 @@ final class WorkspaceManager {
     @discardableResult
     func markNativeFullscreenSuspended(
         _ token: WindowToken,
-        ownsNonManagedFocus: Bool = true
+        ownsNativeFocus: Bool = true
     ) -> Bool {
         guard let entry = entry(for: token) else { return false }
 
         let existing = nativeFullscreenRecord(for: token)
         guard existing != nil || nativeFullscreenRecordsByOriginalToken[token] == nil else { return false }
-        var changed = ownsNonManagedFocus ? rememberFocus(token, in: entry.workspaceId) : false
+        var changed = ownsNativeFocus ? rememberFocus(token, in: entry.workspaceId) : false
         let workspaceId = workspace(for: token) ?? entry.workspaceId
         let originalToken = existing?.originalToken ?? token
         var record = existing ?? NativeFullscreenRecord(
@@ -1181,8 +1203,8 @@ final class WorkspaceManager {
             setLayoutReason(.nativeFullscreen, for: token)
             changed = true
         }
-        if ownsNonManagedFocus {
-            changed = enterNonManagedFocus(target: token) || changed
+        if ownsNativeFocus {
+            changed = recordExternalFocus(pid: token.pid, windowId: token.windowId) || changed
         }
         return changed
     }
@@ -1229,23 +1251,23 @@ final class WorkspaceManager {
     @discardableResult
     func restoreNativeFullscreenRecord(
         for token: WindowToken,
-        clearsNonManagedFocusOwner: Bool = true
+        clearsNativeFocusOwner: Bool = true
     ) -> Bool {
         let record = nativeFullscreenRecord(for: token)
         let resolvedToken = record?.currentToken ?? token
         if let record {
             _ = removeNativeFullscreenRecord(
                 originalToken: record.originalToken,
-                clearsNonManagedFocusOwner: clearsNonManagedFocusOwner
+                clearsNativeFocusOwner: clearsNativeFocusOwner
             )
         }
         let restored = restoreFromNativeState(
             for: resolvedToken,
             drainPendingRuntimeMonitorOverrides: false
         )
-        if clearsNonManagedFocusOwner, record == nil, nonManagedFocusToken == resolvedToken {
-            _ = exitNonManagedFocus()
-            clearNonManagedFocusTarget(matching: resolvedToken)
+        if clearsNativeFocusOwner, record == nil, externalFocusToken == resolvedToken {
+            _ = clearNativeFocusOwner()
+            clearExternalFocusIdentity(matching: resolvedToken)
         }
         drainPendingRuntimeMonitorOverrideClears()
         return restored
@@ -1394,7 +1416,7 @@ final class WorkspaceManager {
         }
 
         if let confirmed = eligibleFocusCandidate(
-            world.focus.focusedToken,
+            world.focus.selectedManagedToken,
             in: workspaceId,
             mode: .tiling
         ) {
@@ -1432,7 +1454,7 @@ final class WorkspaceManager {
             return rememberedFloating
         }
         if let confirmed = eligibleFocusCandidate(
-            world.focus.focusedToken,
+            world.focus.selectedManagedToken,
             in: workspaceId,
             mode: .floating
         ) {
@@ -1456,7 +1478,7 @@ final class WorkspaceManager {
         let focus = world.focus
         let clearsPending = focus.pendingManagedFocus != .empty
             && focus.pendingManagedFocus.workspaceId == workspaceId
-        let clearsFocused = focus.focusedToken.flatMap { entry(for: $0)?.workspaceId } == workspaceId
+        let clearsFocused = focus.selectedManagedToken.flatMap { entry(for: $0)?.workspaceId } == workspaceId
         if clearsPending || clearsFocused,
            applyFocusReconcileEvent(.workspaceFocusCleared(workspaceId: workspaceId, source: .workspaceManager))
         {
@@ -1464,35 +1486,6 @@ final class WorkspaceManager {
         }
 
         return nil
-    }
-
-    @discardableResult
-    func enterNonManagedFocus(
-        preserveFocusedToken: Bool = false,
-        preservePendingManagedFocus: Bool = false,
-        target: WindowToken? = nil
-    ) -> Bool {
-        var changed = applyFocusReconcileEvent(
-            .nonManagedFocusChanged(
-                active: true,
-                preserveFocusedToken: preserveFocusedToken,
-                preservePendingManagedFocus: preservePendingManagedFocus,
-                source: .workspaceManager
-            )
-        )
-        if world.focus.nonManagedFocusToken != target {
-            changed = applyFocusReconcileEvent(
-                .nonManagedFocusTargetChanged(target: target, source: .workspaceManager)
-            ) || changed
-        }
-        if changed {
-            notifySessionStateChanged()
-        }
-        return changed
-    }
-
-    var nonManagedFocusToken: WindowToken? {
-        world.focus.nonManagedFocusToken
     }
 
     var suppressedFocusToken: WindowToken? {
@@ -1504,59 +1497,35 @@ final class WorkspaceManager {
     }
 
     var renderableFocusToken: WindowToken? {
-        if world.focus.isNonManagedFocusActive {
-            guard let token = world.focus.nonManagedFocusToken else { return nil }
-            return isNativeFullscreenSuspended(token) ? nil : token
-        }
-        return world.focus.focusedToken
-    }
-
-    func clearNonManagedFocusTarget(matching token: WindowToken? = nil, pid: pid_t? = nil) {
-        guard let current = world.focus.nonManagedFocusToken else { return }
-        if let token, current != token { return }
-        if let pid, current.pid != pid { return }
-        let clearsNativeFullscreenOwner = activeNativeFullscreenFocusOwnerToken == current
-        if applyFocusReconcileEvent(.nonManagedFocusTargetChanged(target: nil, source: .workspaceManager)) {
-            notifySessionStateChanged()
-        }
-        if clearsNativeFullscreenOwner {
-            _ = exitNonManagedFocus()
-        }
-    }
-
-    func suppressFocusBorder(for token: WindowToken) {
-        guard world.focus.suppressedFocusToken != token else { return }
-        if applyFocusReconcileEvent(.suppressedFocusChanged(token: token, source: .workspaceManager)) {
-            notifySessionStateChanged()
-        }
-    }
-
-    func setSystemModalFocus(_ token: WindowToken?) {
-        guard world.focus.systemModalFocusToken != token else { return }
-        if applyFocusReconcileEvent(
-            .systemModalFocusChanged(token: token, source: .workspaceManager)
-        ) {
-            notifySessionStateChanged()
-        }
+        nativeManagedFocusToken
     }
 
     private func focusInvalidationWorkspaceId(for focus: FocusSessionSnapshot) -> WorkspaceDescriptor.ID? {
         focus.pendingManagedFocus.workspaceId
-            ?? focus.focusedToken.flatMap { world.entry(for: $0)?.workspaceId }
+            ?? focus.selectedManagedToken.flatMap { world.entry(for: $0)?.workspaceId }
     }
 
     private func noteFocusInvalidation(
         previousWorkspaceId: WorkspaceDescriptor.ID?,
-        currentWorkspaceId: WorkspaceDescriptor.ID?
+        currentWorkspaceId: WorkspaceDescriptor.ID?,
+        surfaceScope: SessionSurfaceInvalidationScope = .full
     ) {
         if let currentWorkspaceId {
-            noteInvalidation(workspaceId: currentWorkspaceId, domains: .focus)
+            noteInvalidation(
+                workspaceId: currentWorkspaceId,
+                domains: .focus,
+                surfaceScope: surfaceScope
+            )
         }
         if let previousWorkspaceId, previousWorkspaceId != currentWorkspaceId {
-            noteInvalidation(workspaceId: previousWorkspaceId, domains: .focus)
+            noteInvalidation(
+                workspaceId: previousWorkspaceId,
+                domains: .focus,
+                surfaceScope: surfaceScope
+            )
         }
         if previousWorkspaceId == nil, currentWorkspaceId == nil {
-            noteInvalidation(workspaceId: nil, domains: .focus)
+            noteInvalidation(workspaceId: nil, domains: .focus, surfaceScope: surfaceScope)
         }
     }
 
@@ -1605,17 +1574,20 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    private func updateScratchpadToken(_ token: WindowToken?, notify: Bool) -> Bool {
-        let previousToken = world.scratchpadToken
-        guard previousToken != token else { return false }
-        let previousWorkspaceId = previousToken.flatMap { world.entry(for: $0)?.workspaceId }
-        let nextWorkspaceId = token.flatMap { world.entry(for: $0)?.workspaceId }
-        if token != nil, nextWorkspaceId == nil {
+    private func updateScratchpadMembership(
+        _ token: WindowToken,
+        to index: ScratchpadIndex?,
+        notify: Bool
+    ) -> Bool {
+        guard world.scratchpadIndex(for: token) != index else { return false }
+        let workspaceId = world.entry(for: token)?.workspaceId
+        if index != nil, workspaceId == nil {
             return false
         }
-        recordReconcileEvent(.scratchpadChanged(token: token, source: .workspaceManager))
-        let affectedWorkspaceIds = Set([previousWorkspaceId, nextWorkspaceId].compactMap { $0 })
-        for workspaceId in affectedWorkspaceIds {
+        recordReconcileEvent(
+            .scratchpadMembershipChanged(token: token, index: index, source: .workspaceManager)
+        )
+        if let workspaceId {
             noteInvalidation(workspaceId: workspaceId, domains: [.workspace, .layout, .focus])
         }
         if notify {
@@ -1623,12 +1595,6 @@ final class WorkspaceManager {
         }
         drainPendingRuntimeMonitorOverrideClears()
         return true
-    }
-
-    @discardableResult
-    private func clearScratchpadToken(matching token: WindowToken, notify: Bool) -> Bool {
-        guard world.scratchpadToken == token else { return false }
-        return updateScratchpadToken(nil, notify: notify)
     }
 
     private func normalizedFloatingOrigin(
@@ -1643,30 +1609,6 @@ final class WorkspaceManager {
             x: min(max(0, normalizedX), 1),
             y: min(max(0, normalizedY), 1)
         )
-    }
-
-    private func floatingOrigin(
-        from normalizedOrigin: CGPoint,
-        windowSize: CGSize,
-        in visibleFrame: CGRect
-    ) -> CGPoint {
-        let availableWidth = max(0, visibleFrame.width - windowSize.width)
-        let availableHeight = max(0, visibleFrame.height - windowSize.height)
-        return CGPoint(
-            x: visibleFrame.minX + min(max(0, normalizedOrigin.x), 1) * availableWidth,
-            y: visibleFrame.minY + min(max(0, normalizedOrigin.y), 1) * availableHeight
-        )
-    }
-
-    private func clampedFloatingFrame(
-        _ frame: CGRect,
-        in visibleFrame: CGRect
-    ) -> CGRect {
-        let maxX = visibleFrame.maxX - frame.width
-        let maxY = visibleFrame.maxY - frame.height
-        let clampedX = min(max(frame.origin.x, visibleFrame.minX), maxX >= visibleFrame.minX ? maxX : visibleFrame.minX)
-        let clampedY = min(max(frame.origin.y, visibleFrame.minY), maxY >= visibleFrame.minY ? maxY : visibleFrame.minY)
-        return CGRect(origin: CGPoint(x: clampedX, y: clampedY), size: frame.size)
     }
 
     private func rebuildMonitorIndexes() {
@@ -1942,29 +1884,12 @@ final class WorkspaceManager {
         onGapsChanged?()
     }
 
-    func setOuterGaps(left: Double, right: Double, top: Double, bottom: Double) {
-        let newGaps = LayoutGaps.OuterGaps(
-            left: max(0, CGFloat(left)),
-            right: max(0, CGFloat(right)),
-            top: max(0, CGFloat(top)),
-            bottom: max(0, CGFloat(bottom))
-        )
-        if outerGaps.left == newGaps.left,
-           outerGaps.right == newGaps.right,
-           outerGaps.top == newGaps.top,
-           outerGaps.bottom == newGaps.bottom
-        {
-            return
-        }
-        outerGaps = newGaps
-        noteInvalidation(workspaceId: nil, domains: [.workspace, .layout])
-        onGapsChanged?()
+    func invalidateLayout(for ids: Set<WorkspaceDescriptor.ID>) {
+        noteInvalidation(workspaceIds: ids, domains: .layout)
     }
 
-    func invalidateLayout(for workspaceIds: Set<WorkspaceDescriptor.ID>) {
-        for workspaceId in workspaceIds {
-            noteInvalidation(workspaceId: workspaceId, domains: .layout)
-        }
+    func invalidateAllLayouts() {
+        noteInvalidation(workspaceId: nil, domains: .layout)
     }
 
     private func monitor(
@@ -1991,7 +1916,8 @@ final class WorkspaceManager {
         mode: TrackedWindowMode = .tiling,
         ruleEffects: ManagedWindowRuleEffects = .none,
         admissionHints: ManagedWindowAdmissionHints = .none,
-        interactionPolicy: WindowInteractionPolicy = .full,
+        lifetimeAuthority: ManagedWindowLifetimeAuthority = .axTopLevelInventory,
+        allowsNativeFocusAdoption: Bool = true,
         managedReplacementMetadata: ManagedReplacementMetadata? = nil
     ) -> WindowToken {
         let token = WindowToken(pid: pid, windowId: windowId)
@@ -2001,6 +1927,11 @@ final class WorkspaceManager {
             )
             return existingEntry.token
         }
+        let adoptNativeFocus = allowsNativeFocusAdoption
+            && world.entry(for: token) == nil
+            && nativeFullscreenRecord(for: token) == nil
+            && world.focus.pendingManagedFocus == .empty
+            && world.focus.nativeFocusOwner.externalToken == token
         if let originalToken = nativeFullscreenOriginalToken(forCurrentToken: token),
            var record = nativeFullscreenRecordsByOriginalToken[originalToken],
            record.currentToken == token,
@@ -2009,7 +1940,7 @@ final class WorkspaceManager {
             record.workspaceId = workspace
             upsertNativeFullscreenRecord(record)
         }
-        recordReconcileEvent(
+        let txn = recordReconcileEvent(
             .windowAdmitted(
                 token: token,
                 workspaceId: workspace,
@@ -2018,7 +1949,8 @@ final class WorkspaceManager {
                 axRef: ax,
                 ruleEffects: ruleEffects,
                 admissionHints: admissionHints,
-                interactionPolicy: interactionPolicy,
+                lifetimeAuthority: lifetimeAuthority,
+                adoptNativeFocus: adoptNativeFocus,
                 managedReplacementMetadata: managedReplacementMetadata,
                 source: .workspaceManager
             )
@@ -2026,7 +1958,26 @@ final class WorkspaceManager {
         if let handle = world.handle(for: token) {
             onWindowPresenceObserved?(handle)
         }
+        if txn.plan.focusSession != nil {
+            notifySessionStateChanged()
+            drainPendingRuntimeMonitorOverrideClears()
+        }
         return token
+    }
+
+    @discardableResult
+    func promoteLifetimeAuthorityForObservedTopLevelWindows(_ tokens: Set<WindowToken>) -> Bool {
+        let promotableTokens = Set(tokens.lazy.filter {
+            self.world.entry(for: $0)?.lifetimeAuthority == .directLifecycle
+        })
+        guard !promotableTokens.isEmpty else { return false }
+        recordReconcileEvent(
+            .topLevelInventoryObserved(
+                tokens: promotableTokens,
+                source: .workspaceManager
+            )
+        )
+        return true
     }
 
     @discardableResult
@@ -2071,12 +2022,7 @@ final class WorkspaceManager {
         )
 
         let focusChanged = auxiliaryFocusStateChanged(from: previousFocus)
-        let scratchpadChanged = world.scratchpadToken == oldToken
-        if scratchpadChanged {
-            _ = updateScratchpadToken(newToken, notify: false)
-        }
-
-        if focusChanged || scratchpadChanged {
+        if focusChanged || world.scratchpadIndex(for: newToken) != nil {
             notifySessionStateChanged()
         }
 
@@ -2104,10 +2050,6 @@ final class WorkspaceManager {
             entries.append(contentsOf: barVisibleFloatingEntries(in: workspace))
         }
         return entries
-    }
-
-    func hasTiledOccupancy(in workspace: WorkspaceDescriptor.ID) -> Bool {
-        !tiledEntries(in: workspace).isEmpty
     }
 
     func floatingEntries(in workspace: WorkspaceDescriptor.ID) -> [WindowState] {
@@ -2159,10 +2101,6 @@ final class WorkspaceManager {
         world.allEntries()
     }
 
-    func allTiledEntries() -> [WindowState] {
-        world.allEntries(mode: .tiling)
-    }
-
     func allFloatingEntries() -> [WindowState] {
         world.allEntries(mode: .floating)
     }
@@ -2191,10 +2129,6 @@ final class WorkspaceManager {
         world.admissionHints(for: token)
     }
 
-    func setInteractionPolicy(_ policy: WindowInteractionPolicy, for token: WindowToken) {
-        world.setInteractionPolicy(policy, for: token)
-    }
-
     func setNiriRestorePlacements(_ placements: [WindowToken: PersistedNiriPlacement]) {
         let changedPlacements = placements.filter { token, placement in
             guard let entry = world.entry(for: token), entry.mode == .tiling else { return false }
@@ -2205,6 +2139,25 @@ final class WorkspaceManager {
         guard !changedPlacements.isEmpty else { return }
         recordReconcileEvent(
             .niriPlacementsResolved(
+                placements: changedPlacements,
+                source: .workspaceManager
+            )
+        )
+    }
+
+    func setDwindleRestorePlacements(_ placements: [WindowToken: PersistedDwindlePlacement]) {
+        var changedPlacements: [WindowToken: PersistedDwindlePlacement] = [:]
+        for (token, captured) in placements {
+            guard let entry = world.entry(for: token), entry.mode == .tiling else { continue }
+            let stored = StateReducer.restoreIntent(for: entry, monitors: monitors).dwindlePlacement
+            let placement = captured.preservingPrunedSteps(of: stored)
+            if placement != stored {
+                changedPlacements[token] = placement
+            }
+        }
+        guard !changedPlacements.isEmpty else { return }
+        recordReconcileEvent(
+            .dwindlePlacementsResolved(
                 placements: changedPlacements,
                 source: .workspaceManager
             )
@@ -2383,15 +2336,15 @@ final class WorkspaceManager {
         if let targetMonitor,
            floatingState.referenceMonitorId == targetMonitor.id || floatingState.normalizedOrigin == nil
         {
-            return clampedFloatingFrame(floatingState.lastFrame, in: visibleFrame)
+            return FloatingFrameGeometry.clamped(floatingState.lastFrame, in: visibleFrame)
         }
 
-        let origin = floatingOrigin(
+        let origin = FloatingFrameGeometry.origin(
             from: floatingState.normalizedOrigin ?? .zero,
             windowSize: floatingState.lastFrame.size,
             in: visibleFrame
         )
-        return clampedFloatingFrame(
+        return FloatingFrameGeometry.clamped(
             CGRect(origin: origin, size: floatingState.lastFrame.size),
             in: visibleFrame
         )
@@ -2435,10 +2388,10 @@ final class WorkspaceManager {
         )
         _ = removeNativeFullscreenRecord(containing: entry.token)
         if removesNativeFullscreenFocusOwner {
-            _ = exitNonManagedFocus()
+            _ = clearNativeFocusOwner()
         }
         let focusChanged = auxiliaryFocusStateChanged(from: previousFocus)
-        let scratchpadChanged = clearScratchpadToken(matching: entry.token, notify: false)
+        let scratchpadChanged = updateScratchpadMembership(entry.token, to: nil, notify: false)
         if focusChanged || scratchpadChanged {
             notifySessionStateChanged()
         }
@@ -2467,7 +2420,7 @@ final class WorkspaceManager {
                 source: .workspaceManager
             )
         )
-        if world.scratchpadToken == token,
+        if world.scratchpadIndex(for: token) != nil,
            previousWorkspace.map(pendingRuntimeMonitorOverrideClearWorkspaceIds.contains) == true
         {
             drainPendingRuntimeMonitorOverrideClears()
@@ -2631,20 +2584,20 @@ final class WorkspaceManager {
     @discardableResult
     private func removeNativeFullscreenRecord(
         originalToken: WindowToken,
-        clearsNonManagedFocusOwner: Bool = true
+        clearsNativeFocusOwner: Bool = true
     ) -> NativeFullscreenRecord? {
         guard let record = nativeFullscreenRecordsByOriginalToken.removeValue(forKey: originalToken) else {
             return nil
         }
-        let clearsFocusTarget = clearsNonManagedFocusOwner && nonManagedFocusToken == record.currentToken
-        let exitsNonManagedFocus = clearsFocusTarget && isNonManagedFocusActive
+        let clearsFocusTarget = clearsNativeFocusOwner && externalFocusToken == record.currentToken
+        let clearsNativeFocus = clearsFocusTarget
         nativeFullscreenOriginalTokenByCurrentToken.removeValue(forKey: record.currentToken)
         cancelNativeFullscreenTransitionTimeout(originalToken: originalToken)
-        if exitsNonManagedFocus {
-            _ = exitNonManagedFocus()
+        if clearsNativeFocus {
+            _ = clearNativeFocusOwner()
         }
         if clearsFocusTarget {
-            clearNonManagedFocusTarget(matching: record.currentToken)
+            clearExternalFocusIdentity(matching: record.currentToken)
         }
         noteInvalidation(workspaceId: record.workspaceId, domains: [.workspace, .layout, .focus, .fullscreen])
         NativeFullscreenPlaceholderTrace.record(
@@ -2723,9 +2676,7 @@ final class WorkspaceManager {
 
         let visibleBefore = activeVisibleWorkspaceMap()
         let movedWorkspaceWasVisible = visibleBefore[sourceMonitorId] == workspaceId
-        let managedFocusedEntry = world.focus.isNonManagedFocusActive
-            ? nil
-            : world.focus.focusedToken.flatMap { world.entry(for: $0) }
+        let managedFocusedEntry = nativeManagedFocusToken.flatMap { world.entry(for: $0) }
         let managedFocusedWorkspaceId = managedFocusedEntry?.workspaceId
         let transfersManagedFocus = managedFocusedWorkspaceId == workspaceId
         guard !isWorkspaceMonitorMoveUnsafe(
@@ -2802,7 +2753,7 @@ final class WorkspaceManager {
             ? nil
             : OutputId(from: targetMonitor)
 
-        animationDriver.removeMotions(for: [workspaceId])
+        removeAnimationMotions(for: [workspaceId])
         world.commit(
             .userCommand(
                 workspaceId: workspaceId,
@@ -3220,7 +3171,7 @@ final class WorkspaceManager {
             return $0.token.windowId < $1.token.windowId
         }
 
-        animationDriver.removeMotions(for: moves.lazy.map(\.workspaceId))
+        removeAnimationMotions(for: moves.lazy.map(\.workspaceId))
         world.commit(
             .userCommand(
                 workspaceId: nil,
@@ -3231,9 +3182,8 @@ final class WorkspaceManager {
             snapshot: { self.reconcileSnapshot() },
             preMutate: {
                 for move in moves {
-                    let transfersManagedFocus = self.world.focus.focusedToken
+                    let transfersManagedFocus = self.nativeManagedFocusToken
                         .flatMap { self.world.entry(for: $0)?.workspaceId } == move.workspaceId
-                        && !self.world.focus.isNonManagedFocusActive
                     self.world.applyWorkspaceMonitorMove(
                         workspaceId: move.workspaceId,
                         targetMonitorId: move.targetMonitor.id,
@@ -3306,7 +3256,7 @@ final class WorkspaceManager {
             }
         }
         world.removeInvalidationMarks(for: ids)
-        animationDriver.removeMotions(for: ids)
+        removeAnimationMotions(for: ids)
 
         _cachedSortedWorkspaces = nil
         workspaceIdByName = workspaceIdByName.filter { !toRemove.contains($0.value) }
@@ -3335,9 +3285,8 @@ final class WorkspaceManager {
         guard !visibleMonitorByWorkspace.isEmpty else { return false }
         let context = monitorResolutionContext()
         var sessions = world.monitorSessions
-        let managedFocusedWorkspaceId = world.focus.isNonManagedFocusActive
-            ? nil
-            : world.focus.focusedToken.flatMap { world.entry(for: $0)?.workspaceId }
+        let managedFocusedWorkspaceId = nativeManagedFocusToken
+            .flatMap { world.entry(for: $0)?.workspaceId }
 
         for workspaceId in visibleMonitorByWorkspace.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             guard let sourceMonitorId = visibleMonitorByWorkspace[workspaceId],
@@ -3379,15 +3328,6 @@ final class WorkspaceManager {
         guard sessions != world.monitorSessions else { return false }
         commitMonitorSessions(sessions)
         return true
-    }
-
-    private func pruneRestoredDisconnectedVisibleWorkspaces() {
-        let context = monitorResolutionContext()
-        disconnectedVisibleWorkspaceCache = disconnectedVisibleWorkspaceCache.filter { _, workspaceId in
-            guard descriptor(for: workspaceId) != nil else { return false }
-            guard let homeMonitorId = homeMonitorId(for: workspaceId, context: context) else { return true }
-            return visibleWorkspaceId(on: homeMonitorId) != workspaceId
-        }
     }
 
     func reconcileConfiguredVisibleWorkspaces(notify: Bool = true) {
@@ -3510,23 +3450,6 @@ final class WorkspaceManager {
         Set(monitors.compactMap { monitor in
             defaultVisibleWorkspaceId(on: monitor.id) == nil ? nil : monitor.id
         })
-    }
-
-    private func replaceVisibleWorkspaceIfNeeded(on monitorId: Monitor.ID) {
-        guard let monitor = monitor(byId: monitorId) else { return }
-        if let defaultWorkspaceId = defaultVisibleWorkspaceId(on: monitor.id) {
-            _ = setActiveWorkspaceInternal(
-                defaultWorkspaceId,
-                on: monitor.id,
-                anchorPoint: monitor.workspaceAnchorPoint
-            )
-        } else {
-            updateMonitorSession(monitor.id) { session in
-                session.visibleWorkspaceId = nil
-                session.previousVisibleWorkspaceId = nil
-            }
-            notifySessionStateChanged()
-        }
     }
 
     private func sourceReplacementWorkspaceId(
@@ -3854,7 +3777,7 @@ final class WorkspaceManager {
 
     private func reconcileInteractionMonitorState(notify: Bool = true) {
         let validMonitorIds = Set(monitors.map(\.id))
-        let focusedWorkspaceMonitorId = world.focus.focusedToken
+        let focusedWorkspaceMonitorId = nativeManagedFocusToken
             .flatMap { entry(for: $0)?.workspaceId }
             .flatMap { monitorId(for: $0) }
         let newInteractionMonitorId = world.focus.interactionMonitorId.flatMap {
@@ -3882,28 +3805,37 @@ final class WorkspaceManager {
         }
     }
 
-    func notifySessionStateChanged() {
-        onSessionStateChanged?()
+    func notifySessionStateChanged(surfaceScope: SessionSurfaceInvalidationScope = .full) {
+        onSessionStateChanged?(surfaceScope)
     }
 }
 
 extension WorkspaceManager {
     private func noteInvalidation(for event: WMEvent) {
         switch event {
-        case let .windowAdmitted(_, workspaceId, _, _, _, _, _, _, _, _),
+        case let .windowAdmitted(_, workspaceId, _, _, _, _, _, _, _, _, _),
              let .windowModeChanged(_, workspaceId, _, _, _),
              let .hiddenStateChanged(_, workspaceId, _, _, _),
              let .managedReplacementMetadataChanged(_, workspaceId, _, _, _):
             noteInvalidation(workspaceId: workspaceId, domains: [.workspace, .layout, .focus])
 
         case let .floatingGeometryUpdated(_, workspaceId, _, _, _, _, _):
-            noteInvalidation(workspaceId: workspaceId, domains: [.workspace, .layout])
+            noteInvalidation(
+                workspaceId: workspaceId,
+                domains: [.workspace, .layout],
+                surfaceScope: .border
+            )
 
         case let .floatingStateChanged(_, workspaceId, _, _),
-             let .manualLayoutOverrideChanged(_, workspaceId, _, _):
+             let .manualLayoutOverrideChanged(_, workspaceId, _, _),
+             let .layoutOperationPerformed(workspaceId, _, _):
             noteInvalidation(workspaceId: workspaceId, domains: .layout)
 
-        case .niriPlacementsResolved:
+        case .niriPlacementsResolved,
+             .dwindlePlacementsResolved:
+            break
+
+        case .topLevelInventoryObserved:
             break
 
         case let .hiddenApplicationsChanged(_, affectedWorkspaceIds, _):
@@ -3952,10 +3884,9 @@ extension WorkspaceManager {
 
         case .focusForgotten,
              .interactionMonitorChanged,
-             .layoutOperationPerformed,
              .nativeFullscreenPlaceholderSelected,
-             .nonManagedFocusTargetChanged,
-             .scratchpadChanged,
+             .scratchpadMembershipChanged,
+             .scratchpadRevealChanged,
              .selectionChanged,
              .spaceTopologyChanged,
              .suppressedFocusChanged,
@@ -3968,9 +3899,11 @@ extension WorkspaceManager {
              .workspaceFocusCleared:
             break
 
-        case .focusLeaseChanged,
-             .nonManagedFocusChanged:
+        case .focusLeaseChanged:
             noteInvalidation(workspaceId: nil, domains: .focus)
+
+        case .nativeFocusOwnerChanged:
+            noteInvalidation(workspaceId: nil, domains: .focus, surfaceScope: .border)
 
         case .topologyChanged,
              .activeSpaceChanged,
@@ -3982,19 +3915,21 @@ extension WorkspaceManager {
 
     private func noteInvalidation(
         workspaceId: WorkspaceDescriptor.ID?,
-        domains: InvalidationDomain
+        domains: InvalidationDomain,
+        surfaceScope: SessionSurfaceInvalidationScope = .full
     ) {
         world.noteInvalidation(workspaceId: workspaceId, domains: domains)
-        onRuntimeInvalidation?(workspaceId, domains)
+        onRuntimeInvalidation?(workspaceId, domains, surfaceScope)
     }
 
     private func noteInvalidation(
         workspaceIds: Set<WorkspaceDescriptor.ID>,
-        domains: InvalidationDomain
+        domains: InvalidationDomain,
+        surfaceScope: SessionSurfaceInvalidationScope = .full
     ) {
         world.noteInvalidation(workspaceIds: workspaceIds, domains: domains)
         for workspaceId in workspaceIds {
-            onRuntimeInvalidation?(workspaceId, domains)
+            onRuntimeInvalidation?(workspaceId, domains, surfaceScope)
         }
     }
 }

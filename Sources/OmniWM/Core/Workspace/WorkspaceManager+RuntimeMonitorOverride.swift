@@ -88,9 +88,7 @@ extension WorkspaceManager {
         sourceMonitorId: Monitor.ID,
         visibleWorkspaces: [Monitor.ID: WorkspaceDescriptor.ID]
     ) -> Bool {
-        let managedFocusedEntry = isNonManagedFocusActive
-            ? nil
-            : focusedToken.flatMap { entry(for: $0) }
+        let managedFocusedEntry = nativeManagedFocusToken.flatMap { entry(for: $0) }
         let managedFocusedWorkspaceId = managedFocusedEntry?.workspaceId
         let transfersManagedFocus = managedFocusedWorkspaceId == workspaceId
         let pendingWorkspaceId = pendingFocusedWorkspaceId
@@ -109,11 +107,9 @@ extension WorkspaceManager {
         {
             return true
         }
-        if let scratchpadToken = scratchpadToken(),
-           let scratchpadEntry = entry(for: scratchpadToken),
-           scratchpadEntry.workspaceId == workspaceId,
-           scratchpadEntry.hiddenState == nil
-        {
+        if entries(in: workspaceId).contains(where: {
+            isScratchpadToken($0.token) && $0.hiddenState == nil
+        }) {
             return true
         }
         guard transfersManagedFocus, let managedFocusedEntry else { return false }
@@ -122,7 +118,7 @@ extension WorkspaceManager {
             || isAppHidden(pid: managedFocusedEntry.pid)
             || managedFocusedEntry.layoutReason != .standard
             || managedFocusedEntry.hiddenState != nil
-            || scratchpadToken() == managedFocusedEntry.token
+            || isScratchpadToken(managedFocusedEntry.token)
     }
 
     private func runtimeMonitorOverrideClearIsUnsafe(

@@ -13,8 +13,6 @@ enum InvariantChecks {
                 duplicateTokens.insert(window.token)
             }
         }
-        let liveTokens = Set(windowByToken.keys)
-        let liveMonitorIds = Set(snapshot.topologyProfile.displays.map { Monitor.ID(displayId: $0.displayId) })
 
         for token in duplicateTokens {
             violations.append(
@@ -25,31 +23,88 @@ enum InvariantChecks {
             )
         }
 
-        if let focusedToken = snapshot.focusedToken,
-           !liveTokens.contains(focusedToken)
+        if let focusedToken = snapshot.selectedManagedToken,
+           windowByToken[focusedToken] == nil
         {
             violations.append(
                 .init(
-                    code: "focused_token_missing",
-                    message: "Focused token \(focusedToken) is missing from the runtime snapshot."
+                    code: "selected_managed_token_missing",
+                    message: "Selected managed token \(focusedToken) is missing from the runtime snapshot."
                 )
             )
         }
 
-        if let focusedToken = snapshot.focusedToken,
+        if let focusedToken = snapshot.selectedManagedToken,
            let focusedWindow = windowByToken[focusedToken],
            focusedWindow.lifecyclePhase == .destroyed
         {
             violations.append(
                 .init(
-                    code: "focused_token_destroyed",
-                    message: "Focused token \(focusedToken) points to a destroyed window."
+                    code: "selected_managed_token_destroyed",
+                    message: "Selected managed token \(focusedToken) points to a destroyed window."
                 )
             )
         }
 
+        if case let .managed(nativeToken) = snapshot.focusSession.nativeFocusOwner {
+            if windowByToken[nativeToken] == nil {
+                violations.append(
+                    .init(
+                        code: "native_focus_token_missing",
+                        message: "Native managed focus token \(nativeToken) is missing from the runtime snapshot."
+                    )
+                )
+            }
+            if snapshot.focusSession.selectedManagedToken != nativeToken {
+                violations.append(
+                    .init(
+                        code: "native_focus_selection_mismatch",
+                        message: "Native managed focus token \(nativeToken) does not match managed selection."
+                    )
+                )
+            }
+        }
+
+        if case let .external(identity) = snapshot.focusSession.nativeFocusOwner,
+           let parentToken = identity.verifiedManagedParentToken
+        {
+            if identity.exactToken == parentToken {
+                violations.append(
+                    .init(
+                        code: "external_focus_parent_matches_child",
+                        message: "Verified external-focus parent \(parentToken) matches the external child."
+                    )
+                )
+            }
+            if snapshot.focusSession.selectedManagedToken != parentToken {
+                violations.append(
+                    .init(
+                        code: "external_focus_parent_selection_mismatch",
+                        message: "Verified external-focus parent \(parentToken) does not match managed selection."
+                    )
+                )
+            }
+            if let parentWindow = windowByToken[parentToken] {
+                if parentWindow.lifecyclePhase == .destroyed {
+                    violations.append(
+                        .init(
+                            code: "external_focus_parent_destroyed",
+                            message: "Verified external-focus parent \(parentToken) points to a destroyed window."
+                        )
+                    )
+                }
+            } else {
+                violations.append(
+                    .init(
+                        code: "external_focus_parent_missing",
+                        message: "Verified external-focus parent \(parentToken) is missing from the runtime snapshot."
+                    )
+                )
+            }
+        }
+
         if let pendingToken = snapshot.focusSession.pendingManagedFocus.token,
-           !liveTokens.contains(pendingToken)
+           windowByToken[pendingToken] == nil
         {
             violations.append(
                 .init(
@@ -140,7 +195,7 @@ enum InvariantChecks {
             }
 
             if let observedMonitorId = window.observedState.monitorId,
-               !liveMonitorIds.contains(observedMonitorId)
+               !snapshot.topologyProfile.displays.contains(where: { $0.displayId == observedMonitorId.displayId })
             {
                 violations.append(
                     .init(
@@ -151,7 +206,7 @@ enum InvariantChecks {
             }
 
             if let desiredMonitorId = window.desiredState.monitorId,
-               !liveMonitorIds.contains(desiredMonitorId)
+               !snapshot.topologyProfile.displays.contains(where: { $0.displayId == desiredMonitorId.displayId })
             {
                 violations.append(
                     .init(
@@ -189,11 +244,11 @@ enum InvariantChecks {
                         message: "Tiled lifecycle phase must carry tiling mode for \(window.token)."
                     )
                 )
-            case .destroyed where snapshot.focusedToken == window.token:
+            case .destroyed where snapshot.selectedManagedToken == window.token:
                 violations.append(
                     .init(
-                        code: "destroyed_window_focused",
-                        message: "Destroyed window \(window.token) is still marked focused."
+                        code: "destroyed_window_selected",
+                        message: "Destroyed window \(window.token) is still selected."
                     )
                 )
             default:

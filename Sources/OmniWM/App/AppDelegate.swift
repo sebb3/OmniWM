@@ -75,6 +75,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
+        _ = OmniWMBuildInfo.executableSHA256
         bootstrapApplication()
     }
 
@@ -98,7 +99,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let checker = LaunchConflictChecker()
         LaunchConflictGate.run(
             scan: checker.scan,
-            present: presentLaunchConflictAlert,
+            present: { reason in
+                self.presentLaunchConflictAlert(reason: reason, rescan: checker.scan)
+            },
             onClear: beginPermissionGate,
             onQuit: { NSApplication.shared.terminate(nil) }
         )
@@ -188,6 +191,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.onExternalSettingsReloaded = { [weak controller] in
             guard let controller else { return }
             controller.applyPersistedSettings(settings)
+        }
+        settings.onConfigNoticeChanged = { [weak controller] in
+            controller?.refreshDiagnosticsIssues()
         }
         statusBarController?.setup()
         do {
@@ -294,7 +300,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func presentLaunchConflictAlert(
-        reason: LaunchConflictBlockReason
+        reason: LaunchConflictBlockReason,
+        rescan: @escaping @MainActor () -> LaunchConflictCheckResult
     ) -> LaunchConflictGateAction {
         let previousApplication = NSWorkspace.shared.frontmostApplication.flatMap { application in
             application.processIdentifier == getpid() ? nil : application
@@ -305,20 +312,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         case let .conflicts(conflicts):
             alert.messageText = "Conflicting Window Managers Detected"
             alert.informativeText =
-                "OmniWM has not started. Quit these window managers or stop their background services, "
-                    + "then click Check Again:\n\n"
+                "OmniWM has not started. Quit these window managers or stop their background services. "
+                    + "OmniWM continues automatically once they are gone, or click Check Again:\n\n"
                     + conflicts.map { "• \($0.displayName)" }.joined(separator: "\n")
+        case let .unidentifiedProcess(pid):
+            alert.messageText = "Couldn’t Identify a Running Process"
+            alert.informativeText =
+                "OmniWM has not started because it could not identify process \(pid) "
+                    + "(see `ps -p \(pid)`). It retries every second; click Check Again to retry now, "
+                    + "or quit OmniWM."
         case .scanUnavailable:
             alert.messageText = "Couldn’t Check Running Processes"
             alert.informativeText =
                 "OmniWM has not started because it could not safely inspect every running process. "
-                    + "Click Check Again to retry, or quit OmniWM."
+                    + "It retries every second; click Check Again to retry now, or quit OmniWM."
         }
         alert.addButton(withTitle: "Check Again")
         alert.addButton(withTitle: "Quit OmniWM")
         alert.buttons.last?.keyEquivalent = "\u{1b}"
         NSApplication.shared.activate(ignoringOtherApps: true)
-        let action: LaunchConflictGateAction = alert.runModal() == .alertFirstButtonReturn ? .checkAgain : .quit
+        let autoRecheck = LaunchConflictAutoRecheck(scan: rescan) {
+            NSApplication.shared.abortModal()
+        }
+        autoRecheck.start()
+        let response = alert.runModal()
+        autoRecheck.stop()
+        let action: LaunchConflictGateAction = response == .alertSecondButtonReturn ? .quit : .checkAgain
         if action == .checkAgain {
             NSApplication.shared.deactivate()
             if let previousApplication, !previousApplication.isTerminated {

@@ -234,7 +234,7 @@ final class CGSPhantomEventGuardTests: XCTestCase {
                 .nativeFullscreenPlaceholders()
                 .contains(where: { $0.currentToken == targetToken })
         )
-        XCTAssertNotEqual(controller.workspaceManager.focusedToken, targetToken)
+        XCTAssertNotEqual(controller.workspaceManager.selectedManagedToken, targetToken)
         XCTAssertNotEqual(controller.workspaceManager.pendingFocusedToken, targetToken)
         XCTAssertNotNil(controller.workspaceManager.entry(for: peerToken))
         XCTAssertNotNil(engine.findNode(for: peerToken, in: workspaceId))
@@ -344,7 +344,7 @@ final class CGSPhantomEventGuardTests: XCTestCase {
                 .nativeFullscreenPlaceholders()
                 .contains(where: { $0.currentToken == targetToken })
         )
-        XCTAssertNotEqual(controller.workspaceManager.focusedToken, targetToken)
+        XCTAssertNotEqual(controller.workspaceManager.selectedManagedToken, targetToken)
         XCTAssertNotEqual(controller.workspaceManager.pendingFocusedToken, targetToken)
         XCTAssertNotNil(controller.workspaceManager.entry(for: peerToken))
         XCTAssertNotNil(engine.findNode(for: peerToken, in: workspaceId))
@@ -434,6 +434,7 @@ final class CGSPhantomEventGuardTests: XCTestCase {
         let createTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(20))
             createDelivered = true
+            controller.axEventHandler.retainPreparedWindowSubscription(UInt32(newToken.windowId))
             controller.axEventHandler.enqueueManagedReplacementCreate(
                 .init(
                     windowId: UInt32(newToken.windowId),
@@ -441,10 +442,9 @@ final class CGSPhantomEventGuardTests: XCTestCase {
                     axRef: newAXRef,
                     ruleEffects: .none,
                     admissionHints: .none,
+                    appFullscreen: false,
                     replacementMetadata: metadata,
-                    structuralReplacementMatch: nil,
-                    requiresPostCreateLifecycleVerification: false,
-                    interactionPolicy: .full
+                    structuralReplacementMatch: nil
                 )
             )
         }

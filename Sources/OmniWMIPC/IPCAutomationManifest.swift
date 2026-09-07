@@ -50,6 +50,7 @@ public enum IPCCommandArgumentKind: String, Codable, CaseIterable, Equatable, Se
     case workspaceNumber = "workspace-number"
     case columnIndex = "column-index"
     case windowIndex = "window-index"
+    case scratchpadIndex = "scratchpad-index"
     case layout
     case resizeAxis = "resize-axis"
     case resizeOperation = "resize-operation"
@@ -61,7 +62,8 @@ public enum IPCCommandArgumentKind: String, Codable, CaseIterable, Equatable, Se
             "<left|right|up|down>"
         case .workspaceNumber,
              .columnIndex,
-             .windowIndex:
+             .windowIndex,
+             .scratchpadIndex:
             "<number>"
         case .layout:
             "<default|niri|dwindle>"
@@ -198,6 +200,25 @@ public struct IPCWindowActionDescriptor: Codable, Equatable, Sendable {
     }
 }
 
+public struct IPCCaptureActionDescriptor: Codable, Equatable, Sendable {
+    public let path: String
+    public let name: IPCCaptureActionName
+    public let summary: String
+    public let arguments: [String]
+
+    public init(
+        path: String,
+        name: IPCCaptureActionName,
+        summary: String,
+        arguments: [String] = []
+    ) {
+        self.path = path
+        self.name = name
+        self.summary = summary
+        self.arguments = arguments
+    }
+}
+
 public struct IPCRuleActionDescriptor: Codable, Equatable, Sendable {
     public let path: String
     public let name: IPCRuleActionName
@@ -260,6 +281,10 @@ public enum IPCAutomationManifest {
         kind: .workspaceNumber,
         summary: "Positive numeric workspace ID."
     )
+    private static let slotNumberArgument = IPCCommandArgumentDescriptor(
+        kind: .workspaceNumber,
+        summary: "One-based position in the interaction monitor's ordered workspace list."
+    )
     private static let columnIndexArgument = IPCCommandArgumentDescriptor(
         kind: .columnIndex,
         summary: "One-based column index."
@@ -267,6 +292,10 @@ public enum IPCAutomationManifest {
     private static let windowIndexArgument = IPCCommandArgumentDescriptor(
         kind: .windowIndex,
         summary: "One-based window index within the focused column."
+    )
+    private static let scratchpadIndexArgument = IPCCommandArgumentDescriptor(
+        kind: .scratchpadIndex,
+        summary: "Scratchpad slot from 1 to 10."
     )
     private static let layoutArgument = IPCCommandArgumentDescriptor(
         kind: .layout,
@@ -304,6 +333,7 @@ public enum IPCAutomationManifest {
     public static let windowFieldCatalog: [String] = [
         "id",
         "pid",
+        "window-id",
         "workspace",
         "display",
         "app",
@@ -316,6 +346,7 @@ public enum IPCAutomationManifest {
         "is-visible",
         "is-app-hidden",
         "is-scratchpad",
+        "scratchpad-index",
         "hidden-reason"
     ]
 
@@ -347,6 +378,7 @@ public enum IPCAutomationManifest {
         "outer-gap-right",
         "outer-gap-top",
         "outer-gap-bottom",
+        "fullscreen-uses-outer-gaps",
         "active-workspace"
     ]
 
@@ -368,6 +400,10 @@ public enum IPCAutomationManifest {
             summary: "Return the managed app summary used by OmniWM surfaces."
         ),
         IPCQueryDescriptor(
+            name: .metrics,
+            summary: "Return always-on runtime metrics: AX frame-write attempts and wall time per app context, display tick timing, layout builds, and process energy."
+        ),
+        IPCQueryDescriptor(
             name: .focusedWindow,
             summary: "Return the focused managed window snapshot."
         ),
@@ -384,7 +420,7 @@ public enum IPCAutomationManifest {
                     summary: "Only include windows on visible workspaces that are neither hidden nor owned by a hidden app."
                 ),
                 .init(name: .floating, summary: "Only include floating managed windows."),
-                .init(name: .scratchpad, summary: "Only include the scratchpad window."),
+                .init(name: .scratchpad, summary: "Only include windows assigned to a scratchpad."),
                 .init(name: .app, summary: "Filter by application display name."),
                 .init(name: .bundleId, summary: "Filter by application bundle identifier.")
             ],
@@ -448,8 +484,7 @@ public enum IPCAutomationManifest {
         command(
             ["focus", "previous"],
             name: .focusPrevious,
-            summary: "Focus the previously focused window.",
-            layoutCompatibility: .niri
+            summary: "Focus the previously focused window."
         ),
         command(
             ["focus", "down-or-left"],
@@ -615,6 +650,12 @@ public enum IPCAutomationManifest {
             arguments: [workspaceNumberArgument]
         ),
         command(
+            ["switch-workspace", "slot"],
+            name: .switchWorkspaceSlot,
+            summary: "Switch to the workspace at a one-based position in the interaction monitor's workspace list.",
+            arguments: [slotNumberArgument]
+        ),
+        command(
             ["move-to-workspace"],
             name: .moveToWorkspace,
             summary: "Move the focused window to a workspace by workspace ID.",
@@ -635,6 +676,12 @@ public enum IPCAutomationManifest {
             name: .moveToWorkspaceOnMonitor,
             summary: "Move the focused window to a workspace already assigned to the requested adjacent monitor.",
             arguments: [workspaceNumberArgument, directionArgument]
+        ),
+        command(
+            ["move-to-workspace", "slot"],
+            name: .moveToWorkspaceSlot,
+            summary: "Move the focused window to the workspace at a one-based position in the interaction monitor's workspace list.",
+            arguments: [slotNumberArgument]
         ),
         command(
             ["move-to-monitor"],
@@ -849,11 +896,22 @@ public enum IPCAutomationManifest {
             summary: "Toggle the focused managed window between tiled and floating."
         ),
         command(
+            ["close-focused-window"],
+            name: .closeFocusedWindow,
+            summary: "Close the focused managed window through its close button."
+        ),
+        command(
             ["scratchpad", "assign"],
             name: .scratchpadAssign,
-            summary: "Assign the focused managed window to the scratchpad."
+            summary: "Assign the focused managed window to a scratchpad, or remove it when already there.",
+            arguments: [scratchpadIndexArgument]
         ),
-        command(["scratchpad", "toggle"], name: .scratchpadToggle, summary: "Show or hide the scratchpad window."),
+        command(
+            ["scratchpad", "toggle"],
+            name: .scratchpadToggle,
+            summary: "Show or hide a scratchpad's windows.",
+            arguments: [scratchpadIndexArgument]
+        ),
         command(["open-menu-anywhere"], name: .openMenuAnywhere, summary: "Open the menu surface anywhere."),
         command(
             ["toggle-workspace-bar"],
@@ -904,6 +962,12 @@ public enum IPCAutomationManifest {
             summary: "Move a workspace to an adjacent monitor; --force temporarily overrides its configured assignment.",
             arguments: ["workspace", "left|right|up|down"],
             optionalFlags: ["--force"]
+        ),
+        .init(
+            actionWords: ["rename"],
+            name: .rename,
+            summary: "Set or clear a workspace display name; an empty name restores the raw workspace ID.",
+            arguments: ["workspace", "display-name"]
         )
     ]
 
@@ -925,6 +989,37 @@ public enum IPCAutomationManifest {
             name: .summonRight,
             summary: "Summon a managed window to the right of the focused window.",
             arguments: ["opaque-id"]
+        ),
+        .init(
+            path: "window close <opaque-id>",
+            name: .close,
+            summary: "Close a managed window by session-scoped opaque id through its close button.",
+            arguments: ["opaque-id"]
+        ),
+        .init(
+            path: "window move-to-workspace <opaque-id> <workspace>",
+            name: .moveToWorkspace,
+            summary: "Move a managed window to a workspace by raw id or unambiguous display name without changing focus.",
+            arguments: ["opaque-id", "workspace"]
+        )
+    ]
+
+    public static let captureActionDescriptors: [IPCCaptureActionDescriptor] = [
+        .init(
+            path: "capture start <trace|performance>",
+            name: .start,
+            summary: "Start a trace or performance capture.",
+            arguments: ["trace|performance"]
+        ),
+        .init(
+            path: "capture stop",
+            name: .stop,
+            summary: "Finalize the active capture."
+        ),
+        .init(
+            path: "capture status",
+            name: .status,
+            summary: "Return the current capture state and remembered artifact."
         )
     ]
 
@@ -1105,10 +1200,6 @@ public enum IPCAutomationManifest {
                 guard actionWords.count >= descriptor.actionWords.count else { return false }
                 return Array(actionWords.prefix(descriptor.actionWords.count)) == descriptor.actionWords
             }
-    }
-
-    public static func subscriptionDescriptor(for channel: IPCSubscriptionChannel) -> IPCSubscriptionDescriptor? {
-        subscriptionDescriptors.first { $0.channel == channel }
     }
 
     public static func expandedChannels(for request: IPCSubscribeRequest) -> [IPCSubscriptionChannel] {
