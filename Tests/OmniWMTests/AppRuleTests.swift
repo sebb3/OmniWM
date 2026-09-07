@@ -176,15 +176,21 @@ final class AppRuleTests: XCTestCase {
         XCTAssertEqual(draft.makeRule(), rule)
     }
 
-    /// Editing a rule in the UI used to silently drop this field: the draft did
-    /// not carry it, so `makeRule` rebuilt the rule without it and a saved
-    /// catch-all lost its window level with no error.
+    /// Editing a rule in the UI used to silently drop these two fields: the
+    /// draft did not carry them, so `makeRule` rebuilt the rule without them
+    /// and a saved catch-all lost its focus policy with no error.
     func testDraftRoundTripsCascadingFields() {
         let emptyDraft = AppRuleDraft()
+        XCTAssertNil(emptyDraft.focus)
         XCTAssertNil(emptyDraft.windowLevel)
 
-        let rule = AppRule(bundleId: AppRule.wildcardBundleId, windowLevel: .auto)
+        let rule = AppRule(
+            bundleId: AppRule.wildcardBundleId,
+            focus: .userInitiated,
+            windowLevel: .auto
+        )
         let draft = AppRuleDraft(rule: rule)
+        XCTAssertEqual(draft.focus, .userInitiated)
         XCTAssertEqual(draft.windowLevel, .auto)
         XCTAssertEqual(draft.makeRule(), rule)
     }

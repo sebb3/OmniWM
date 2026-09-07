@@ -365,6 +365,7 @@ enum CLIParser {
         var initialContainerPrimarySpan: Double?
         var minWidth: Double?
         var minHeight: Double?
+        var focus: IPCRuleFocus?
         var windowLevel: IPCRuleWindowLevel?
         var seenFlags: Set<String> = []
         var index = 0
@@ -406,6 +407,11 @@ enum CLIParser {
                 minWidth = try parsePositiveDouble(value)
             case "--min-height":
                 minHeight = try parsePositiveDouble(value)
+            case "--focus":
+                guard let parsedFocus = IPCRuleFocus(rawValue: value) else {
+                    throw CLIParseError.usage(usageText)
+                }
+                focus = parsedFocus
             case "--window-level":
                 guard let parsedLevel = IPCRuleWindowLevel(rawValue: value) else {
                     throw CLIParseError.usage(usageText)
@@ -430,6 +436,7 @@ enum CLIParser {
             initialContainerPrimarySpan: initialContainerPrimarySpan,
             minWidth: minWidth,
             minHeight: minHeight,
+            focus: focus,
             windowLevel: windowLevel
         )
 

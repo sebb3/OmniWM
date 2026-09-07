@@ -191,6 +191,7 @@ final class WMController {
     let focusPolicyEngine: FocusPolicyEngine
     private let restorePlanner = RestorePlanner()
     let windowRuleEngine = WindowRuleEngine()
+    let userInitiatedLaunchTracker = UserInitiatedLaunchTracker()
 
     var niriEngine: NiriLayoutEngine? {
         get { workspaceManager.niriEngine }

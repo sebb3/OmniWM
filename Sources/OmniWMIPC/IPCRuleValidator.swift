@@ -88,11 +88,12 @@ public enum IPCRuleValidator {
             || rule.initialContainerPrimarySpan.map { initialContainerPrimarySpanError(for: $0) == nil } == true
             || rule.minWidth != nil
             || rule.minHeight != nil
+            || rule.focus != nil
             || rule.windowLevel != nil
         return hasEffect
             ? nil
             : "Set a layout, workspace, initial container primary span, minimum size, "
-            + "or window level — this rule has no effect"
+            + "focus policy, or window level — this rule has no effect"
     }
 
     public static func initialContainerPrimarySpanError(for value: Double?) -> String? {
