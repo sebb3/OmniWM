@@ -128,12 +128,12 @@ final class HiddenBarFallbackIconController {
         button.onClick = { [weak self] event, anchor in
             self?.onClick?(event, anchor)
         }
-        button.toolTip = "OmniWM"
+        button.toolTip = "OmniWM Fork"
         button.setAccessibilityElement(true)
-        button.setAccessibilityLabel("OmniWM")
+        button.setAccessibilityLabel("OmniWM Fork")
         button.setAccessibilityValue("Window manager controls")
         button.setAccessibilityHelp(
-            "Press to open the OmniWM menu. Right-click or Option-click to show hidden icons when Hidden Bar is enabled."
+            "Press to open OmniWM Fork controls. Right-click or Option-click to show hidden icons when Hidden Bar is enabled."
         )
         view.addSubview(button)
         NSLayoutConstraint.activate([
