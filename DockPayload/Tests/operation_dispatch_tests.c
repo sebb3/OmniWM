@@ -22,6 +22,17 @@ typedef struct {
     CGAffineTransform last_transform;
     uint32_t window_id;
     CGPoint target;
+    int transaction_create_calls;
+    int transaction_set_calls;
+    int transaction_commit_calls;
+    int transaction_release_calls;
+    int first_transaction_event;
+    int event_counter;
+    struct {
+        uint32_t window_id;
+        CGAffineTransform transform;
+        CGPoint position;
+    } transaction_sets[16];
     struct {
         int columns;
         int rows;
@@ -42,6 +53,7 @@ static CGError fake_get_window_bounds(int connection, uint32_t window_id, CGRect
 {
     assert(connection == 42);
     g_fake.bounds_calls++;
+    g_fake.event_counter++;
     g_fake.window_id = window_id;
     if (g_fake.bounds_result == kCGErrorSuccess) {
         *frame = g_fake.frame;
@@ -63,6 +75,7 @@ static CGError fake_get_window_transform(int connection, uint32_t window_id,
 {
     assert(connection == 42);
     g_fake.get_transform_calls++;
+    g_fake.event_counter++;
     g_fake.window_id = window_id;
     if (g_fake.get_transform_fails) {
         return kCGErrorFailure;
@@ -104,6 +117,48 @@ static CGError fake_set_window_warp(int connection, uint32_t window_id, int colu
     return kCGErrorSuccess;
 }
 
+static CFTypeRef fake_transaction_create(int connection)
+{
+    assert(connection == 42);
+    g_fake.transaction_create_calls++;
+    g_fake.first_transaction_event = g_fake.first_transaction_event == 0
+        ? ++g_fake.event_counter : g_fake.first_transaction_event;
+    return (CFTypeRef)(uintptr_t)g_fake.transaction_create_calls;
+}
+
+static void fake_transaction_set(CFTypeRef transaction, uint32_t window_id,
+                                 int32_t unknown1, int32_t unknown2,
+                                 CGAffineTransform transform)
+{
+    assert(transaction != NULL && unknown1 == 0 && unknown2 == 0);
+    assert(g_fake.transaction_set_calls < 16);
+    size_t index = (size_t)g_fake.transaction_set_calls++;
+    g_fake.transaction_sets[index].window_id = window_id;
+    g_fake.transaction_sets[index].transform = transform;
+}
+
+static void fake_transaction_move(CFTypeRef transaction, uint32_t window_id,
+                                  double x, double y)
+{
+    assert(transaction != NULL);
+    assert(g_fake.transaction_set_calls < 16);
+    size_t index = (size_t)g_fake.transaction_set_calls++;
+    g_fake.transaction_sets[index].window_id = window_id;
+    g_fake.transaction_sets[index].position = CGPointMake(x, y);
+}
+
+static void fake_transaction_commit(CFTypeRef transaction, int32_t synchronous)
+{
+    assert(transaction != NULL && synchronous == 0);
+    g_fake.transaction_commit_calls++;
+}
+
+static void fake_transaction_release(CFTypeRef transaction)
+{
+    assert(transaction != NULL);
+    g_fake.transaction_release_calls++;
+}
+
 static hs2_dock_skylight_api complete_api(void)
 {
     return (hs2_dock_skylight_api){
@@ -113,6 +168,11 @@ static hs2_dock_skylight_api complete_api(void)
         .get_window_transform = fake_get_window_transform,
         .set_window_transform = fake_set_window_transform,
         .set_window_warp = fake_set_window_warp,
+        .transaction_create = fake_transaction_create,
+        .transaction_move_window_with_group = fake_transaction_move,
+        .transaction_set_window_transform = fake_transaction_set,
+        .transaction_commit = fake_transaction_commit,
+        .transaction_release = fake_transaction_release,
     };
 }
 
@@ -1043,9 +1103,114 @@ static void test_disconnect_and_unload_cleanup(void)
     assert(!server.loaded);
 }
 
+static void encode_transition(const hs2_dock_v2_handshake_request *handshake,
+                              uint64_t lease1, uint64_t window1,
+                              uint64_t lease2, uint64_t window2,
+                              uint8_t *payload, uint16_t *payload_bytes)
+{
+    hs2_dock_v2_workspace_transition_request request = {
+        .duration_ns = UINT64_C(1000000),
+        .frame_interval_ns = UINT64_C(1000000),
+        .member_count = 2,
+        .members = {
+            { .lease_id = lease1, .window_id = window1,
+              .from = {1, 0, 0, 1, 10, 20}, .to = {1, 0, 0, 1, 110, 120} },
+            { .lease_id = lease2, .window_id = window2,
+              .from = {1, 0, 0, 1, -5, -6}, .to = {2, 0, 0, 2, 205, 206} },
+        },
+    };
+    memcpy(request.nonce, handshake->nonce, sizeof(request.nonce));
+    *payload_bytes = HS2_DOCK_V2_WORKSPACE_TRANSITION_PREFIX_BYTES +
+        2 * HS2_DOCK_V2_WORKSPACE_TRANSITION_MEMBER_BYTES;
+    assert(hs2_dock_v2_encode_workspace_transition_request(&request, payload, *payload_bytes));
+}
+
+static void test_transition_capability_exact_requirements(void)
+{
+    hs2_dock_skylight_api api = complete_api();
+    assert((hs2_dock_active_capabilities(&api) & HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION) != 0);
+    hs2_dock_skylight_api partial = api;
+    void **required[] = { (void **)&partial.main_connection_id, (void **)&partial.get_window_bounds,
+        (void **)&partial.get_window_transform, (void **)&partial.set_window_transform,
+        (void **)&partial.transaction_create, (void **)&partial.transaction_move_window_with_group,
+        (void **)&partial.transaction_commit, (void **)&partial.transaction_release };
+    for (size_t index = 0; index < sizeof(required) / sizeof(required[0]); index++) {
+        partial = api;
+        void **slot = (void **)((char *)&partial + ((char *)required[index] - (char *)&partial));
+        *slot = NULL;
+        assert((hs2_dock_active_capabilities(&partial) & HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION) == 0);
+    }
+    partial = api;
+    partial.move_window_with_group = NULL;
+    partial.set_window_warp = NULL;
+    assert((hs2_dock_active_capabilities(&partial) & HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION) != 0);
+}
+
+static void test_transition_route_success_validation_and_commit_failure(void)
+{
+    memset(&g_fake, 0, sizeof(g_fake));
+    g_fake.frame = CGRectMake(7, 8, 300, 400);
+    g_fake.observed = CGAffineTransformMake(1, 0, 0, 1, 9, 10);
+    hs2_dock_skylight_api api = complete_api();
+    hs2_dock_v2_server server;
+    hs2_dock_v2_server_init(&server, hs2_dock_active_capabilities(&api));
+    hs2_dock_v2_peer peer = {.uid = getuid(), .pid = getpid()};
+    hs2_dock_v2_handshake_request handshake;
+    hs2_dock_v2_handshake_response accepted = establish(&server, &peer,
+        HS2_DOCK_V2_CAP_LEASES | HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION, &handshake);
+    create_lease(&server, &peer, &accepted, &handshake, 101, 11,
+                 HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION, 1);
+    create_lease(&server, &peer, &accepted, &handshake, 102, 12,
+                 HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION, 2);
+    uint8_t payload[HS2_DOCK_V2_WORKSPACE_TRANSITION_REQUEST_BYTES];
+    uint16_t bytes;
+    encode_transition(&handshake, 101, 11, 102, 12, payload, &bytes);
+    hs2_dock_v2_envelope envelope = envelope_for(HS2_DOCK_V2_WORKSPACE_TRANSITION,
+                                                  bytes, 3, accepted.session_id);
+    hs2_dock_v2_response response = dispatch_status_and_decode(&api, &server, &peer,
+                                                                &envelope, payload);
+    assert(response.error == HS2_DOCK_V2_OK && response.value == 2);
+    assert(g_fake.bounds_calls == 2 && g_fake.get_transform_calls == 0);
+    assert(g_fake.first_transaction_event > 2);
+    assert(g_fake.transaction_commit_calls == 2 && g_fake.transaction_release_calls == 2);
+    assert(g_fake.transaction_set_calls == 4);
+    assert(g_fake.transaction_sets[2].window_id == 11 &&
+           CGPointEqualToPoint(g_fake.transaction_sets[2].position, CGPointMake(-110, -120)));
+    assert(g_fake.transaction_sets[3].window_id == 12 &&
+           CGPointEqualToPoint(g_fake.transaction_sets[3].position, CGPointMake(-205, -206)));
+    assert(hs2_dock_v2_pending_cleanup_leases(&server) == 0);
+    assert(!server.leases[0].note.transform_pending && !server.leases[1].note.transform_pending);
+
+    memset(&g_fake, 0, sizeof(g_fake));
+    encode_transition(&handshake, 101, 11, 999, 12, payload, &bytes);
+    envelope.request_id = 4;
+    response = dispatch_status_and_decode(&api, &server, &peer, &envelope, payload);
+    assert(response.error == HS2_DOCK_V2_LEASE_REJECTED && g_fake.main_calls == 0);
+    create_lease(&server, &peer, &accepted, &handshake, 999, 12,
+                 HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION, 5);
+    response = dispatch_status_and_decode(&api, &server, &peer, &envelope, payload);
+    assert(response.error == HS2_DOCK_V2_DUPLICATE_REQUEST);
+    envelope.request_id = 6;
+    response = dispatch_status_and_decode(&api, &server, &peer, &envelope, payload);
+    assert(response.error == HS2_DOCK_V2_OK);
+
+    memset(&g_fake, 0, sizeof(g_fake));
+    encode_transition(&handshake, 101, 11, 101, 12, payload, &bytes);
+    envelope.request_id = 7;
+    response = dispatch_status_and_decode(&api, &server, &peer, &envelope, payload);
+    assert(response.error == HS2_DOCK_V2_MALFORMED_ENVELOPE && g_fake.main_calls == 0);
+    encode_transition(&handshake, 101, 11, 999, 11, payload, &bytes);
+    envelope.request_id = 8;
+    response = dispatch_status_and_decode(&api, &server, &peer, &envelope, payload);
+    assert(response.error == HS2_DOCK_V2_MALFORMED_ENVELOPE && g_fake.main_calls == 0);
+
+}
+
 int main(void)
 {
     test_capability_correspondence();
+    test_transition_capability_exact_requirements();
+    test_transition_route_success_validation_and_commit_failure();
     test_query_success_and_failure();
     test_move_success_failure_and_validation();
     test_missing_handler_and_session_validation();

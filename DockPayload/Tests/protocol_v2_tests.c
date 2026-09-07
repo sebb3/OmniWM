@@ -7,7 +7,7 @@
 #include <unistd.h>
 
 static hs2_dock_v2_handshake_request request_with_nonce(void) {
-    hs2_dock_v2_handshake_request request = { .protocol_min_major=2,.protocol_max_major=2,.build_min=1,.build_max=1,.required_capabilities=HS2_DOCK_V2_CAP_LEASES };
+    hs2_dock_v2_handshake_request request = { .protocol_min_major=2,.protocol_max_major=2,.build_min=HS2_DOCK_V2_BUILD,.build_max=HS2_DOCK_V2_BUILD,.required_capabilities=HS2_DOCK_V2_CAP_LEASES };
     for (size_t i=0;i<sizeof(request.nonce);i++) request.nonce[i]=(uint8_t)(0xa0u+i);
     return request;
 }
@@ -52,7 +52,7 @@ static void test_envelope_strict_validation(void) {
         {5,0x01},   /* major: nonzero high byte */
         {6,0x01},   /* minor: exact-version mismatch */
         {8,0x00},   /* type: zero is unknown */
-        {8,0x0d},   /* type: past the known set */
+        {8,0x0e},   /* type: past the known set */
         {10,0x01},  /* flags: no flags are defined */
         {12,0x29},  /* header bytes: not 40 */
         {33,0x01},  /* reserved word nonzero */

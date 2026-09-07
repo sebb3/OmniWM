@@ -152,11 +152,13 @@ uint16_t hs2_dock_v2_handshake(hs2_dock_v2_server *server,
     return HS2_DOCK_V2_OK;
 }
 
-uint16_t hs2_dock_v2_authorize_operation(hs2_dock_v2_server *server,
-                                         const hs2_dock_v2_peer *peer,
-                                         const hs2_dock_v2_envelope *envelope,
-                                         const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES],
-                                         uint64_t capability)
+static uint16_t validate_operation_session(
+    hs2_dock_v2_server *server,
+    const hs2_dock_v2_peer *peer,
+    const hs2_dock_v2_envelope *envelope,
+    const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES],
+    uint64_t capability,
+    hs2_dock_v2_session **validated_session)
 {
     if (!server->loaded || envelope->major != HS2_DOCK_V2_MAJOR ||
         envelope->minor != HS2_DOCK_V2_MINOR) {
@@ -167,13 +169,28 @@ uint16_t hs2_dock_v2_authorize_operation(hs2_dock_v2_server *server,
     if (session == NULL) {
         return HS2_DOCK_V2_SESSION_REJECTED;
     }
-    if (!remember_request(session, envelope->request_id)) {
-        return HS2_DOCK_V2_DUPLICATE_REQUEST;
-    }
     if ((session->capabilities & capability) == 0) {
         return HS2_DOCK_V2_CAPABILITY_REJECTED;
     }
+    *validated_session = session;
     return HS2_DOCK_V2_OK;
+}
+
+uint16_t hs2_dock_v2_authorize_operation(hs2_dock_v2_server *server,
+                                         const hs2_dock_v2_peer *peer,
+                                         const hs2_dock_v2_envelope *envelope,
+                                         const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES],
+                                         uint64_t capability)
+{
+    hs2_dock_v2_session *session = NULL;
+    uint16_t result = validate_operation_session(
+        server, peer, envelope, nonce, capability, &session);
+    if (result != HS2_DOCK_V2_OK) {
+        return result;
+    }
+    return remember_request(session, envelope->request_id)
+        ? HS2_DOCK_V2_OK
+        : HS2_DOCK_V2_DUPLICATE_REQUEST;
 }
 
 uint16_t hs2_dock_v2_authorize_leased_operation(hs2_dock_v2_server *server,
@@ -215,6 +232,38 @@ uint16_t hs2_dock_v2_authorize_move(hs2_dock_v2_server *server,
     return hs2_dock_v2_authorize_leased_operation(server, peer, envelope, nonce,
                                                   HS2_DOCK_V2_CAP_MOVE_REAL, lease_id,
                                                   window_id, NULL);
+}
+
+uint16_t hs2_dock_v2_authorize_workspace_transition(
+    hs2_dock_v2_server *server, const hs2_dock_v2_peer *peer,
+    const hs2_dock_v2_envelope *envelope,
+    const uint8_t nonce[HS2_DOCK_V2_NONCE_BYTES],
+    const hs2_dock_v2_workspace_transition_request *request,
+    hs2_dock_v2_lease **leases)
+{
+    uint16_t result = hs2_dock_v2_authorize_operation(
+        server, peer, envelope, nonce, HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION);
+    if (result != HS2_DOCK_V2_OK) {
+        return result;
+    }
+    for (size_t member = 0; member < request->member_count; member++) {
+        hs2_dock_v2_lease *matched = NULL;
+        for (size_t index = 0; index < HS2_DOCK_V2_MAX_LEASES; index++) {
+            hs2_dock_v2_lease *candidate = &server->leases[index];
+            if (candidate->active && candidate->lease_id == request->members[member].lease_id &&
+                candidate->window_id == request->members[member].window_id &&
+                candidate->session_id == envelope->session_id &&
+                candidate->operation == HS2_DOCK_V2_CAP_WORKSPACE_TRANSITION) {
+                matched = candidate;
+                break;
+            }
+        }
+        if (matched == NULL) {
+            return HS2_DOCK_V2_LEASE_REJECTED;
+        }
+        leases[member] = matched;
+    }
+    return HS2_DOCK_V2_OK;
 }
 
 uint16_t hs2_dock_v2_handle_lease(hs2_dock_v2_server *server,

@@ -58,6 +58,7 @@ extension LayoutRefreshController {
     }
 
     func cleanupForMonitorDisconnect(displayId: CGDirectDisplayID, migrateAnimations: Bool) {
+        workspaceSwitchTransitionCoordinator.cancel(displayId: displayId)
         if let workspaceId = niriHandler.scrollAnimationByDisplay[displayId] {
             niriHandler.terminateViewportGesture(
                 for: workspaceId,
