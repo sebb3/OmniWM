@@ -221,8 +221,6 @@ import QuartzCore
     /// differs from what was last applied. That keeps a reconcile pass free in
     /// the steady state and means z-order never depends on activation.
     private func applyWindowLevels(controller: WMController, activeWorkspaceIds: Set<WorkspaceDescriptor.ID>) {
-        guard ScriptingAddition.isAvailable else { return }
-
         var liveTokens: Set<WindowToken> = []
         for ws in controller.workspaceManager.workspaces where activeWorkspaceIds.contains(ws.id) {
             for entry in controller.workspaceManager.entries(in: ws.id) {
@@ -239,6 +237,10 @@ import QuartzCore
         }
 
         appliedSubLevels = appliedSubLevels.filter { liveTokens.contains($0.key) }
+
+        // A window whose level never applied stays out of appliedSubLevels, so
+        // it is retried on the next pass and ordering repairs itself once the
+        // optional addition is back. Absence must not interrupt the user.
     }
 
     /// Restores WindowServer sub-levels before OmniWM relinquishes ownership.
