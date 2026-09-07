@@ -437,6 +437,14 @@ final class WindowRuleEngine {
     /// actually names a layout — `effectiveLayoutAction == .auto` means "don't
     /// touch placement, just apply the other fields", the same convention
     /// `explicitDecision` already uses for ordinary rules.
+    /// Finds the winning user rule without re-running structural admission.
+    /// One-shots are overlaid only after the ordinary evaluator has already
+    /// admitted a real window; requiring its WindowServer evidence again would
+    /// turn that post-admission step into an unrelated deferred decision.
+    func matchingUserRule(for facts: WindowRuleFacts) -> AppRule? {
+        bestMatch(in: compiledUserRules, facts: facts)?.rule
+    }
+
     static func applyingOneShotOverride(_ decision: WindowDecision, oneShot: AppRule) -> WindowDecision {
         // Matches `applyingManualOverride`: an unmanaged disposition (a help tag,
         // a system panel, a transient AX surface a real app throws up before its
