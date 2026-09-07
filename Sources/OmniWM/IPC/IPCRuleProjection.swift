@@ -53,6 +53,7 @@ enum IPCRuleProjection {
             initialContainerPrimarySpan: definition.initialContainerPrimarySpan,
             minWidth: definition.minWidth,
             minHeight: definition.minHeight,
+            windowLevel: definition.windowLevel,
             specificity: rule.specificity,
             isValid: isValid,
             invalidRegexMessage: invalidRegexMessage,
@@ -73,7 +74,8 @@ enum IPCRuleProjection {
                 assignToWorkspace: rule.assignToWorkspace,
                 initialContainerPrimarySpan: rule.initialContainerPrimarySpan,
                 minWidth: rule.minWidth,
-                minHeight: rule.minHeight
+                minHeight: rule.minHeight,
+                windowLevel: ipcRuleWindowLevel(from: rule.windowLevel)
             )
         )
     }
@@ -92,7 +94,8 @@ enum IPCRuleProjection {
             assignToWorkspace: normalized.assignToWorkspace,
             initialContainerPrimarySpan: normalized.initialContainerPrimarySpan,
             minWidth: normalized.minWidth,
-            minHeight: normalized.minHeight
+            minHeight: normalized.minHeight,
+            windowLevel: windowRuleWindowLevel(from: normalized.windowLevel)
         )
     }
 
@@ -108,7 +111,8 @@ enum IPCRuleProjection {
             assignToWorkspace: definition.assignToWorkspace?.trimmedNonEmpty,
             initialContainerPrimarySpan: definition.initialContainerPrimarySpan,
             minWidth: definition.minWidth,
-            minHeight: definition.minHeight
+            minHeight: definition.minHeight,
+            windowLevel: definition.windowLevel
         )
     }
 
@@ -120,6 +124,29 @@ enum IPCRuleProjection {
             .tile
         case .float:
             .float
+        }
+    }
+
+    // `windowLevel` cascades per field, so nil round-trips as nil rather than
+    // collapsing to a default the way `layout` does.
+
+    private static func ipcRuleWindowLevel(from level: WindowRuleWindowLevel?) -> IPCRuleWindowLevel? {
+        switch level {
+        case .none: nil
+        case .auto: .auto
+        case .below: .below
+        case .normal: .normal
+        case .floating: .floating
+        }
+    }
+
+    private static func windowRuleWindowLevel(from level: IPCRuleWindowLevel?) -> WindowRuleWindowLevel? {
+        switch level {
+        case .none: nil
+        case .auto: .auto
+        case .below: .below
+        case .normal: .normal
+        case .floating: .floating
         }
     }
 

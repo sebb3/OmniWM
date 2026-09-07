@@ -2,6 +2,7 @@
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
 import Foundation
+import OmniWMIPC
 
 enum WindowRuleLayoutAction: String, Codable, CaseIterable, Identifiable {
     case auto
@@ -21,7 +22,39 @@ enum WindowRuleLayoutAction: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Window server stacking level applied to matching windows.
+///
+/// Deliberately a closed set of named levels: raw integers would let a rule
+/// place an ordinary window above the menu bar and system alerts.
+enum WindowRuleWindowLevel: String, Codable, CaseIterable, Identifiable {
+    /// Floating windows sit above tiled ones; tiled windows stay normal.
+    ///
+    /// Set once on a catch-all rule this also covers windows OmniWM floats on
+    /// its own, which no per-app rule would ever name.
+    case auto
+    case below
+    case normal
+    case floating
+
+    var id: String {
+        rawValue
+    }
+
+    var displayName: String {
+        switch self {
+        case .auto: "Automatic (float above tiled)"
+        case .below: "Below"
+        case .normal: "Normal"
+        case .floating: "Floating (above tiled)"
+        }
+    }
+}
+
 struct AppRule: Codable, Identifiable, Equatable, Sendable {
+    /// `bundleId = "*"` matches every window and scores zero specificity, so it
+    /// acts as a default that any more specific rule overrides.
+    static let wildcardBundleId = IPCRuleValidator.wildcardBundleId
+
     private enum CodingKeys: String, CodingKey {
         case id
         case bundleId
@@ -35,6 +68,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         case initialContainerPrimarySpan
         case minWidth
         case minHeight
+        case windowLevel
     }
 
     let id: UUID
@@ -49,6 +83,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
     var initialContainerPrimarySpan: Double?
     var minWidth: Double?
     var minHeight: Double?
+    var windowLevel: WindowRuleWindowLevel?
 
     init(
         id: UUID = UUID(),
@@ -62,7 +97,8 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         assignToWorkspace: String? = nil,
         initialContainerPrimarySpan: Double? = nil,
         minWidth: Double? = nil,
-        minHeight: Double? = nil
+        minHeight: Double? = nil,
+        windowLevel: WindowRuleWindowLevel? = nil
     ) {
         self.id = id
         self.bundleId = bundleId
@@ -76,6 +112,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.minWidth = minWidth
         self.minHeight = minHeight
+        self.windowLevel = windowLevel
         normalizeSingleTitle()
     }
 
@@ -97,7 +134,8 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         effectiveLayoutAction != .auto ||
             assignToWorkspace?.isEmpty == false ||
             validInitialContainerPrimarySpan != nil ||
-            minWidth != nil || minHeight != nil
+            minWidth != nil || minHeight != nil ||
+            windowLevel != nil
     }
 
     var hasAdvancedMatchers: Bool {
@@ -110,6 +148,11 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
 
     var hasBundleId: Bool {
         !bundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// A catch-all rule (`bundleId = "*"`) matching every window.
+    var isWildcard: Bool {
+        bundleId.trimmingCharacters(in: .whitespacesAndNewlines) == Self.wildcardBundleId
     }
 
     var hasIdentifyingMatcher: Bool {
@@ -129,7 +172,9 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
 
     var specificity: Int {
         var score = 0
-        if hasBundleId { score += 2 }
+        // A wildcard identifies the rule but adds no specificity, so every
+        // narrower rule outranks it.
+        if hasBundleId, !isWildcard { score += 2 }
         if appNameSubstring?.isEmpty == false { score += 1 }
         if titleSubstring?.isEmpty == false { score += 1 }
         if titleRegex?.isEmpty == false { score += 1 }
@@ -143,6 +188,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
             assignToWorkspace != nil ||
             initialContainerPrimarySpan != nil ||
             minWidth != nil || minHeight != nil ||
+            windowLevel != nil ||
             hasAdvancedMatchers
     }
 
@@ -160,6 +206,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
+        windowLevel = try container.decodeIfPresent(WindowRuleWindowLevel.self, forKey: .windowLevel)
         normalizeSingleTitle()
     }
 
@@ -177,6 +224,7 @@ struct AppRule: Codable, Identifiable, Equatable, Sendable {
         try container.encodeIfPresent(initialContainerPrimarySpan, forKey: .initialContainerPrimarySpan)
         try container.encodeIfPresent(minWidth, forKey: .minWidth)
         try container.encodeIfPresent(minHeight, forKey: .minHeight)
+        try container.encodeIfPresent(windowLevel, forKey: .windowLevel)
     }
 
     private mutating func normalizeSingleTitle() {

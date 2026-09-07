@@ -199,6 +199,19 @@ struct RuleWindowBehaviorSection: View {
             }
             .pickerStyle(.segmented)
 
+            Picker("Window Level", selection: $draft.windowLevel) {
+                Text("Cascade").tag(WindowRuleWindowLevel?.none)
+                ForEach(WindowRuleWindowLevel.allCases) { level in
+                    Text(level.displayName).tag(WindowRuleWindowLevel?.some(level))
+                }
+            }
+
+            SettingsCaption(
+                "Cascade takes the value from the most specific rule that sets it, so a narrow "
+                    + "rule can override this without discarding the rest. The settings above "
+                    + "instead come wholly from the single best-matching rule."
+            )
+
             Toggle("Assign to Workspace", isOn: $draft.assignToWorkspaceEnabled)
                 .onChange(of: draft.assignToWorkspaceEnabled) { _, enabled in
                     guard enabled else { return }
