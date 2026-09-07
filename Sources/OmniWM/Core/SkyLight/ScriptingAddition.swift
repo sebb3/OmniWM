@@ -76,9 +76,11 @@ enum ScriptingAddition {
 
     /// The addition is optional: it needs SIP relaxed and an explicit install,
     /// so every caller has to tolerate it being absent.
-    static var isAvailable: Bool {
-        FileManager.default.fileExists(atPath: socketPath)
-    }
+    ///
+    /// Deliberately no `isAvailable` check against the socket file. The
+    /// addition only unlinks the socket while loading, so a stale one outlives
+    /// a Dock crash and would report a dead addition as healthy. Attempting the
+    /// send is the only honest test, and it fails at once when nothing listens.
 
     @discardableResult
     static func setSubLevel(windowId: UInt32, level: LevelKey) -> Bool {
